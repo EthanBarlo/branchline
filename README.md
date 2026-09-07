@@ -18,7 +18,13 @@ npm run build
 npm start
 ```
 
-`npm run package` produces an unpacked desktop application in `release/`. `npm run dist` produces an installer for the current platform. macOS distribution builds are unsigned unless you configure your own signing identity.
+`npm run package` produces an unpacked desktop application in `release/`. `npm run dist` produces installers; macOS builds include a universal DMG and ZIP for Intel and Apple Silicon. Local builds are unsigned unless you configure signing. The release workflow requires Developer ID signing and notarization.
+
+## App updates
+
+Installed macOS builds check GitHub Releases shortly after startup and every six hours, including when you return after a check becomes overdue. **Updates** beside the app name opens the update dialog; **Check for Updates…** is also in the native application menu. Download when convenient, continue reviewing while it downloads, then choose **Restart to update**. Branchline saves pending comments and finishes accepted review writes before restarting. Saving failures leave the workspace open for retry. Choosing **Later**, closing the dialog or quitting normally does not install an update.
+
+The first signed build containing the updater must be installed manually. Later stable releases can update in-app. Development builds, Windows and Linux do not run update checks. See [release setup and Apple credentials](docs/releases.md) for GitHub Actions secret names, draft releases and signed update testing.
 
 ## Review workflow
 
@@ -61,7 +67,7 @@ Pending comments are saved before switching files or reviews, copying feedback, 
 
 The Electron main process runs read-only Git commands and persists projects and reviews in `reviews.json` under Electron's user-data directory (on macOS, normally `~/Library/Application Support/Branchline/`). The renderer has an isolated, sandboxed preload bridge. Code is rendered locally with `@pierre/diffs` and file navigation uses `@pierre/trees`.
 
-Binary files and files above 1 MiB show a metadata view and can be marked reviewed; inline text comments require a rendered text diff. Symlinks are reviewed as link targets without opening their destinations. Removed submodule pointers are reported as notices. Git must already be available locally. There is no account, hosted service, or automatic network fetch.
+Binary files and files above 1 MiB show a metadata view and can be marked reviewed; inline text comments require a rendered text diff. Symlinks are reviewed as link targets without opening their destinations. Removed submodule pointers are reported as notices. Git must already be available locally. There is no account or hosted review service. Installed macOS builds contact GitHub for app update checks and downloads; repository contents and review feedback stay local. Git repositories are never fetched automatically.
 
 ## Verify
 
@@ -70,6 +76,7 @@ npm test
 npm run build
 npm run test:desktop
 npm run test:desktop:jira
+npm run test:desktop:updates
 ```
 
 The unit/integration tests create temporary Git repositories to exercise divergent targets, working contents, recursive submodules, missing refs, renames, binary/large files, symlinks, approval invalidation, persistence, and export. The desktop smoke test launches the real Electron app with a temporary repository and isolated user data, exercises the UI and clipboard, edits a file externally, checks automatic invalidation, and reopens the app to verify persistence. Screenshots are saved under `artifacts/`.

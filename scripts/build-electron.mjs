@@ -8,6 +8,6 @@ await build({
   format: 'cjs',
   target: 'node22',
   outExtension: { '.js': '.cjs' },
-  external: ['electron'],
+  external: ['electron', 'electron-updater', 'electron-log/main'],
   sourcemap: true,
 });

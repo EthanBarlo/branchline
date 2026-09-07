@@ -1,3 +1,5 @@
+import type { UpdateAPI } from './updates';
+
 export type DiffSide = 'additions' | 'deletions';
 export type FileStatus = 'A' | 'M' | 'D' | 'R' | 'T';
 
@@ -120,8 +122,8 @@ export type NewComment = Omit<ReviewComment, 'id' | 'createdAt' | 'resolved'> & 
 
 export interface FileApproval { fileId: string; fingerprint: string }
 
-export interface ReviewAPI {
-  onBeforeClose(callback: () => Promise<void>): () => void;
+export interface ReviewAPI extends UpdateAPI {
+  onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
   getState(): Promise<AppState>;
   updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings>;
   openJiraTicket(reviewId: string): Promise<void>;

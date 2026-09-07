@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import type { UpdateState } from '../shared/updates';
+import { updatesBusy } from '../shared/updates';
+import { UpdateButton, UpdateDetails } from './components/UpdateControls';
 import {
   ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown,
   Circle, CircleCheck, Clipboard, ExternalLink, FileCode2, FolderGit2, FolderOpen,
@@ -57,6 +61,12 @@ function Brand({ small = false }: { small?: boolean }) {
 }
 
 export default function App() {
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [updatePreparing, setUpdatePreparing] = useState(false);
+  const [showUpdates, setShowUpdates] = useState(false);
+  const [updateBridgeError, setUpdateBridgeError] = useState<string | null>(null);
+  const updateBusyRef = useRef(false);
+  const updateRevision = useRef(-1);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
@@ -150,13 +160,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    return window.reviewAPI?.onBeforeClose(async () => {
+    if (!window.reviewAPI) return;
+    let active = true;
+    const receive = (state: UpdateState) => {
+      if (!active || state.revision < updateRevision.current) return;
+      updateRevision.current = state.revision;
+      updateBusyRef.current = updatesBusy(state);
+      flushSync(() => { setUpdateState(state); setUpdatePreparing(updatesBusy(state)); });
+    };
+    const unsubscribe = window.reviewAPI.onUpdateStateChanged(receive);
+    const unshow = window.reviewAPI.onUpdateDialogRequested(() => setShowUpdates(true));
+    void window.reviewAPI.getUpdateState().then(receive).catch(reason => { if (active) setUpdateBridgeError(errorMessage(reason)); });
+    return () => { active = false; unsubscribe(); unshow(); };
+  }, []);
+
+  useEffect(() => {
+    return window.reviewAPI?.onBeforeClose(async reason => {
+      if (reason === 'install') {
+        updateBusyRef.current = true;
+        flushSync(() => setUpdatePreparing(true));
+      }
       try { await flushPendingComments(); }
       catch (reason) { setError(errorMessage(reason)); throw reason; }
     });
   }, []);
 
   const applyRefresh = useCallback((id: string, result: ReviewRefresh, mutationVersion?: number) => {
+    if (updateBusyRef.current) return;
     if (!mounted.current || selectedIdRef.current !== id || deletedReviewIds.current.has(id)) return;
     const context = reviewContextKey(result.review);
     const viewKey = reviewViewKey(result.review);
@@ -192,6 +222,7 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async (id: string, manual = false) => {
+    if (updateBusyRef.current) return;
     if (refreshInFlight.current.has(id) || targetInFlight.current.has(id)) return;
     refreshInFlight.current.add(id);
     const version = mutationVersions.current[id] || 0;
@@ -461,7 +492,14 @@ export default function App() {
 
   const copyButton = <button className={`button button-primary copy-button ${copyState === 'copied' ? 'is-copied' : ''}`} disabled={!unresolvedComments.length || copyState === 'copying'} onClick={() => void copyFeedback()} title="Copy unresolved comments grouped by file, with line references">{copyState === 'copying' ? <LoaderCircle className="spin" size={15} /> : copyState === 'copied' ? <CheckCheck size={16} /> : <Clipboard size={15} />}<span>{copyState === 'copied' ? 'Copied feedback' : 'Copy feedback'}</span>{unresolvedComments.length > 0 && <span className="button-count">{unresolvedComments.length}</span>}</button>;
 
-  return <div className="app-shell compact-workspace">
+  async function updateAction(action: 'check' | 'download' | 'install') {
+    setUpdateBridgeError(null);
+    try {
+      await (action === 'check' ? window.reviewAPI.checkForUpdates() : action === 'download' ? window.reviewAPI.downloadUpdate() : window.reviewAPI.installUpdate());
+    } catch (reason) { setUpdateBridgeError(errorMessage(reason)); }
+  }
+
+  return <><div className="app-shell compact-workspace" inert={updatePreparing}>
     <div className="project-tab-strip window-chrome">
       <div className="project-tabs" role="tablist" aria-label="Projects">
         {projects.map((item, index) => <button key={item.id} id={`project-tab-${item.id}`} className={`project-tab ${selectedProjectId === item.id ? 'active' : ''}`} role="tab" aria-label={item.name} aria-selected={selectedProjectId === item.id} aria-controls="project-workspace" tabIndex={selectedProjectId === item.id ? 0 : -1} title={item.repoPath} onClick={() => selectProject(item.id)} onKeyDown={event => {
@@ -471,6 +509,7 @@ export default function App() {
         }}><FolderGit2 size={13} /><span>{item.name}</span></button>)}
         <button className="add-project-tab" aria-label="Add project" title="Add project" onClick={() => setShowAddProject(true)}><Plus size={15} /></button>
       </div>
+      <UpdateButton state={updateState} onClick={() => setShowUpdates(true)} />
       <span className="chrome-app-name">branchline<span>.</span></span>
       <button className="icon-button app-settings-button" aria-label="App settings" title="Settings" disabled={initializing || !window.reviewAPI} onClick={() => setShowSettings(true)}><Settings2 size={15} /></button>
     </div>
@@ -531,6 +570,8 @@ export default function App() {
         </>}
       </main>
     </div>
+    {showUpdates && <Modal title="Updates" onClose={() => setShowUpdates(false)} small><UpdateDetails state={updateState} bridgeError={updateBridgeError} onAction={action => void updateAction(action)} onClose={() => setShowUpdates(false)} /></Modal>}
+    <div hidden={showUpdates}>
     {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} onCreated={projectCreated} />}
     {showSettings && <AppSettingsDialog settings={settings} ticket={jiraTicket} onClose={() => setShowSettings(false)} onSaved={updated => { setSettings(updated); setShowSettings(false); }} />}
     {showNewReview && project && <NewReviewDialog key={project.id} project={project} onClose={() => setShowNewReview(false)} onCreated={created => { contexts.current[created.id] = reviewContextKey(created); setReviews(previous => mergeReview(previous, created)); setProjects(previous => previous.map(item => item.id === created.projectId ? { ...item, defaultBaseBranch: created.baseBranch } : item)); void selectReview(created.id); setShowNewReview(false); }} />}
@@ -538,7 +579,8 @@ export default function App() {
     {deleteProject && <Modal title="Remove this project?" onClose={() => !removing && setDeleteProject(null)} small><div className="confirm-copy"><p><strong>{deleteProject.name}</strong> will be removed from Branchline, along with its {reviews.filter(item => item.projectId === deleteProject.id && item.kind === 'saved').length} saved reviews, their comments, and all Current feedback and review progress.</p><p>Your repository and local files will remain untouched.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteProject(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDeleteProject()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Remove project</button></div></Modal>}
     {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
     {deleteReview && <Modal title="Delete this review?" onClose={() => !removing && setDeleteReview(null)} small><div className="confirm-copy"><p><strong>{deleteReview.name}</strong> and its saved comments and review progress will be removed.</p><p>The repository and your code remain on disk.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteReview(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDelete()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Delete review</button></div></Modal>}
-  </div>;
+    </div>
+  </div>{updatePreparing && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>{updateState?.phase === 'installing' ? 'Installing your update…' : 'Saving your workspace…'}</h2><p>Branchline will restart when the update is ready.</p></div>}</>;
 }
 
 function AppSettingsDialog({ settings, ticket, onClose, onSaved }: {
@@ -628,7 +670,7 @@ function Modal({ title, onClose, children, small = false }: { title: string; onC
     const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]') || []).filter(item => item.offsetParent !== null);
     focusables()[0]?.focus();
     const handleKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || dialog?.offsetParent === null) return;
       if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); }
       if (event.key !== 'Tab') return;
       const items = focusables();

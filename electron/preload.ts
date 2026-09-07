@@ -2,11 +2,25 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { ReviewAPI } from '../shared/types';
 
 const api: ReviewAPI = {
+  getUpdateState: () => ipcRenderer.invoke('review:update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('review:update-check'),
+  downloadUpdate: () => ipcRenderer.invoke('review:update-download'),
+  installUpdate: () => ipcRenderer.invoke('review:update-install'),
+  onUpdateStateChanged: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, state: import('../shared/updates').UpdateState) => callback(state);
+    ipcRenderer.on('review:update-state-changed', listener);
+    return () => { ipcRenderer.removeListener('review:update-state-changed', listener); };
+  },
+  onUpdateDialogRequested: callback => {
+    const listener = () => callback();
+    ipcRenderer.on('review:update-show', listener);
+    return () => { ipcRenderer.removeListener('review:update-show', listener); };
+  },
   onBeforeClose: callback => {
-    const listener = () => {
-      void Promise.resolve().then(callback).then(
-        () => ipcRenderer.invoke('review:close-ready', true),
-        () => ipcRenderer.invoke('review:close-ready', false),
+    const listener = (_event: Electron.IpcRendererEvent, request: { id: number; reason: 'close' | 'install' }) => {
+      void Promise.resolve().then(() => callback(request.reason)).then(
+        () => ipcRenderer.invoke('review:close-ready', request.id, true),
+        () => ipcRenderer.invoke('review:close-ready', request.id, false),
       ).catch(() => undefined);
     };
     ipcRenderer.on('review:before-close', listener);

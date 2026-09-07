@@ -1,0 +1,59 @@
+name: Build macOS release draft
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Validate version and prepare signing credentials
+        run: node scripts/prepare-signing.mjs
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Refuse to replace a published release
+        run: node scripts/release-draft.mjs --check
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:desktop
+      - run: npm run test:desktop:jira
+      - run: npm run test:desktop:updates
+      - name: Build, sign and notarize universal DMG and ZIP
+        run: npx --no-install electron-builder --mac --universal --publish never -c.forceCodeSigning=true
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Verify signed archive and update metadata
+        run: npm run release:verify
+      - name: Upload verified artifacts to a draft
+        run: node scripts/release-draft.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Remove temporary notarization key
+        if: always()
+        run: node -e "require('node:fs').rmSync(require('node:path').join(process.env.RUNNER_TEMP, 'branchline-notarization.p8'), {force:true})"
