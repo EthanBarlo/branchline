@@ -1,0 +1,40 @@
+.select-control { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; vertical-align: middle; -webkit-app-region: no-drag; }
+.select-trigger { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 27px; padding: 0 8px; border: 1px solid #3d3d3d; border-radius: 4px; background: #2a2a2a; color: #d3d3d3; font: 11px 'Avenir Next', Avenir, sans-serif; text-align: left; cursor: pointer; -webkit-app-region: no-drag; }
+.select-trigger:hover:not(:disabled) { border-color: #6b6b6b; background: #333333; color: #eeeeee; }
+.select-trigger:focus-visible { outline: 2px solid var(--focus, #a8a8a8); outline-offset: 2px; }
+.select-control.is-open .select-trigger { border-color: #959595; background: #333333; }
+.select-trigger:disabled { opacity: .45; cursor: default; }
+.select-trigger.is-placeholder { color: #a3a3a3; }
+.select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-trigger-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: #b3b3b3; }
+.select-trigger-icon > svg { width: 14px; height: 14px; }
+.select-chevron { flex-shrink: 0; color: #a3a3a3; }
+.select-control.is-open .select-chevron:not(.select-spinner) { transform: rotate(180deg); }
+.select-field { display: flex; width: 100%; }
+.select-field .select-trigger { height: 37px; padding: 0 10px; background: #242424; border-color: #474747; font-size: 12px; }
+.select-field .select-trigger.is-placeholder { color: #a3a3a3; }
+.select-field .select-trigger:hover:not(:disabled) { background: #2a2a2a; border-color: #858585; }
+.select-quiet .select-trigger { height: 24px; padding: 0 4px; border-color: transparent; background: transparent; color: #c4c4c4; }
+.select-quiet .select-trigger:hover:not(:disabled) { background: #333333; color: #e0e0e0; }
+.select-quiet.is-open .select-trigger { background: #333333; border-color: #585858; }
+.select-popup { position: fixed; display: flex; flex-direction: column; min-width: 0; padding: 4px; border: 1px solid #585858; border-radius: 6px; background: #242424; color: #e0e0e0; box-shadow: 0 8px 28px #0008, 0 1px 0 #d3d3d312 inset; z-index: 200; overflow: hidden; -webkit-app-region: no-drag; font: 11px 'Avenir Next', Avenir, sans-serif; text-align: left; }
+.select-search { display: flex; align-items: center; gap: 8px; height: 38px; min-height: 38px; padding: 0 8px; margin-bottom: 4px; border-bottom: 1px solid #3d3d3d; color: #a3a3a3; }
+.select-search > svg { flex-shrink: 0; }
+.select-search input { width: 100%; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; color: #eeeeee; font: 12px 'Avenir Next', Avenir, sans-serif; outline: none; -webkit-app-region: no-drag; }
+.select-search input::placeholder { color: #959595; }
+.select-search input:focus-visible { outline: none; }
+.select-options { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding: 3px; outline: none; scrollbar-width: thin; }
+.select-options::-webkit-scrollbar { width: 6px; }
+.select-options::-webkit-scrollbar-thumb { background: #585858; border: 1px solid #242424; border-radius: 4px; }
+.select-option { display: flex; align-items: center; gap: 9px; min-width: 0; height: 32px; padding: 0 9px; border-radius: 3px; color: #d3d3d3; cursor: pointer; user-select: none; }
+.select-option.is-highlighted { background: #3d3d3d; color: #eeeeee; }
+.select-option.is-selected { color: #e0e0e0; }
+.select-option-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.select-option-description { max-width: 43%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a3a3a3; font-size: 10px; }
+.select-option.is-highlighted .select-option-description { color: #c4c4c4; }
+.select-option-check { display: inline-flex; align-items: center; justify-content: center; width: 13px; flex-shrink: 0; color: #e0e0e0; }
+.select-group { display: flex; align-items: center; height: 24px; padding: 0 9px; color: #959595; font-size: 9px; font-weight: 550; letter-spacing: .45px; }
+.select-empty { display: flex; align-items: center; justify-content: center; min-height: 56px; padding: 12px; color: #a3a3a3; font-size: 11px; }
+.select-spinner { animation: select-spin 1.1s linear infinite; }
+@keyframes select-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .select-spinner { animation-duration: 3s; } }

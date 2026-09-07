@@ -1,0 +1,18 @@
+.review-file-tree-with-actions { display: flex; flex-direction: column; }
+.review-file-tree-with-actions > .review-tree-host { flex: 1; min-height: 0; height: auto; }
+.review-file-tree-with-actions > .review-tree-empty { flex: 1; min-height: 0; }
+.tree-selection-actions { display: flex; align-items: center; gap: 5px; min-height: 31px; padding: 3px 8px; border-top: 1px solid #333; border-bottom: 1px solid #3d3d3d; background: #272727; color: #bdbdbd; font-size: 10px; }
+.tree-selection-actions > span { margin-right: auto; white-space: nowrap; }
+.tree-selection-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 23px; padding: 3px 5px; border: 0; border-radius: 3px; background: transparent; color: #dfdfdf; font: inherit; white-space: nowrap; }
+.tree-selection-actions button:hover:not(:disabled) { background: #3c3c3c; color: #fff; }
+.tree-selection-actions button:disabled { opacity: .35; }
+.tree-action-error { display: flex; gap: 6px; padding: 7px 9px; background: #382724; color: #e6b09b; font-size: 10px; line-height: 1.5; }
+.tree-action-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.tree-action-error > button { align-self: flex-start; display: flex; border: 0; padding: 2px; background: transparent; color: inherit; }
+.tree-review-menu { position: fixed; z-index: 210; width: 208px; padding: 5px; border: 1px solid #505050; border-radius: 6px; background: #262626; color: #e0e0e0; box-shadow: 0 8px 28px #0008, 0 1px 0 #ffffff0b inset; font: 11px 'Avenir Next', Avenir, sans-serif; -webkit-app-region: no-drag; }
+.tree-review-menu-label { padding: 6px 8px 7px; color: #989898; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-review-menu > button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 31px; padding: 6px 8px; border: 0; border-radius: 3px; background: transparent; color: inherit; text-align: left; font: inherit; }
+.tree-review-menu > button > svg { color: #adadad; flex-shrink: 0; }
+.tree-review-menu > button:hover:not(:disabled), .tree-review-menu > button:focus-visible { outline: none; background: #3d3d3d; color: #fff; }
+.tree-review-menu > button:disabled { opacity: .35; cursor: default; }
+.tree-selection-actions button:focus-visible { outline: 2px solid var(--focus, #a8a8a8); outline-offset: 1px; }

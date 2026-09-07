@@ -1,0 +1,42 @@
+.review-diff-viewer { height: 100%; flex: 1; min-height: 0; min-width: 0; overflow: auto; background: var(--bg, #181818); scrollbar-gutter: stable; }
+.review-diff-columns { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 1fr 1fr; background: #1e1e1e; border-bottom: 1px solid var(--border, #333333); color: #a3a3a3; font-size: 10px; line-height: 12px; font-weight: 500; letter-spacing: .03em; }
+.review-diff-columns > span { padding: 5px 14px; }
+.review-diff-columns > span + span { border-left: 1px solid var(--border, #333333); }
+.review-diff-columns.is-unified { display: flex; justify-content: space-between; }
+.review-diff-columns.is-unified > span + span { border-left: 0; }
+.review-code-diff { display: block; min-width: 0; --diffs-font-family: Menlo, Consolas, monospace; --diffs-font-size: 12px; --diffs-line-height: 23px; }
+.review-comment { box-sizing: border-box; margin: 6px 14px 8px 12px; min-width: 0; max-width: 860px; padding: 7px 9px 5px; border: 1px solid #3d3d3d; border-radius: 5px; background: #242424; color: var(--text, #eeeeee); font: 12px/1.65 'Avenir Next', Avenir, sans-serif; text-align: left; letter-spacing: normal; }
+.review-comment.is-editing { border-color: #858585; background: #2a2a2a; }
+.review-comment.is-resolved { border-color: #333333; background: #1e1e1e; }
+.review-comment-body { display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 2px; background: transparent; color: #e0e0e0; font: inherit; line-height: 1.65; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; }
+.review-comment.is-resolved .review-comment-body { color: #a3a3a3; }
+.review-comment textarea { box-sizing: border-box; display: block; width: 100%; min-width: 0; min-height: 32px; max-height: 220px; margin: 0; padding: 5px 7px; border: 1px solid #474747; border-radius: 3px; background: #1e1e1e; color: #eeeeee; font: 12px/20px 'Avenir Next', Avenir, sans-serif; resize: none; overflow-y: auto; outline: none; }
+.review-comment textarea::placeholder { color: #959595; }
+.review-comment textarea:focus { border-color: #a3a3a3; }
+.review-comment textarea:focus-visible { outline: none; }
+.compact-comment-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-height: 23px; padding-top: 3px; }
+.compact-comment-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 3px; border: 0; border-radius: 3px; background: transparent; color: #b3b3b3; font: 9px/14px 'Avenir Next', Avenir, sans-serif; cursor: pointer; }
+.compact-comment-actions button:hover:not(:disabled) { color: #e0e0e0; background: #3d3d3d; }
+.compact-comment-actions button:disabled { opacity: .4; cursor: default; }
+.comment-save-status { margin-right: auto; color: #858585; font-size: 9px; }
+.comment-save-status.has-error { color: #d0a68c; }
+.review-component-error { margin: 5px 0 0; color: #e6b09b; font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-diff-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px; margin: 0; background: #382724; border-bottom: 1px solid #634039; }
+.review-diff-error button { display: inline-flex; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.review-comment-context { margin: 0 0 4px; color: #a3a3a3; font-size: 9px; }
+.review-comment-context summary { cursor: pointer; }
+.review-comment-original-reference { margin-top: 6px; color: #a3a3a3; overflow-wrap: anywhere; }
+.review-comment-context pre { max-height: 180px; overflow: auto; margin: 6px 0 0; padding: 7px; border-radius: 3px; background: #1e1e1e; color: #c4c4c4; font: 11px/1.6 Menlo, Consolas, monospace; }
+.review-file-notice { display: flex; flex-direction: column; align-items: center; padding: 60px 28px 36px; text-align: center; color: #959595; }
+.review-file-notice h3 { margin: 15px 0 8px; color: #e0e0e0; font-size: 16px; font-weight: 500; }
+.review-file-notice p { max-width: 410px; margin: 0 0 18px; color: #a3a3a3; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.review-text-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 10px; border: 1px solid #474747; border-radius: 4px; background: #2a2a2a; color: #e0e0e0; font-family: inherit; font-size: 11px; line-height: 1.4; cursor: pointer; }
+.review-text-button:hover { background: #3d3d3d; }
+.review-top-comments { padding: 6px 12px; border-bottom: 1px solid #333333; }
+.review-top-comments .review-comment { margin: 6px 0; }
+.review-comment button:focus-visible, .review-file-notice button:focus-visible { outline: 2px solid var(--focus, #a8a8a8); outline-offset: 2px; }
+.review-file-tree { flex: 1; min-height: 0; height: 100%; width: 100%; overflow: hidden; }
+.review-tree-host { display: block; width: 100%; height: 100%; --trees-font-family: 'Avenir Next', Avenir, sans-serif; --trees-font-size: 12px; }
+.review-tree-empty { height: 100%; min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 24px; box-sizing: border-box; text-align: center; color: #858585; }
+.review-tree-empty strong { margin-top: 14px; font-size: 12px; font-weight: 500; color: #d3d3d3; }
+.review-tree-empty p { margin: 7px 0 0; max-width: 190px; font-size: 11px; line-height: 1.7; color: #a3a3a3; }
