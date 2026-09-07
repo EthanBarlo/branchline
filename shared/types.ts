@@ -96,7 +96,8 @@ export interface ReviewRefresh {
   requiresTarget?: boolean;
 }
 
-export interface AppState { projects: Project[]; reviews: Review[] }
+export interface AppSettings { jiraBaseUrl: string }
+export interface AppState { projects: Project[]; reviews: Review[]; settings: AppSettings }
 export interface RepoInspection {
   rootPath: string;
   name: string;
@@ -122,6 +123,8 @@ export interface FileApproval { fileId: string; fingerprint: string }
 export interface ReviewAPI {
   onBeforeClose(callback: () => Promise<void>): () => void;
   getState(): Promise<AppState>;
+  updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings>;
+  openJiraTicket(reviewId: string): Promise<void>;
   chooseRepo(): Promise<string | null>;
   inspectRepo(path: string): Promise<RepoInspection>;
   createProject(input: NewProject): Promise<Project>;

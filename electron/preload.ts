@@ -14,6 +14,8 @@ const api: ReviewAPI = {
     return () => { ipcRenderer.removeListener('review:before-close', listener); void ipcRenderer.invoke('review:close-listener', false).catch(() => undefined); };
   },
   getState: () => ipcRenderer.invoke('review:state'),
+  updateSettings: changes => ipcRenderer.invoke('review:settings-update', changes),
+  openJiraTicket: id => ipcRenderer.invoke('review:jira-open', id),
   chooseRepo: () => ipcRenderer.invoke('review:choose-repo'),
   inspectRepo: path => ipcRenderer.invoke('review:inspect', path),
   createProject: input => ipcRenderer.invoke('review:project-create', input),

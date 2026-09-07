@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown,
-  Circle, CircleCheck, Clipboard, FileCode2, FolderGit2, FolderOpen,
+  Circle, CircleCheck, Clipboard, ExternalLink, FileCode2, FolderGit2, FolderOpen,
   GitBranch, GitCompareArrows, GitFork, HelpCircle, Layers3, LoaderCircle,
   MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2,
   TriangleAlert, X,
 } from 'lucide-react';
-import type { DiffSide, Project, RepoInspection, Review, ReviewFile, ReviewSnapshot, ReviewRefresh } from '../shared/types';
+import type { AppSettings, DiffSide, Project, RepoInspection, Review, ReviewFile, ReviewSnapshot, ReviewRefresh } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
+import { extractJiraTicketKey, jiraTicketUrl, normalizeJiraBaseUrl } from '../shared/jira';
 import { DiffViewer } from './components/DiffViewer';
 import { ReviewTree } from './components/ReviewTree';
 import { orderReviewFiles } from './components/reviewFileOrder';
@@ -69,6 +70,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showNewReview, setShowNewReview] = useState(false);
   const [showAddProject, setShowAddProject] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>({ jiraBaseUrl: '' });
+  const [showSettings, setShowSettings] = useState(false);
+  const [openingJira, setOpeningJira] = useState(false);
   const [settingsProject, setSettingsProject] = useState<Project | null>(null);
   const [deleteProject, setDeleteProject] = useState<Project | null>(null);
   const [showFeedback, setShowFeedback] = useState(false);
@@ -114,6 +118,7 @@ export default function App() {
       if (cancelled) return;
       setProjects(state.projects);
       setReviews(state.reviews);
+      setSettings(state.settings);
       const activeIds = new Set(state.reviews.map(item => item.id));
       knownApprovals.current = Object.fromEntries(Object.entries(knownApprovals.current).filter(([key]) => [...activeIds].some(id => key.startsWith(`${id}:`))));
       for (const item of state.reviews) {
@@ -220,6 +225,8 @@ export default function App() {
   const viewKey = review ? reviewViewKey(review) : '';
   const isCurrent = review?.kind === 'current';
   const metadata = review ? reviewMetadata[review.id] : undefined;
+  const featureBranch = isCurrent && metadata?.inspection ? metadata.inspection.currentBranch || '' : review?.featureBranch || '';
+  const jiraTicket = extractJiraTicketKey(featureBranch);
   const currentDetached = Boolean(isCurrent && metadata?.inspection && !metadata.inspection.currentBranch);
   const currentNeedsTarget = Boolean(isCurrent && (metadata?.requiresTarget || !review.baseBranch));
   const snapshot = review ? snapshots[viewKey] : undefined;
@@ -443,6 +450,15 @@ export default function App() {
     if (next) selectFile(next.id);
   }
 
+  async function openJira() {
+    if (!review || openingJira) return;
+    if (!settings.jiraBaseUrl) { setShowSettings(true); return; }
+    setOpeningJira(true);
+    try { await window.reviewAPI.openJiraTicket(review.id); }
+    catch (reason) { setError(errorMessage(reason)); }
+    finally { setOpeningJira(false); }
+  }
+
   const copyButton = <button className={`button button-primary copy-button ${copyState === 'copied' ? 'is-copied' : ''}`} disabled={!unresolvedComments.length || copyState === 'copying'} onClick={() => void copyFeedback()} title="Copy unresolved comments grouped by file, with line references">{copyState === 'copying' ? <LoaderCircle className="spin" size={15} /> : copyState === 'copied' ? <CheckCheck size={16} /> : <Clipboard size={15} />}<span>{copyState === 'copied' ? 'Copied feedback' : 'Copy feedback'}</span>{unresolvedComments.length > 0 && <span className="button-count">{unresolvedComments.length}</span>}</button>;
 
   return <div className="app-shell compact-workspace">
@@ -456,6 +472,7 @@ export default function App() {
         <button className="add-project-tab" aria-label="Add project" title="Add project" onClick={() => setShowAddProject(true)}><Plus size={15} /></button>
       </div>
       <span className="chrome-app-name">branchline<span>.</span></span>
+      <button className="icon-button app-settings-button" aria-label="App settings" title="Settings" disabled={initializing || !window.reviewAPI} onClick={() => setShowSettings(true)}><Settings2 size={15} /></button>
     </div>
     <div className="application-body" id="project-workspace" role={project ? 'tabpanel' : undefined} aria-labelledby={project ? `project-tab-${project.id}` : undefined}>
       <main className="main-workspace">
@@ -472,8 +489,9 @@ export default function App() {
             <div className="branch-comparison">
               {isCurrent ? <Select id="current-target-branch" className={`current-target-control ${!review.baseBranch ? 'needs-target' : ''}`} label="Current target branch" title={review.baseBranch ? `Target: ${review.baseBranch}` : 'Choose the target branch'} value={review.baseBranch} placeholder="Select target branch" searchPlaceholder="Find a branch…" icon={<GitBranch size={12} />} disabled={!metadata?.inspection || changingTarget} loading={changingTarget} options={(metadata?.inspection?.branches || []).map(branch => ({ value: branch, label: branch }))} onChange={target => void changeCurrentTarget(target)} /> : <span className="branch-chip" title={`Target: ${review.baseBranch}`}><GitBranch size={12} />{review.baseBranch}</span>}
               <ArrowLeft size={13} className="compare-arrow" />
-              <span className="branch-chip feature-branch" title={`${isCurrent ? 'Checked out' : 'Feature branch'}: ${review.featureBranch || 'Detached HEAD'}`}><GitBranch size={12} />{isCurrent && metadata?.inspection ? metadata.inspection.currentBranch || 'Detached HEAD' : review.featureBranch || 'Reading checkout…'}</span>
+              <span className="branch-chip feature-branch" title={`${isCurrent ? 'Checked out' : 'Feature branch'}: ${featureBranch || 'Detached HEAD'}`}><GitBranch size={12} />{featureBranch || (metadata?.inspection ? 'Detached HEAD' : 'Reading checkout…')}</span>
             </div>
+            {jiraTicket && <button className="jira-ticket-button" aria-label={`Open ${jiraTicket} in Jira`} title={settings.jiraBaseUrl ? `Open ${jiraTicket} in Jira · ${settings.jiraBaseUrl}` : `Set up Jira to open ${jiraTicket}`} disabled={openingJira} onClick={() => void openJira()}><span>{jiraTicket}</span>{openingJira ? <LoaderCircle size={12} className="spin" /> : <ExternalLink size={12} />}</button>}
             <span className="working-tree-label" title={review.includeWorkingTree ? 'Includes eligible uncommitted changes and new files' : 'Reviewing committed changes only'}>{review.includeWorkingTree ? 'Local edits' : 'Commits only'}</span>
             <div className="toolbar-actions">
               <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
@@ -514,12 +532,48 @@ export default function App() {
       </main>
     </div>
     {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} onCreated={projectCreated} />}
+    {showSettings && <AppSettingsDialog settings={settings} ticket={jiraTicket} onClose={() => setShowSettings(false)} onSaved={updated => { setSettings(updated); setShowSettings(false); }} />}
     {showNewReview && project && <NewReviewDialog key={project.id} project={project} onClose={() => setShowNewReview(false)} onCreated={created => { contexts.current[created.id] = reviewContextKey(created); setReviews(previous => mergeReview(previous, created)); setProjects(previous => previous.map(item => item.id === created.projectId ? { ...item, defaultBaseBranch: created.baseBranch } : item)); void selectReview(created.id); setShowNewReview(false); }} />}
     {settingsProject && <ProjectSettingsDialog project={settingsProject} currentTarget={reviews.find(item => item.projectId === settingsProject.id && item.kind === 'current')?.baseBranch || ''} onClose={() => setSettingsProject(null)} onUpdated={updated => { setProjects(previous => previous.map(item => item.id === updated.id ? updated : item)); setSettingsProject(null); }} onRemove={() => { setDeleteProject(settingsProject); setSettingsProject(null); }} />}
     {deleteProject && <Modal title="Remove this project?" onClose={() => !removing && setDeleteProject(null)} small><div className="confirm-copy"><p><strong>{deleteProject.name}</strong> will be removed from Branchline, along with its {reviews.filter(item => item.projectId === deleteProject.id && item.kind === 'saved').length} saved reviews, their comments, and all Current feedback and review progress.</p><p>Your repository and local files will remain untouched.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteProject(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDeleteProject()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Remove project</button></div></Modal>}
     {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
     {deleteReview && <Modal title="Delete this review?" onClose={() => !removing && setDeleteReview(null)} small><div className="confirm-copy"><p><strong>{deleteReview.name}</strong> and its saved comments and review progress will be removed.</p><p>The repository and your code remain on disk.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteReview(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDelete()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Delete review</button></div></Modal>}
   </div>;
+}
+
+function AppSettingsDialog({ settings, ticket, onClose, onSaved }: {
+  settings: AppSettings; ticket: string | null; onClose: () => void; onSaved: (settings: AppSettings) => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState(settings.jiraBaseUrl);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  let previewUrl = '';
+  try { if (baseUrl.trim()) previewUrl = jiraTicketUrl(normalizeJiraBaseUrl(baseUrl), ticket || 'APP-123'); }
+  catch { /* Show validation errors on save; let the user finish typing first. */ }
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (saving) return;
+    setError(null);
+    setSaving(true);
+    try { onSaved(await window.reviewAPI.updateSettings({ jiraBaseUrl: normalizeJiraBaseUrl(baseUrl) })); }
+    catch (reason) { setError(errorMessage(reason)); setSaving(false); }
+  }
+
+  return <Modal title="Settings" onClose={() => !saving && onClose()} small>
+    <form onSubmit={event => void save(event)} noValidate>
+      <div className="modal-body app-settings-form">
+        <h3>Jira</h3>
+        <p className="settings-description">Open tickets directly from your review’s branch name.</p>
+        <label className="field-label" htmlFor="jira-base-url">Jira base URL</label>
+        <input className="text-input jira-url-input" id="jira-base-url" type="url" inputMode="url" placeholder="https://your-team.atlassian.net" autoComplete="off" spellCheck={false} value={baseUrl} aria-describedby="jira-url-hint" aria-invalid={error ? true : undefined} disabled={saving} onChange={event => { setBaseUrl(event.target.value); setError(null); }} />
+        <p className="settings-hint" id="jira-url-hint">Use your Jira site address, including any path such as <code>/jira</code>. Leave blank to clear it.</p>
+        <div className="jira-link-preview"><span>{ticket ? `Detected ${ticket}` : 'Example: feature/APP-123-update'}</span><code>{previewUrl || `${baseUrl.trim() ? 'Your Jira URL' : 'https://your-team.atlassian.net'}/browse/${ticket || 'APP-123'}`}</code></div>
+        {error && <div className="form-error" role="alert"><TriangleAlert size={15} /><span>{error}</span></div>}
+      </div>
+      <div className="modal-footer"><span className="modal-local-note">Applies to all projects</span><button type="button" className="button button-secondary" disabled={saving} onClick={onClose}>Cancel</button><button type="submit" className="button button-primary" disabled={saving || baseUrl === settings.jiraBaseUrl}>{saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}Save settings</button></div>
+    </form>
+  </Modal>;
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {

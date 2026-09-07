@@ -37,6 +37,12 @@ Branch and review pickers open an in-app list with a search field. Type to filte
 
 Current keeps feedback separately for each branch-and-target comparison. Switching branches or targets changes the active feedback; returning restores the previous comments and any approvals that still match the files. A detached HEAD pauses Current until a branch is checked out. Saved reviews stay tied to their explicit feature branch. The selected review refreshes every four seconds while the window is visible and on returning to it; manual refresh is also available.
 
+## Jira tickets
+
+Open **Settings** from the top-right settings button and enter your **Jira base URL**, such as `https://your-team.atlassian.net` or `https://jira.example.com/jira`. The setting is saved locally and applies to all projects. Use the site address before `/browse`, as described in [Atlassian’s site URL guide](https://support.atlassian.com/jira/kb/find-your-site-url-to-set-up-the-jira-data-center-and-server-mobile-app/).
+
+When a branch contains a ticket key, such as `feature/APP-123-add-search`, an **APP-123 ↗** button appears beside it. Click to open the ticket in your default browser. Lowercase keys are normalized to uppercase; if a branch contains multiple keys, the first matching key is used. Current uses the latest checked-out branch, while saved reviews use their feature branch. Branches without a ticket key have no ticket button. If Jira has not been configured, the button opens Settings. Clear the base URL to remove the configuration.
+
 ## Comparison semantics
 
 Each repository is compared from `merge-base(target, feature)` to the feature revision (or its current working contents when eligible). This is the meaning of `git diff target...feature` for committed changes. Target-only commits do not appear as feature changes.
@@ -63,6 +69,9 @@ Binary files and files above 1 MiB show a metadata view and can be marked review
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:jira
 ```
 
 The unit/integration tests create temporary Git repositories to exercise divergent targets, working contents, recursive submodules, missing refs, renames, binary/large files, symlinks, approval invalidation, persistence, and export. The desktop smoke test launches the real Electron app with a temporary repository and isolated user data, exercises the UI and clipboard, edits a file externally, checks automatic invalidation, and reopens the app to verify persistence. Screenshots are saved under `artifacts/`.
+
+The Jira desktop check covers settings, branch detection, and persistence using isolated test data. It intercepts browser opening to verify the destination without visiting Jira.

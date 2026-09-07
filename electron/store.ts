@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
-import type { AppState, FileApproval, NewComment, NewProject, NewReview, Project, Review, ReviewSnapshot } from '../shared/types';
+import type { AppSettings, AppState, FileApproval, NewComment, NewProject, NewReview, Project, Review, ReviewSnapshot } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
+import { normalizeJiraBaseUrl } from '../shared/jira';
 
 function nonempty(value: unknown, label: string, max = 20000, trim = true): string {
   if (typeof value !== 'string' || !(trim ? value.trim() : value) || value.length > max || value.includes('\0')) {
@@ -83,7 +84,16 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
   let reviews = parsed.reviews;
   if (new Set(reviews.map(review => review.id)).size !== reviews.length) throw invalid();
   let projects: Project[];
-  let migrated = false;
+  let settings: AppSettings = { jiraBaseUrl: '' };
+  let migrated = !Object.hasOwn(parsed, 'settings');
+  if (!migrated) {
+    if (!record(parsed.settings) || !Object.hasOwn(parsed.settings, 'jiraBaseUrl')) throw invalid();
+    try {
+      const jiraBaseUrl = normalizeJiraBaseUrl(parsed.settings.jiraBaseUrl);
+      settings = { ...parsed.settings, jiraBaseUrl };
+      migrated = jiraBaseUrl !== parsed.settings.jiraBaseUrl;
+    } catch { throw invalid(); }
+  }
   if (Object.hasOwn(parsed, 'projects')) {
     if (!Array.isArray(parsed.projects) || !parsed.projects.every(validProject)) throw invalid();
     projects = parsed.projects;
@@ -129,11 +139,11 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
     reviews = [...reviews.map(review => ({ ...review, kind: 'saved' as const })), ...projects.map(newCurrentReview)];
     migrated ||= projects.length > 0;
   }
-  return { state: { ...parsed, projects, reviews }, migrated };
+  return { state: { ...parsed, projects, reviews, settings }, migrated };
 }
 
 export class ReviewStore {
-  private state: AppState = { projects: [], reviews: [] };
+  private state: AppState = { projects: [], reviews: [], settings: { jiraBaseUrl: '' } };
   private pending: Promise<unknown> = Promise.resolve();
   private loadError: Error | null = null;
   constructor(private readonly filePath: string) {}
@@ -154,6 +164,17 @@ export class ReviewStore {
   }
 
   getState(): AppState { return structuredClone(this.state); }
+  getSettings(): AppSettings { return structuredClone(this.state.settings); }
+  updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings> {
+    let changed = false;
+    return this.mutate(() => {
+      if (!record(changes) || !Object.hasOwn(changes, 'jiraBaseUrl')) throw new Error('Provide a Jira base URL, or leave it blank to clear it.');
+      const jiraBaseUrl = normalizeJiraBaseUrl(changes.jiraBaseUrl);
+      changed = this.state.settings.jiraBaseUrl !== jiraBaseUrl;
+      if (changed) this.state.settings = { ...this.state.settings, jiraBaseUrl };
+      return this.state.settings;
+    }, () => changed);
+  }
   getProject(id: string): Project {
     const project = this.state.projects.find(item => item.id === id);
     if (!project) throw new Error('This project no longer exists.');

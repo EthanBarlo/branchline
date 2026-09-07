@@ -54,6 +54,7 @@
 .add-project-tab:hover { background: #333333; color: #e0e0e0; }
 .chrome-app-name { display: inline-flex; align-items: center; gap: 5px; padding-left: 9px; padding-right: 3px; font-size: 11px; font-weight: 550; letter-spacing: -.3px; color: #6b6b6b; }
 .chrome-app-name > span { color: #a3a3a3; }
+.app-settings-button { align-self: center; width: 28px; height: 28px; margin-left: 10px; flex-shrink: 0; }
 .application-body { display: flex; flex: 1; min-height: 0; }
 .main-workspace { min-width: 0; flex: 1; display: flex; flex-direction: column; position: relative; overflow: hidden; }
 .review-toolbar { display: flex; align-items: center; gap: 7px; height: 40px; min-height: 40px; padding: 0 11px; border-bottom: 1px solid var(--border); background: #1e1e1e; position: relative; z-index: 12; }
@@ -92,6 +93,11 @@
 .branch-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; min-width: 0; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #b3b3b3; font: 10px var(--code-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .branch-chip > svg { flex-shrink: 0; color: #a3a3a3; }
 .feature-branch { color: #d3d3d3; }
+.jira-ticket-button { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; max-width: 145px; height: 25px; padding: 0 7px; background: #292929; border: 1px solid #414141; border-radius: 4px; color: #d3d3d3; font: 10px var(--code-font); }
+.jira-ticket-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jira-ticket-button > svg { flex-shrink: 0; color: #a3a3a3; }
+.jira-ticket-button:hover:not(:disabled) { border-color: #737373; background: #333333; color: #eeeeee; }
+.jira-ticket-button:disabled { opacity: .5; }
 .compare-arrow { color: #858585; flex-shrink: 0; }
 .current-target-control { min-width: 92px; max-width: 216px; }
 .current-target-control .select-trigger { font-family: var(--code-font); }
@@ -268,6 +274,14 @@
 .project-folder-note > svg { flex-shrink: 0; margin-top: 3px; }
 .project-folder-note > p { margin: 0; font-size: 10px; line-height: 1.8; color: #a3a3a3; }
 .project-settings-form { padding-top: 12px; }
+.app-settings-form { padding-top: 6px; }
+.app-settings-form h3 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+.settings-description, .settings-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.settings-hint { margin-top: 8px; font-size: 10px; }
+.jira-url-input { font: 11px var(--code-font); }
+.jira-link-preview { display: flex; flex-direction: column; gap: 7px; margin-top: 20px; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); }
+.jira-link-preview > span { color: var(--muted); font-size: 10px; }
+.jira-link-preview > code { font-size: 10px; line-height: 1.7; overflow-wrap: anywhere; color: #c4c4c4; user-select: text; }
 .settings-project-location { display: flex; align-items: flex-start; gap: 8px; color: #a3a3a3; margin-top: 14px; }
 .settings-project-location > svg { flex-shrink: 0; }
 .settings-project-location > span { font: 9px/1.7 var(--code-font); overflow-wrap: anywhere; }

@@ -1,10 +1,11 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inspectRepo } from './git';
 import { ReviewStore } from './store';
 import { ProjectService } from './project-service';
 import { ReviewService } from './review-service';
+import { JiraService } from './jira-service';
 import type { FileApproval, NewComment, NewProject, NewReview } from '../shared/types';
 
 // A separate location is used by the automated desktop smoke test.
@@ -13,6 +14,7 @@ app.setName('Branchline');
 let store: ReviewStore;
 let projects: ProjectService;
 let reviews: ReviewService;
+let jira: JiraService;
 let window: BrowserWindow | null = null;
 let closeListenerReady = false;
 let closeRequested = false;
@@ -34,6 +36,8 @@ function installHandlers() {
     });
   };
   handle('state', () => store.getState());
+  handle('settings-update', (changes: { jiraBaseUrl: string }) => store.updateSettings(changes));
+  handle('jira-open', (id: string) => jira.openJiraTicket(id));
   handle('close-listener', (ready: boolean) => { closeListenerReady = ready === true; });
   handle('close-ready', (saved: boolean) => {
     if (!closeRequested) return;
@@ -110,6 +114,7 @@ app.whenReady().then(async () => {
     await store.load();
     projects = new ProjectService(store);
     reviews = new ReviewService(store);
+    jira = new JiraService(store, url => shell.openExternal(url));
     installHandlers();
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'Branchline', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },

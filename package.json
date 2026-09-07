@@ -1,6 +1,6 @@
 {
   "name": "branchline",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Local code review across repositories and submodules",
   "type": "module",
@@ -11,6 +11,7 @@
     "start": "electron .",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:desktop": "node scripts/smoke.mjs",
+    "test:desktop:jira": "node scripts/smoke-jira.mjs",
     "typecheck": "tsc --noEmit",
     "package": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder"
