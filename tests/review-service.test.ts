@@ -26,10 +26,30 @@ async function fixture() {
   const inspect = async () => ({ rootPath: '/repository', name: 'Monorepo', currentBranch: live.branch, branches: ['main', 'release', 'feature/one', 'feature/two'] });
   const build = async (config: ReviewConfig): Promise<ReviewSnapshot> => {
     live.builds.push(config);
+    const snapshot = { reviewId: config.id, files: [{ ...file, fingerprint: live.fingerprint }, ...live.extraFiles], repos: [], warnings: [], refreshedAt: new Date().toISOString(), fingerprint: live.fingerprint };
     await live.onBuild?.();
-    return { reviewId: config.id, files: [{ ...file, fingerprint: live.fingerprint }, ...live.extraFiles], repos: [], warnings: [], refreshedAt: new Date().toISOString(), fingerprint: live.fingerprint };
+    return snapshot;
   };
   return { store, project, live, service: new ReviewService(store, inspect, build), id: currentReviewId(project.id), cleanup: () => rm(dir, { recursive: true, force: true }) };
+}
+
+function blockNextSnapshot(f: Awaited<ReturnType<typeof fixture>>) {
+  let started!: () => void;
+  let finish!: () => void;
+  const building = new Promise<void>(resolve => { started = resolve; });
+  const barrier = new Promise<void>(resolve => { finish = resolve; });
+  f.live.onBuild = async () => { f.live.onBuild = undefined; started(); await barrier; };
+  return { building, finish };
+}
+
+async function beforeSnapshotFinishes<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Feedback waited for the blocked snapshot.')), 2000); }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 test('Current resolves the checkout but does not compare anything until a target is selected', async t => {
@@ -98,7 +118,7 @@ test('feedback actions detect a checkout switch before the renderer polls and re
   assert.equal(returned.comments[0].resolved, false);
 });
 
-test('Current discards a diff built while switching branches and rejects approval of a changed file', async t => {
+test('Current discards a diff built while switching branches and refresh invalidates marks of older contents', async t => {
   const f = await fixture(); t.after(f.cleanup);
   let builds = 0;
   f.live.onBuild = async () => { if (builds++ === 0) f.live.branch = 'feature/two'; };
@@ -106,6 +126,10 @@ test('Current discards a diff built while switching branches and rejects approva
   assert.equal(result.review.featureBranch, 'feature/two');
   assert.deepEqual(f.live.builds.map(config => config.featureBranch), ['feature/one', 'feature/two']);
   f.live.fingerprint = 'newer-contents';
+  const approved = await f.service.setApproval(f.id, file.id, file.fingerprint, true, reviewContextKey(result.review));
+  assert.equal(approved.approvals[file.id], file.fingerprint, 'mark the exact contents the user saw without scanning again');
+  assert.equal(f.live.builds.length, 2);
+  assert.deepEqual((await f.service.refreshReview(f.id)).review.approvals, {});
   await assert.rejects(() => f.service.setApproval(f.id, file.id, file.fingerprint, true, reviewContextKey(result.review)), /file changed/);
   assert.deepEqual(f.store.getReview(f.id).approvals, {});
 });
@@ -131,23 +155,25 @@ test('detached HEAD suspends Current and a saved review remains on its explicit 
 test('a target change queued during a refresh rejects a later feedback action from the old view', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const current = (await f.service.setCurrentTarget(f.project.id, 'main')).review;
-  let started!: () => void;
-  const building = new Promise<void>(resolve => { started = resolve; });
-  let finish!: () => void;
-  const barrier = new Promise<void>(resolve => { finish = resolve; });
-  f.live.onBuild = async () => { f.live.onBuild = undefined; started(); await barrier; };
+  const blocked = blockNextSnapshot(f);
   const refreshing = f.service.refreshReview(f.id);
-  await building;
-  const switching = f.service.setCurrentTarget(f.project.id, 'release');
-  const commenting = f.service.addComment(f.id, comment, reviewContextKey(current));
-  const rejected = assert.rejects(() => commenting, /branch or target changed/);
-  finish();
-  await Promise.all([refreshing, switching, rejected]);
+  await blocked.building;
+  try {
+    f.live.fingerprint = 'release-version';
+    const switching = f.service.setCurrentTarget(f.project.id, 'release');
+    const commenting = f.service.addComment(f.id, comment, reviewContextKey(current));
+    const rejected = assert.rejects(() => commenting, /branch or target changed/);
+    const [release] = await beforeSnapshotFinishes(Promise.all([switching, rejected]));
+    assert.equal(release.review.baseBranch, 'release');
+    assert.equal(release.snapshot.fingerprint, 'release-version');
+    await f.service.setApproval(f.id, file.id, 'release-version', true, reviewContextKey(release.review));
+  } finally { blocked.finish(); await refreshing; }
   assert.equal(f.store.getReview(f.id).baseBranch, 'release');
   assert.deepEqual(f.store.getReview(f.id).comments, []);
+  assert.equal(f.store.getReview(f.id).approvals[file.id], 'release-version', 'the obsolete main scan must not invalidate marks from the release comparison');
 });
 
-test('a batch refreshes once and validates every selected file before approving any', async t => {
+test('a batch uses the loaded snapshot and validates every selected file before approving any', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const second = { ...file, id: 'packages/api/other.ts', path: 'other.ts', repoRelativePath: 'packages/api', fingerprint: 'second-version' };
   f.live.extraFiles = [second];
@@ -157,18 +183,21 @@ test('a batch refreshes once and validates every selected file before approving 
   f.live.builds.length = 0;
   await assert.rejects(() => f.service.setApprovals(f.id, [selection[0], { ...selection[1], fingerprint: 'stale-version' }], true, key), /file changed/);
   assert.deepEqual(f.store.getReview(f.id).approvals, {}, 'a stale second file must not leave the first file approved');
-  assert.equal(f.live.builds.length, 1);
+  assert.equal(f.live.builds.length, 0);
   f.live.builds.length = 0;
   const approved = await f.service.setApprovals(f.id, selection, true, key);
   assert.deepEqual(approved.approvals, { [file.id]: file.fingerprint, [second.id]: second.fingerprint });
-  assert.equal(f.live.builds.length, 1, 'the batch uses one shared comparison instead of refreshing per selected file');
+  assert.equal(f.live.builds.length, 0, 'marking files never starts a new comparison');
 });
 
-test('saved-review batches use a fresh snapshot and unapproval permits files absent from the diff', async t => {
+test('saved-review batches use cached contents until refresh and unapproval permits files absent from the diff', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const saved = await f.store.createReview({ projectId: f.project.id, featureBranch: 'feature/two', baseBranch: 'main' });
   await f.service.refreshReview(saved.id);
   f.live.fingerprint = 'new-file-version';
+  assert.equal((await f.service.setApproval(saved.id, file.id, file.fingerprint, true)).approvals[file.id], file.fingerprint);
+  assert.equal(f.live.builds.length, 1);
+  await f.service.refreshReview(saved.id);
   await assert.rejects(() => f.service.setApprovals(saved.id, [{ fileId: file.id, fingerprint: file.fingerprint }], true), /file changed/);
   assert.deepEqual(f.store.getReview(saved.id).approvals, {});
   await f.store.setApprovals(saved.id, [{ fileId: 'removed.ts', fingerprint: 'previous-version' }], true);
@@ -177,15 +206,165 @@ test('saved-review batches use a fresh snapshot and unapproval permits files abs
   await assert.rejects(() => f.service.setApprovals(saved.id, [{ fileId: 'removed.ts', fingerprint: '' }], false), /File version/);
 });
 
-test('a checkout switch during batch refresh rejects the entire captured Current selection', async t => {
+test('a checkout switch before the next refresh rejects the entire captured Current selection', async t => {
   const f = await fixture(); t.after(f.cleanup);
-  const current = (await f.service.setCurrentTarget(f.project.id, 'main')).review;
   f.live.extraFiles = [{ ...file, id: 'second.ts', path: 'second.ts' }];
-  let switched = false;
-  f.live.onBuild = async () => { if (!switched) { switched = true; f.live.branch = 'feature/two'; } };
+  const current = (await f.service.setCurrentTarget(f.project.id, 'main')).review;
+  f.live.branch = 'feature/two';
+  f.live.builds.length = 0;
   await assert.rejects(() => f.service.setApprovals(f.id, [
     { fileId: file.id, fingerprint: file.fingerprint }, { fileId: 'second.ts', fingerprint: file.fingerprint },
   ], true, reviewContextKey(current)), /branch or target changed/);
   assert.deepEqual(f.store.getReview(f.id).approvals, {});
   assert.deepEqual(f.store.getReview(f.id).currentContexts?.[reviewContextKey(current)].approvals, {});
+  assert.equal(f.live.builds.length, 0, 'the checkout check does not build a comparison');
 });
+
+for (const kind of ['current', 'saved'] as const) {
+  test(`${kind} marks and comment changes save while a background snapshot is blocked`, async t => {
+    const f = await fixture(); t.after(f.cleanup);
+    const unchanged = { ...file, id: 'unchanged.ts', path: 'unchanged.ts', fingerprint: 'unchanged-version' };
+    f.live.extraFiles = [unchanged];
+    const review = kind === 'current'
+      ? (await f.service.setCurrentTarget(f.project.id, 'main')).review
+      : await f.store.createReview({ projectId: f.project.id, featureBranch: 'feature/one', baseBranch: 'main' });
+    if (kind === 'saved') await f.service.refreshReview(review.id);
+    const key = reviewContextKey(review);
+    const before = await f.service.addComment(review.id, { ...comment, body: 'Remove this note.' }, key);
+    const deletedId = before.comments[0].id;
+    f.live.builds.length = 0;
+    f.live.fingerprint = 'new-background-version';
+    const blocked = blockNextSnapshot(f);
+    const refreshing = f.service.refreshReview(review.id);
+    await blocked.building;
+    try {
+      await beforeSnapshotFinishes((async () => {
+        const marked = await f.service.setApproval(review.id, file.id, file.fingerprint, true, key);
+        assert.equal(marked.approvals[file.id], file.fingerprint);
+        await f.service.setApproval(review.id, unchanged.id, unchanged.fingerprint, true, key);
+        const added = await f.service.addComment(review.id, comment, key);
+        const addedId = added.comments.find(item => item.id !== deletedId)!.id;
+        await f.service.updateComment(review.id, addedId, { body: 'Updated while the agent edits.' }, key);
+        await f.service.updateComment(review.id, addedId, { resolved: true }, key);
+        await f.service.updateComment(review.id, addedId, { resolved: false }, key);
+        await f.service.deleteComment(review.id, deletedId, key);
+        const stored = f.store.getReview(review.id);
+        assert.deepEqual(stored.comments.map(item => [item.id, item.body, item.resolved]), [[addedId, 'Updated while the agent edits.', false]]);
+        assert.equal(f.live.builds.length, 1, 'feedback must not request another snapshot');
+      })());
+    } finally { blocked.finish(); await refreshing; }
+    const refreshed = f.store.getReview(review.id);
+    assert.deepEqual(refreshed.approvals, { [unchanged.id]: unchanged.fingerprint }, 'the finished scan invalidates only the older reviewed version');
+    assert.deepEqual(refreshed.comments.map(item => [item.body, item.resolved]), [['Updated while the agent edits.', false]], 'publishing a background scan preserves current feedback edits and deletions');
+    assert.equal(f.live.builds.length, 1);
+  });
+}
+
+test('local markers require a loaded snapshot and never start a scan themselves', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const current = await f.store.switchCurrentContext(f.project.id, 'feature/one', 'main');
+  const saved = await f.store.createReview({ projectId: f.project.id, featureBranch: 'feature/one', baseBranch: 'main' });
+  for (const review of [current, saved]) {
+    await assert.rejects(() => f.service.setApproval(review.id, file.id, file.fingerprint, true, reviewContextKey(review)), /Open or refresh.*before marking files reviewed/);
+    assert.deepEqual(f.store.getReview(review.id).approvals, {});
+  }
+  assert.equal(f.live.builds.length, 0);
+  await f.service.refreshReview(f.id);
+  assert.equal((await f.service.setApproval(f.id, file.id, file.fingerprint, true, reviewContextKey(current))).approvals[file.id], file.fingerprint);
+});
+
+test('a checkout switch during a blocked scan cannot publish the previous branch or its snapshot', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const current = (await f.service.setCurrentTarget(f.project.id, 'main')).review;
+  await f.service.addComment(f.id, comment, reviewContextKey(current));
+  const blocked = blockNextSnapshot(f);
+  const refreshing = f.service.refreshReview(f.id);
+  await blocked.building;
+  try {
+    f.live.branch = 'feature/two';
+    f.live.fingerprint = 'branch-two-version';
+    await beforeSnapshotFinishes(assert.rejects(() => f.service.setApproval(f.id, file.id, file.fingerprint, true, reviewContextKey(current)), /branch or target changed/));
+  } finally { blocked.finish(); }
+  const refreshed = await refreshing;
+  assert.equal(refreshed.review.featureBranch, 'feature/two');
+  assert.equal(refreshed.snapshot.fingerprint, 'branch-two-version');
+  assert.deepEqual(refreshed.review.comments, []);
+  assert.deepEqual(refreshed.review.approvals, {});
+  f.live.branch = 'feature/one';
+  assert.deepEqual((await f.service.refreshReview(f.id)).review.comments.map(item => item.body), [comment.body]);
+});
+
+test('switching targets away and back does not let an earlier scan replace the newer version of that context', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.service.setCurrentTarget(f.project.id, 'main');
+  const blocked = blockNextSnapshot(f);
+  const refreshing = f.service.refreshReview(f.id);
+  await blocked.building;
+  try {
+    await beforeSnapshotFinishes((async () => {
+      await f.service.setCurrentTarget(f.project.id, 'release');
+      f.live.fingerprint = 'updated-main-version';
+      const returned = await f.service.setCurrentTarget(f.project.id, 'main');
+      await f.service.setApproval(f.id, file.id, 'updated-main-version', true, reviewContextKey(returned.review));
+      await f.service.addComment(f.id, { ...comment, body: 'Feedback on the updated comparison.', fingerprint: 'updated-main-version' }, reviewContextKey(returned.review));
+    })());
+  } finally { blocked.finish(); }
+  const refreshed = await refreshing;
+  assert.equal(refreshed.review.baseBranch, 'main');
+  assert.equal(refreshed.snapshot.fingerprint, 'updated-main-version');
+  assert.deepEqual(refreshed.review.approvals, { [file.id]: 'updated-main-version' });
+  assert.deepEqual(refreshed.review.comments.map(item => item.body), ['Feedback on the updated comparison.']);
+});
+
+test('a new refresh and an obsolete scan retry cannot publish conflicting versions of the same context', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const initial = (await f.service.setCurrentTarget(f.project.id, 'main')).review;
+  const first = blockNextSnapshot(f);
+  const firstRefresh = f.service.refreshReview(f.id);
+  await first.building;
+  const second = blockNextSnapshot(f);
+  const secondRefresh = f.service.setCurrentTarget(f.project.id, 'release');
+  await second.building;
+  let retry: ReturnType<typeof blockNextSnapshot> | undefined;
+  let latestRefresh: Promise<Awaited<ReturnType<ReviewService['refreshReview']>>> | undefined;
+  try {
+    f.live.branch = 'feature/two';
+    await beforeSnapshotFinishes(assert.rejects(() => f.service.addComment(f.id, comment, reviewContextKey(initial)), /branch or target changed/));
+    f.live.fingerprint = 'retry-version';
+    retry = blockNextSnapshot(f);
+    first.finish();
+    await retry.building;
+    f.live.fingerprint = 'later-version';
+    latestRefresh = f.service.refreshReview(f.id);
+    // This queued mutation lets the new refresh prepare if it starts another
+    // scan, while leaving the retry's snapshot promise blocked.
+    await beforeSnapshotFinishes(f.service.copyFeedback(f.id, reviewContextKey(f.store.getReview(f.id))));
+  } finally {
+    first.finish(); second.finish(); retry?.finish();
+  }
+  const [earlier, target, latest] = await Promise.all([firstRefresh, secondRefresh, latestRefresh!]);
+  assert.equal(earlier.snapshot.fingerprint, latest.snapshot.fingerprint);
+  assert.equal(target.snapshot.fingerprint, latest.snapshot.fingerprint);
+  assert.equal(latest.review.featureBranch, 'feature/two');
+  const approved = await f.service.setApproval(f.id, file.id, latest.snapshot.files[0].fingerprint, true, reviewContextKey(latest.review));
+  assert.equal(approved.approvals[file.id], latest.snapshot.files[0].fingerprint, 'the cache must retain the latest completed comparison');
+});
+
+for (const removal of ['review', 'project'] as const) {
+  test(`deleting a ${removal} during a snapshot never restores the removed review or its cache`, async t => {
+    const f = await fixture(); t.after(f.cleanup);
+    const saved = await f.store.createReview({ projectId: f.project.id, featureBranch: 'feature/one', baseBranch: 'main' });
+    await f.service.refreshReview(saved.id);
+    const blocked = blockNextSnapshot(f);
+    const refreshing = f.service.refreshReview(saved.id);
+    const rejected = assert.rejects(() => refreshing, /being removed|no longer exists/);
+    await blocked.building;
+    const deleting = removal === 'review' ? f.service.deleteReview(saved.id) : f.service.deleteProject(f.project.id);
+    blocked.finish();
+    await Promise.all([deleting, rejected]);
+    assert.equal(f.store.getState().reviews.some(review => review.id === saved.id), false);
+    if (removal === 'project') assert.equal(f.store.getState().projects.some(project => project.id === f.project.id), false);
+    await assert.rejects(() => f.service.setApproval(saved.id, file.id, file.fingerprint, true), /no longer exists/);
+    await assert.rejects(() => f.service.refreshReview(saved.id), /no longer exists/);
+  });
+}

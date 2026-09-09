@@ -3,16 +3,21 @@ import { flushSync } from 'react-dom';
 import type { UpdateState } from '../shared/updates';
 import { updatesBusy } from '../shared/updates';
 import { UpdateButton, UpdateDetails } from './components/UpdateControls';
+import { SettingsView, type SettingsSection } from './components/SettingsView';
+import { JiraIssuePanel, ProjectIntegrationDialog, PublicationStatus, PullRequestsDialog, RemoteReviewControls } from './components/IntegrationControls';
+import { MergeCompletion } from './components/MergeCompletion';
+import { pullRequestKey } from '../shared/integrations';
+import type { IntegrationState, RemoteReviewState } from '../shared/integrations';
 import {
   ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown,
   Circle, CircleCheck, Clipboard, ExternalLink, FileCode2, FolderGit2, FolderOpen,
-  GitBranch, GitCompareArrows, GitFork, HelpCircle, Layers3, LoaderCircle,
+  GitBranch, GitCompareArrows, GitFork, GitPullRequest, HelpCircle, Layers3, LoaderCircle,
   MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2,
   TriangleAlert, X,
 } from 'lucide-react';
 import type { AppSettings, DiffSide, Project, RepoInspection, Review, ReviewFile, ReviewSnapshot, ReviewRefresh } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
-import { extractJiraTicketKey, jiraTicketUrl, normalizeJiraBaseUrl } from '../shared/jira';
+import { extractJiraTicketKey } from '../shared/jira';
 import { DiffViewer } from './components/DiffViewer';
 import { ReviewTree } from './components/ReviewTree';
 import { orderReviewFiles } from './components/reviewFileOrder';
@@ -63,6 +68,7 @@ function Brand({ small = false }: { small?: boolean }) {
 export default function App() {
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updatePreparing, setUpdatePreparing] = useState(false);
+  const [closePreparing, setClosePreparing] = useState(false);
   const [showUpdates, setShowUpdates] = useState(false);
   const [updateBridgeError, setUpdateBridgeError] = useState<string | null>(null);
   const updateBusyRef = useRef(false);
@@ -82,6 +88,19 @@ export default function App() {
   const [showAddProject, setShowAddProject] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({ jiraBaseUrl: '' });
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('jira');
+  const [showLegacyLinks, setShowLegacyLinks] = useState(false);
+  const openingSettings = useRef(false);
+  const [integrations, setIntegrations] = useState<IntegrationState>({ connections: [], projects: {} });
+  const [integrationRevision, setIntegrationRevision] = useState(0);
+  const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
+  const [showPullRequests, setShowPullRequests] = useState(false);
+  const [remoteStates, setRemoteStates] = useState<Record<string, RemoteReviewState>>({});
+  const [jiraLinks, setJiraLinks] = useState<Record<string, { key: string; url: string } | null>>({});
+  const [jiraLinkRevision, setJiraLinkRevision] = useState(0);
+  const [mergeCompletion, setMergeCompletion] = useState<{ reviewId: string; projectId: string; remote: RemoteReviewState; jiraLink: { key: string; url: string } | null } | null>(null);
+  const [reanchorId, setReanchorId] = useState<string | null>(null);
+  const [anchorRevision, setAnchorRevision] = useState(0);
   const [openingJira, setOpeningJira] = useState(false);
   const [settingsProject, setSettingsProject] = useState<Project | null>(null);
   const [deleteProject, setDeleteProject] = useState<Project | null>(null);
@@ -115,6 +134,13 @@ export default function App() {
   const knownApprovals = useRef<Record<string, Record<string, string>>>(readApprovalHistory());
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const mounted = useRef(true);
+
+  const loadIntegrations = useCallback(() => {
+    if (!window.reviewAPI?.getIntegrations) return;
+    void window.reviewAPI.getIntegrations().then(state => { if (mounted.current) { setIntegrations(state); setIntegrationRevision(value => value + 1); } }).catch(reason => { if (mounted.current) setError(errorMessage(reason)); });
+  }, []);
+
+  useEffect(() => { loadIntegrations(); }, [loadIntegrations]);
 
   useEffect(() => {
     mounted.current = true;
@@ -179,11 +205,13 @@ export default function App() {
       if (reason === 'install') {
         updateBusyRef.current = true;
         flushSync(() => setUpdatePreparing(true));
-      }
+      } else flushSync(() => setClosePreparing(true));
       try { await flushPendingComments(); }
-      catch (reason) { setError(errorMessage(reason)); throw reason; }
+      catch (error) { if (reason === 'close') setClosePreparing(false); setError(errorMessage(error)); throw error; }
     });
   }, []);
+
+  useEffect(() => window.reviewAPI?.onCloseCancelled?.(reason => { setClosePreparing(false); if (reason) setError(reason); }), []);
 
   const applyRefresh = useCallback((id: string, result: ReviewRefresh, mutationVersion?: number) => {
     if (updateBusyRef.current) return;
@@ -206,7 +234,7 @@ export default function App() {
       const oldFiles = new Map(previous[viewKey]?.files.map(file => [file.id, file]));
       const files = result.snapshot.files.map(file => {
         const old = oldFiles.get(file.id);
-        return old && old.fingerprint === file.fingerprint && old.source === file.source ? old : file;
+        return old && old.fingerprint === file.fingerprint && old.source === file.source && old.unavailable === file.unavailable && old.tooLarge === file.tooLarge ? old : file;
       });
       return { ...previous, [viewKey]: { ...result.snapshot, files } };
     });
@@ -232,6 +260,10 @@ export default function App() {
       const result = await window.reviewAPI.refreshReview(id);
       if (targetVersion !== (targetVersions.current[id] || 0)) return;
       applyRefresh(id, result, version);
+      if (result.review.remote) {
+        const remote = await window.reviewAPI.getRemoteReview(id);
+        if (remote && mounted.current && !deletedReviewIds.current.has(id)) setRemoteStates(previous => ({ ...previous, [id]: remote }));
+      }
     } catch (reason) {
       if (mounted.current && selectedIdRef.current === id && targetVersion === (targetVersions.current[id] || 0)) setError(errorMessage(reason));
     } finally {
@@ -240,28 +272,46 @@ export default function App() {
     }
   }, [applyRefresh]);
 
+  const selectedIsRemote = Boolean(reviews.find(item => item.id === selectedReviewId)?.remote);
   useEffect(() => {
-    if (!selectedReviewId) return;
+    if (!selectedReviewId || showSettings) return;
     void refresh(selectedReviewId);
+    // Keep a PR's captured diff stable while reviewing. Opening the review,
+    // manual refresh and publication are the explicit remote refresh points.
+    if (selectedIsRemote) return;
     const interval = setInterval(() => { if (!document.hidden) void refresh(selectedReviewId); }, 4000);
-    const onFocus = () => void refresh(selectedReviewId);
+    const onFocus = () => { if (!document.hidden) void refresh(selectedReviewId); };
     window.addEventListener('focus', onFocus);
-    return () => { clearInterval(interval); window.removeEventListener('focus', onFocus); };
-  }, [selectedReviewId, refresh]);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => { clearInterval(interval); window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onFocus); };
+  }, [selectedReviewId, selectedIsRemote, showSettings, refresh]);
 
   const project = projects.find(item => item.id === selectedProjectId);
   const projectReviews = reviews.filter(item => item.projectId === selectedProjectId);
   const savedReviews = projectReviews.filter(item => item.kind !== 'current');
   const review = projectReviews.find(item => item.id === selectedReviewId);
+  const remote = review ? remoteStates[review.id] || null : null;
+  const projectIntegration = project ? integrations.projects[project.id] : undefined;
   const viewKey = review ? reviewViewKey(review) : '';
   const isCurrent = review?.kind === 'current';
   const metadata = review ? reviewMetadata[review.id] : undefined;
   const featureBranch = isCurrent && metadata?.inspection ? metadata.inspection.currentBranch || '' : review?.featureBranch || '';
   const jiraTicket = extractJiraTicketKey(featureBranch);
+  useEffect(() => {
+    if (!review?.remote || !window.reviewAPI.getJiraTicketLink) return;
+    let live = true;
+    const id = review.id;
+    void window.reviewAPI.getJiraTicketLink(id).then(link => {
+      if (live) setJiraLinks(previous => ({ ...previous, [id]: link }));
+    }).catch(() => { if (live) setJiraLinks(previous => ({ ...previous, [id]: null })); });
+    return () => { live = false; };
+  }, [review?.id, review?.remote, review?.featureBranch, integrationRevision, jiraLinkRevision, settings.jiraBaseUrl]);
   const currentDetached = Boolean(isCurrent && metadata?.inspection && !metadata.inspection.currentBranch);
   const currentNeedsTarget = Boolean(isCurrent && (metadata?.requiresTarget || !review.baseBranch));
   const snapshot = review ? snapshots[viewKey] : undefined;
   const files = snapshot?.files || [];
+  const incompleteSnapshot = Boolean(snapshot?.repos.some(repo => repo.error) || files.some(file => file.unavailable));
+  const pointerChanges = snapshot?.repos.flatMap(repo => (repo.pointers || []).map(pointer => ({ ...pointer, repositoryPath: repo.relativePath }))) || [];
   const selectedFile = files.find(file => file.id === selectedFiles[viewKey]);
   const fileComments = useMemo(() => review?.comments.filter(comment => comment.fileId === selectedFile?.id) || [], [review?.comments, selectedFile?.id]);
   const unresolvedComments = review?.comments.filter(comment => !comment.resolved) || [];
@@ -294,6 +344,7 @@ export default function App() {
   function activateReview(id: string | null) {
     selectedIdRef.current = id;
     setSelectedReviewId(id);
+    setReanchorId(null);
 
     setError(null);
     setRefreshing(false);
@@ -305,7 +356,12 @@ export default function App() {
   }
 
   async function selectReview(id: string | null) {
-    try { await flushPendingComments(); activateReview(id); }
+    try {
+      await flushPendingComments();
+      const reopenRemote = id === selectedIdRef.current && reviews.some(item => item.id === id && item.remote);
+      activateReview(id);
+      if (reopenRemote && id) await refresh(id, true);
+    }
     catch (reason) { setError(errorMessage(reason)); }
   }
 
@@ -331,6 +387,10 @@ export default function App() {
       knownApprovals.current[originalViewKey] = { ...knownApprovals.current[originalViewKey], ...updated.approvals };
       localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current));
       if (contexts.current[id] === context && reviewContextKey(updated) === context) setReviews(previous => mergeReview(previous, updated));
+      if (updated.remote) {
+        const remote = await window.reviewAPI.getRemoteReview(id);
+        if (remote && mounted.current) setRemoteStates(previous => ({ ...previous, [id]: remote }));
+      }
     }
     return updated;
   }
@@ -382,8 +442,54 @@ export default function App() {
     await mutate((reviewId, context) => window.reviewAPI.deleteComment(reviewId, id, context));
   }
 
+  function beginReanchor(id: string) {
+    const comment = review?.comments.find(item => item.id === id);
+    if (!comment) return;
+    setReanchorId(id); setShowFiles(true); changeFilter('all');
+    const file = files.find(item => item.id === comment.fileId);
+    if (file) selectFile(file.id);
+  }
+
+  async function reanchorSelection(selection: CommentSelection) {
+    if (!reanchorId || !selectedFile) return;
+    await flushPendingComments();
+    await mutate(id => window.reviewAPI.reanchorComment(id, reanchorId, {
+      fileId: selectedFile.id, fingerprint: selectedFile.fingerprint,
+      side: selection.side, lineStart: selection.lineStart, lineEnd: selection.lineEnd,
+    }));
+    setReanchorId(null); setAnchorRevision(value => value + 1);
+  }
+
+  async function remoteChanged() {
+    if (!review) return;
+    mutationVersions.current[review.id] = (mutationVersions.current[review.id] || 0) + 1;
+    await refresh(review.id, true);
+  }
+
+  async function mergeFinished(mergedReview: Review, state: RemoteReviewState) {
+    const operation = state.operation;
+    if (operation?.action !== 'merge' || operation.state !== 'complete' || !state.pullRequests.length
+      || !state.pullRequests.every(pr => operation.items.some(item => item.prKey === pullRequestKey(pr) && item.merge === 'merged'))) return;
+    await flushPendingComments();
+    if (!mounted.current || deletedReviewIds.current.has(mergedReview.id)) return;
+    setRemoteStates(previous => ({ ...previous, [mergedReview.id]: state }));
+    setMergeCompletion({ reviewId: mergedReview.id, projectId: mergedReview.projectId, remote: state, jiraLink: jiraLinks[mergedReview.id] || null });
+    // Closing the active view preserves the saved review and its feedback.
+    if (selectedIdRef.current === mergedReview.id && selectedProjectRef.current === mergedReview.projectId) activateReview(currentReviewId(mergedReview.projectId));
+    void window.reviewAPI.getJiraTicketLink(mergedReview.id).then(jiraLink => {
+      if (mounted.current) setMergeCompletion(previous => previous?.reviewId === mergedReview.id ? { ...previous, jiraLink } : previous);
+    }).catch(() => { /* A browser link cannot block completion of a confirmed merge. */ });
+  }
+
+  function remoteOpened(created: Review) {
+    contexts.current[created.id] = reviewContextKey(created);
+    setReviews(previous => mergeReview(previous, created));
+    void selectReview(created.id); setShowPullRequests(false);
+  }
+
   async function reviewFiles(chosenFiles: ReviewFile[], markReviewed: boolean) {
     if (!review || !chosenFiles.length || approvalBusy) return;
+    if (markReviewed && chosenFiles.some(file => file.unavailable)) { setError('Some selected files could not be loaded. Refresh them before marking them reviewed.'); return; }
     const chosenIds = new Set(chosenFiles.map(file => file.id));
     const activeId = selectedFile?.id;
     // Retain the visible row order before reviewed rows disappear from the tree.
@@ -483,11 +589,26 @@ export default function App() {
 
   async function openJira() {
     if (!review || openingJira) return;
-    if (!settings.jiraBaseUrl) { setShowSettings(true); return; }
+    if (!settings.jiraBaseUrl) { void openSettings('jira', true); return; }
     setOpeningJira(true);
     try { await window.reviewAPI.openJiraTicket(review.id); }
     catch (reason) { setError(errorMessage(reason)); }
     finally { setOpeningJira(false); }
+  }
+
+  async function openSettings(section: SettingsSection = 'jira', legacy = false) {
+    if (openingSettings.current) return;
+    openingSettings.current = true;
+    try {
+      await flushPendingComments();
+      setSettingsSection(section); setShowLegacyLinks(legacy); setShowSettings(true);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { openingSettings.current = false; }
+  }
+
+  function closeSettings() {
+    setShowSettings(false);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.app-settings-button')?.focus());
   }
 
   const copyButton = <button className={`button button-primary copy-button ${copyState === 'copied' ? 'is-copied' : ''}`} disabled={!unresolvedComments.length || copyState === 'copying'} onClick={() => void copyFeedback()} title="Copy unresolved comments grouped by file, with line references">{copyState === 'copying' ? <LoaderCircle className="spin" size={15} /> : copyState === 'copied' ? <CheckCheck size={16} /> : <Clipboard size={15} />}<span>{copyState === 'copied' ? 'Copied feedback' : 'Copy feedback'}</span>{unresolvedComments.length > 0 && <span className="button-count">{unresolvedComments.length}</span>}</button>;
@@ -499,46 +620,53 @@ export default function App() {
     } catch (reason) { setUpdateBridgeError(errorMessage(reason)); }
   }
 
-  return <><div className="app-shell compact-workspace" inert={updatePreparing}>
+  return <><div className="app-shell compact-workspace" inert={updatePreparing || closePreparing}>
     <div className="project-tab-strip window-chrome">
-      <div className="project-tabs" role="tablist" aria-label="Projects">
+      {showSettings ? <div className="settings-chrome-label"><Settings2 size={13} />Settings</div> : <div className="project-tabs" role="tablist" aria-label="Projects">
         {projects.map((item, index) => <button key={item.id} id={`project-tab-${item.id}`} className={`project-tab ${selectedProjectId === item.id ? 'active' : ''}`} role="tab" aria-label={item.name} aria-selected={selectedProjectId === item.id} aria-controls="project-workspace" tabIndex={selectedProjectId === item.id ? 0 : -1} title={item.repoPath} onClick={() => selectProject(item.id)} onKeyDown={event => {
           const next = event.key === 'ArrowRight' ? (index + 1) % projects.length : event.key === 'ArrowLeft' ? (index - 1 + projects.length) % projects.length : event.key === 'Home' ? 0 : event.key === 'End' ? projects.length - 1 : null;
           if (next === null) return;
           event.preventDefault(); selectProject(projects[next].id); document.getElementById(`project-tab-${projects[next].id}`)?.focus();
         }}><FolderGit2 size={13} /><span>{item.name}</span></button>)}
         <button className="add-project-tab" aria-label="Add project" title="Add project" onClick={() => setShowAddProject(true)}><Plus size={15} /></button>
-      </div>
+      </div>}
       <UpdateButton state={updateState} onClick={() => setShowUpdates(true)} />
       <span className="chrome-app-name">branchline<span>.</span></span>
-      <button className="icon-button app-settings-button" aria-label="App settings" title="Settings" disabled={initializing || !window.reviewAPI} onClick={() => setShowSettings(true)}><Settings2 size={15} /></button>
+      <button className="icon-button app-settings-button" aria-label="App settings" title="Settings" aria-pressed={showSettings} disabled={showSettings || initializing || !window.reviewAPI} onClick={() => void openSettings()}><Settings2 size={15} /></button>
     </div>
-    <div className="application-body" id="project-workspace" role={project ? 'tabpanel' : undefined} aria-labelledby={project ? `project-tab-${project.id}` : undefined}>
+    {showSettings && <SettingsView initialSection={settingsSection} showLegacyLinks={showLegacyLinks} settings={settings} ticket={jiraTicket} onSaved={setSettings} onConnectionsChanged={loadIntegrations} onClose={closeSettings} updateState={updateState} updateBridgeError={updateBridgeError} onUpdateAction={action => void updateAction(action)} />}
+    <div className="application-body" hidden={showSettings} id="project-workspace" role={project ? 'tabpanel' : undefined} aria-labelledby={project && !showSettings ? `project-tab-${project.id}` : undefined}>
       <main className="main-workspace">
         {error && <div className="error-banner" role="alert"><TriangleAlert size={16} /><span>{error}</span>{review && <button onClick={() => void refresh(review.id, true)}>Retry</button>}<button className="icon-button" aria-label="Dismiss error" onClick={() => setError(null)}><X size={15} /></button></div>}
+        {mergeCompletion?.projectId === selectedProjectId && <MergeCompletion reviewId={mergeCompletion.reviewId} remote={mergeCompletion.remote} jiraLink={mergeCompletion.jiraLink} onDismiss={() => setMergeCompletion(null)} />}
         {initializing ? <div className="central-empty"><LoaderCircle size={28} className="spin" /><p>Opening your workspace…</p></div> : !review ? project ? <div className="central-empty"><LoaderCircle size={24} className="spin" /><h2>Opening Current</h2><p>Reading the branch checked out in {project.name}.</p></div> : <Welcome onCreate={() => setShowAddProject(true)} /> : <>
           <header className="review-toolbar" aria-label="Review controls">
             <button className="icon-button files-toggle" aria-label={showFiles ? 'Hide files' : 'Show files'} aria-expanded={showFiles} aria-controls="review-files" title={showFiles ? 'Hide file tree' : 'Show file tree'} onClick={toggleFiles}>{showFiles ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
             <Select className="review-picker" variant="quiet" label="Select review" title={isCurrent ? 'Current follows your checked-out branch' : review.name} value={review.id} searchPlaceholder="Find a review…" options={[
               { value: currentReviewId(review.projectId), label: 'Current', description: 'Follows your checkout' },
-              ...savedReviews.map(item => ({ value: item.id, label: item.name, description: `${item.baseBranch} ← ${item.featureBranch}`, group: 'Saved reviews' })),
+              ...savedReviews.map(item => ({ value: item.id, label: item.name, description: `${item.baseBranch} ← ${item.featureBranch}`, group: item.remote ? 'Bitbucket reviews' : 'Saved reviews' })),
             ]} onChange={id => void selectReview(id)} />
             <button className="icon-button new-branch-review" aria-label="Review another branch" title="Review another branch" onClick={() => setShowNewReview(true)}><Plus size={14} /></button>
+            <button className="icon-button" aria-label="Browse Bitbucket pull requests" title="Bitbucket pull requests" onClick={() => projectIntegration?.bitbucketConnectionId ? setShowPullRequests(true) : project && setIntegrationProject(project)}><GitPullRequest size={14} /></button>
             <span className="toolbar-separator" />
             <div className="branch-comparison">
               {isCurrent ? <Select id="current-target-branch" className={`current-target-control ${!review.baseBranch ? 'needs-target' : ''}`} label="Current target branch" title={review.baseBranch ? `Target: ${review.baseBranch}` : 'Choose the target branch'} value={review.baseBranch} placeholder="Select target branch" searchPlaceholder="Find a branch…" icon={<GitBranch size={12} />} disabled={!metadata?.inspection || changingTarget} loading={changingTarget} options={(metadata?.inspection?.branches || []).map(branch => ({ value: branch, label: branch }))} onChange={target => void changeCurrentTarget(target)} /> : <span className="branch-chip" title={`Target: ${review.baseBranch}`}><GitBranch size={12} />{review.baseBranch}</span>}
               <ArrowLeft size={13} className="compare-arrow" />
               <span className="branch-chip feature-branch" title={`${isCurrent ? 'Checked out' : 'Feature branch'}: ${featureBranch || 'Detached HEAD'}`}><GitBranch size={12} />{featureBranch || (metadata?.inspection ? 'Detached HEAD' : 'Reading checkout…')}</span>
             </div>
-            {jiraTicket && <button className="jira-ticket-button" aria-label={`Open ${jiraTicket} in Jira`} title={settings.jiraBaseUrl ? `Open ${jiraTicket} in Jira · ${settings.jiraBaseUrl}` : `Set up Jira to open ${jiraTicket}`} disabled={openingJira} onClick={() => void openJira()}><span>{jiraTicket}</span>{openingJira ? <LoaderCircle size={12} className="spin" /> : <ExternalLink size={12} />}</button>}
+            {jiraTicket && !projectIntegration?.jiraConnectionId && <button className="jira-ticket-button" aria-label={`Open ${jiraTicket} in Jira`} title={settings.jiraBaseUrl ? `Open ${jiraTicket} in Jira · ${settings.jiraBaseUrl}` : `Set up Jira to open ${jiraTicket}`} disabled={openingJira} onClick={() => void openJira()}><span>{jiraTicket}</span>{openingJira ? <LoaderCircle size={12} className="spin" /> : <ExternalLink size={12} />}</button>}
             <span className="working-tree-label" title={review.includeWorkingTree ? 'Includes eligible uncommitted changes and new files' : 'Reviewing committed changes only'}>{review.includeWorkingTree ? 'Local edits' : 'Commits only'}</span>
             <div className="toolbar-actions">
-              <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
+              <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : review.remote ? 'Refresh the cached PR diff. Also refreshes when reopened or preparing feedback for publication.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
               <button className={`button button-feedback ${showFeedback ? 'active' : ''}`} aria-label={`Feedback${unresolvedComments.length ? ` (${unresolvedComments.length})` : ''}`} aria-pressed={showFeedback} onClick={() => setShowFeedback(!showFeedback)} title="Show review feedback"><MessageSquare size={15} />{unresolvedComments.length > 0 && <span className="soft-count">{unresolvedComments.length}</span>}</button>
               {copyButton}
-              <WorkspaceMenu key={`${project?.id}:${review.id}`} onSettings={() => project && setSettingsProject(project)} onRepositories={() => setShowRepoDetails(!showRepoDetails)} onHelp={() => setShowHelp(true)} onDelete={isCurrent ? undefined : () => setDeleteReview(review)} />
+              <WorkspaceMenu key={`${project?.id}:${review.id}`} onSettings={() => project && setSettingsProject(project)} onRepositories={() => setShowRepoDetails(!showRepoDetails)} onIntegrations={() => project && setIntegrationProject(project)} onHelp={() => setShowHelp(true)} onDelete={isCurrent ? undefined : () => setDeleteReview(review)} />
             </div>
           </header>
+          {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} onRemote={state => setRemoteStates(previous => ({ ...previous, [review.id]: state }))} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
+          {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraTicket} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
+          {!!pointerChanges.length && <details className="pointer-changes" open={files.length ? undefined : true}><summary><GitFork size={13} /><span>{pointerChanges.length} submodule pointer {pointerChanges.length === 1 ? 'change' : 'changes'}</span><ChevronDown size={12} /></summary><div>{pointerChanges.map(pointer => <div className="pointer-change-row" key={`${pointer.repositoryPath}:${pointer.path}`}><span>{pointer.repositoryPath === '.' ? '' : `${pointer.repositoryPath}/`}{pointer.path}</span><code title={pointer.oldHash || 'Not present'}>{pointer.oldHash?.slice(0, 12) || 'not present'}</code><ArrowRight size={11} /><code title={pointer.newHash || 'Removed'}>{pointer.newHash?.slice(0, 12) || 'removed'}</code></div>)}</div></details>}
+          {reanchorId && <div className="reanchor-banner" role="status"><span>Select the current file and lines for your comment. Its text will be preserved.</span><button className="button button-secondary" onClick={() => setReanchorId(null)}>Cancel selection</button></div>}
           {showRepoDetails && <div className="repository-details"><div className="repository-details-title"><strong>Repositories in this review</strong><span>Each comparison starts at its own merge base.</span><button className="icon-button" aria-label="Close repository details" onClick={() => setShowRepoDetails(false)}><X size={14} /></button></div>{snapshot?.repos.length ? snapshot.repos.map(repo => <div className="repository-detail" key={repo.relativePath}><GitFork size={14} /><span className="repository-detail-name">{repo.relativePath === '.' || !repo.relativePath ? repositoryName(review.repoPath) : repo.relativePath}</span>{repo.error ? <span className="repository-detail-error">{repo.error}</span> : <span>{repo.workingTreeIncluded ? 'Branch + working tree' : 'Branch commits'}</span>}</div>) : <p>{currentNeedsTarget ? 'Choose a target to compare repositories.' : 'Discovering repositories…'}</p>}</div>}
           {!!snapshot?.warnings.length && <details className="warning-banner"><summary><TriangleAlert size={14} /><span>{snapshot.warnings.length} {snapshot.warnings.length === 1 ? 'repository notice' : 'repository notices'}</span><span className="warning-detail-label">View details</span><ChevronDown size={12} /></summary><ul>{snapshot.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
           {isCurrent && (currentNeedsTarget || currentDetached) ? <CurrentSetup detached={currentDetached} onReviewBranch={() => setShowNewReview(true)} /> : <div className={`review-workbench ${resizingFiles ? 'resizing-files' : ''}`}>
@@ -559,13 +687,13 @@ export default function App() {
               if (next === null) return; event.preventDefault(); const width = clampFileWidth(next); setFilePaneWidth(width); localStorage.setItem('branchline.filePaneWidth', String(width));
             }} /></>}
             <section className="diff-workspace" aria-label="File diff">
-              {!snapshot ? <div className="central-empty"><LoaderCircle size={26} className="spin" /><h2>Gathering your changes</h2><p>Comparing branches across your repositories.</p></div> : !selectedFile ? <div className="central-empty clean-state"><div className="empty-icon"><CheckCheck size={28} /></div><h2>{approvedCount < files.length ? 'Choose a file to review' : 'You’re all caught up.'}</h2><p>{approvedCount < files.length ? 'Select a changed file from the file tree.' : 'New changes will appear here automatically.'}</p>{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : <>
-                <div className="diff-toolbar"><div className="diff-file-name" title={`${fileLocation(selectedFile)} · ${selectedFile.source === 'working-tree' ? 'Working tree' : 'Committed'} · +${selectedFile.additions} −${selectedFile.deletions}`}><FileCode2 size={14} /><span title={fileLocation(selectedFile)}>{fileLocation(selectedFile)}</span><span className={`file-status file-status-${selectedFile.status.toLowerCase()}`}>{({ A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', T: 'Type changed' })[selectedFile.status]}</span></div><div className="diff-toolbar-actions"><div className="diff-style-switch" role="group" aria-label="Diff layout"><button className={diffStyle === 'split' ? 'active' : ''} aria-pressed={diffStyle === 'split'} onClick={() => setDiffStyle('split')}>Split</button><button className={diffStyle === 'unified' ? 'active' : ''} aria-pressed={diffStyle === 'unified'} onClick={() => setDiffStyle('unified')}>Unified</button></div><span className="toolbar-separator" /><button className={`reviewed-button ${approved ? 'approved' : ''}`} disabled={approvalBusy} onClick={() => void toggleApproval()} aria-pressed={approved} title={approved ? 'Mark this file as unreviewed' : 'Mark this version of the file as reviewed'}>{approvalBusy ? <LoaderCircle className="spin" size={14} /> : approved ? <CircleCheck size={15} /> : <Circle size={15} />}<span>{approved ? 'Reviewed' : 'Mark reviewed'}</span></button></div></div>
+              {!snapshot ? <div className="central-empty"><LoaderCircle size={26} className="spin" /><h2>Gathering your changes</h2><p>Comparing branches across your repositories.</p></div> : !selectedFile ? <div className="central-empty clean-state"><div className="empty-icon"><CheckCheck size={28} /></div><h2>{incompleteSnapshot ? 'This review is incomplete.' : approvedCount < files.length ? 'Choose a file to review' : pointerChanges.length ? 'Review the submodule pointers above.' : 'You’re all caught up.'}</h2><p>{incompleteSnapshot ? 'Some repository changes could not be loaded. Check the notices and refresh to retry.' : approvedCount < files.length ? 'Select a changed file from the file tree.' : pointerChanges.length ? 'This comparison changes repository pointers without changing regular files.' : 'New changes will appear here automatically.'}</p>{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : <>
+                <div className="diff-toolbar"><div className="diff-file-name" title={`${fileLocation(selectedFile)} · ${selectedFile.source === 'working-tree' ? 'Working tree' : 'Committed'} · +${selectedFile.additions} −${selectedFile.deletions}`}><FileCode2 size={14} /><span title={fileLocation(selectedFile)}>{fileLocation(selectedFile)}</span><span className={`file-status file-status-${selectedFile.status.toLowerCase()}`}>{({ A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', T: 'Type changed' })[selectedFile.status]}</span></div><div className="diff-toolbar-actions"><div className="diff-style-switch" role="group" aria-label="Diff layout"><button className={diffStyle === 'split' ? 'active' : ''} aria-pressed={diffStyle === 'split'} onClick={() => setDiffStyle('split')}>Split</button><button className={diffStyle === 'unified' ? 'active' : ''} aria-pressed={diffStyle === 'unified'} onClick={() => setDiffStyle('unified')}>Unified</button></div><span className="toolbar-separator" /><button className={`reviewed-button ${approved ? 'approved' : ''}`} disabled={approvalBusy || !!selectedFile.unavailable} onClick={() => void toggleApproval()} aria-pressed={approved} title={approved ? 'Mark this file as unreviewed' : 'Mark this version of the file as reviewed'}>{approvalBusy ? <LoaderCircle className="spin" size={14} /> : approved ? <CircleCheck size={15} /> : <Circle size={15} />}<span>{approved ? 'Reviewed' : 'Mark reviewed'}</span></button></div></div>
                 {staleApproval && <div className="changed-since-review"><RefreshCw size={13} />This file changed since you reviewed it. Take another look.</div>}
-                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}`} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} /></div>
+                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}:${anchorRevision}`} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} isRemote={!!review.remote} publications={remote?.publications} onBeginReanchor={beginReanchor} reanchorCommentId={reanchorId} onReanchorSelection={reanchorSelection} /></div>
               </>}
             </section>
-            {showFeedback && <FeedbackPanel key={viewKey} review={review} files={files} onClose={() => setShowFeedback(false)} onSelect={selectFile} onUpdate={updateComment} onDelete={removeComment} onError={setError} copyButton={copyButton} />}
+            {showFeedback && <FeedbackPanel key={viewKey} review={review} files={files} onClose={() => setShowFeedback(false)} onSelect={selectFile} onUpdate={updateComment} onDelete={removeComment} onError={setError} copyButton={copyButton} remote={remote} onReanchor={beginReanchor} />}
           </div>}
         </>}
       </main>
@@ -573,49 +701,15 @@ export default function App() {
     {showUpdates && <Modal title="Updates" onClose={() => setShowUpdates(false)} small><UpdateDetails state={updateState} bridgeError={updateBridgeError} onAction={action => void updateAction(action)} onClose={() => setShowUpdates(false)} /></Modal>}
     <div hidden={showUpdates}>
     {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} onCreated={projectCreated} />}
-    {showSettings && <AppSettingsDialog settings={settings} ticket={jiraTicket} onClose={() => setShowSettings(false)} onSaved={updated => { setSettings(updated); setShowSettings(false); }} />}
+    {integrationProject && <ProjectIntegrationDialog key={integrationProject.id} project={integrationProject} onClose={() => setIntegrationProject(null)} onSaved={loadIntegrations} onAccounts={() => { setIntegrationProject(null); void openSettings('bitbucket'); }} />}
+    {showPullRequests && project && <PullRequestsDialog key={project.id} project={project} onClose={() => setShowPullRequests(false)} onOpened={remoteOpened} onSettings={() => { setShowPullRequests(false); setIntegrationProject(project); }} />}
     {showNewReview && project && <NewReviewDialog key={project.id} project={project} onClose={() => setShowNewReview(false)} onCreated={created => { contexts.current[created.id] = reviewContextKey(created); setReviews(previous => mergeReview(previous, created)); setProjects(previous => previous.map(item => item.id === created.projectId ? { ...item, defaultBaseBranch: created.baseBranch } : item)); void selectReview(created.id); setShowNewReview(false); }} />}
     {settingsProject && <ProjectSettingsDialog project={settingsProject} currentTarget={reviews.find(item => item.projectId === settingsProject.id && item.kind === 'current')?.baseBranch || ''} onClose={() => setSettingsProject(null)} onUpdated={updated => { setProjects(previous => previous.map(item => item.id === updated.id ? updated : item)); setSettingsProject(null); }} onRemove={() => { setDeleteProject(settingsProject); setSettingsProject(null); }} />}
     {deleteProject && <Modal title="Remove this project?" onClose={() => !removing && setDeleteProject(null)} small><div className="confirm-copy"><p><strong>{deleteProject.name}</strong> will be removed from Branchline, along with its {reviews.filter(item => item.projectId === deleteProject.id && item.kind === 'saved').length} saved reviews, their comments, and all Current feedback and review progress.</p><p>Your repository and local files will remain untouched.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteProject(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDeleteProject()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Remove project</button></div></Modal>}
     {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
     {deleteReview && <Modal title="Delete this review?" onClose={() => !removing && setDeleteReview(null)} small><div className="confirm-copy"><p><strong>{deleteReview.name}</strong> and its saved comments and review progress will be removed.</p><p>The repository and your code remain on disk.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteReview(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDelete()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Delete review</button></div></Modal>}
     </div>
-  </div>{updatePreparing && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>{updateState?.phase === 'installing' ? 'Installing your update…' : 'Saving your workspace…'}</h2><p>Branchline will restart when the update is ready.</p></div>}</>;
-}
-
-function AppSettingsDialog({ settings, ticket, onClose, onSaved }: {
-  settings: AppSettings; ticket: string | null; onClose: () => void; onSaved: (settings: AppSettings) => void;
-}) {
-  const [baseUrl, setBaseUrl] = useState(settings.jiraBaseUrl);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  let previewUrl = '';
-  try { if (baseUrl.trim()) previewUrl = jiraTicketUrl(normalizeJiraBaseUrl(baseUrl), ticket || 'APP-123'); }
-  catch { /* Show validation errors on save; let the user finish typing first. */ }
-
-  async function save(event: React.FormEvent) {
-    event.preventDefault();
-    if (saving) return;
-    setError(null);
-    setSaving(true);
-    try { onSaved(await window.reviewAPI.updateSettings({ jiraBaseUrl: normalizeJiraBaseUrl(baseUrl) })); }
-    catch (reason) { setError(errorMessage(reason)); setSaving(false); }
-  }
-
-  return <Modal title="Settings" onClose={() => !saving && onClose()} small>
-    <form onSubmit={event => void save(event)} noValidate>
-      <div className="modal-body app-settings-form">
-        <h3>Jira</h3>
-        <p className="settings-description">Open tickets directly from your review’s branch name.</p>
-        <label className="field-label" htmlFor="jira-base-url">Jira base URL</label>
-        <input className="text-input jira-url-input" id="jira-base-url" type="url" inputMode="url" placeholder="https://your-team.atlassian.net" autoComplete="off" spellCheck={false} value={baseUrl} aria-describedby="jira-url-hint" aria-invalid={error ? true : undefined} disabled={saving} onChange={event => { setBaseUrl(event.target.value); setError(null); }} />
-        <p className="settings-hint" id="jira-url-hint">Use your Jira site address, including any path such as <code>/jira</code>. Leave blank to clear it.</p>
-        <div className="jira-link-preview"><span>{ticket ? `Detected ${ticket}` : 'Example: feature/APP-123-update'}</span><code>{previewUrl || `${baseUrl.trim() ? 'Your Jira URL' : 'https://your-team.atlassian.net'}/browse/${ticket || 'APP-123'}`}</code></div>
-        {error && <div className="form-error" role="alert"><TriangleAlert size={15} /><span>{error}</span></div>}
-      </div>
-      <div className="modal-footer"><span className="modal-local-note">Applies to all projects</span><button type="button" className="button button-secondary" disabled={saving} onClick={onClose}>Cancel</button><button type="submit" className="button button-primary" disabled={saving || baseUrl === settings.jiraBaseUrl}>{saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}Save settings</button></div>
-    </form>
-  </Modal>;
+  </div>{(updatePreparing || closePreparing) && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>{closePreparing ? 'Closing your workspace…' : updateState?.phase === 'installing' ? 'Installing your update…' : 'Saving your workspace…'}</h2><p>{closePreparing ? 'Saving your comments and completing active operations.' : 'Branchline will restart when the update is ready.'}</p></div>}</>;
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {
@@ -626,8 +720,8 @@ function CurrentSetup({ detached, onReviewBranch }: { detached: boolean; onRevie
   return <div className="current-setup"><div className="current-setup-content"><GitCompareArrows size={24} strokeWidth={1.4} /><h2>{detached ? 'Check out a branch to continue.' : 'Choose a target branch.'}</h2><p>{detached ? 'Current will resume automatically when you check out a branch.' : 'Select a target in the toolbar above. It will stay selected as you work.'}</p>{detached && <button className="button button-secondary" onClick={onReviewBranch}><GitBranch size={14} />Review another branch</button>}</div></div>;
 }
 
-function WorkspaceMenu({ onSettings, onRepositories, onHelp, onDelete }: {
-  onSettings: () => void; onRepositories: () => void; onHelp: () => void; onDelete?: () => void;
+function WorkspaceMenu({ onSettings, onRepositories, onIntegrations, onHelp, onDelete }: {
+  onSettings: () => void; onRepositories: () => void; onIntegrations: () => void; onHelp: () => void; onDelete?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -653,6 +747,7 @@ function WorkspaceMenu({ onSettings, onRepositories, onHelp, onDelete }: {
       if (event.key === 'Tab') { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
     }}>
       <button role="menuitem" onClick={() => choose(onSettings)}><Settings2 size={14} />Project settings</button>
+      <button role="menuitem" onClick={() => choose(onIntegrations)}><GitPullRequest size={14} />Project integrations</button>
       <button role="menuitem" onClick={() => choose(onRepositories)}><Layers3 size={14} />Repositories</button>
       <button role="menuitem" onClick={() => choose(onHelp)}><HelpCircle size={14} />How Branchline works</button>
       {onDelete && <button role="menuitem" className="menu-danger" onClick={() => choose(onDelete)}><Trash2 size={14} />Delete this review</button>}
@@ -801,7 +896,7 @@ function NewReviewDialog({ project, onClose, onCreated }: { project: Project; on
   </Modal>;
 }
 
-function FeedbackPanel({ review, files, onClose, onSelect, onUpdate, onDelete, onError, copyButton }: { review: Review; files: ReviewFile[]; onClose: () => void; onSelect: (id: string) => void; onUpdate: (id: string, changes: { resolved?: boolean; body?: string }) => Promise<void>; onDelete: (id: string) => Promise<void>; onError: (error: string) => void; copyButton: React.ReactNode }) {
+function FeedbackPanel({ review, files, onClose, onSelect, onUpdate, onDelete, onError, copyButton, remote, onReanchor }: { review: Review; files: ReviewFile[]; onClose: () => void; onSelect: (id: string) => void; onUpdate: (id: string, changes: { resolved?: boolean; body?: string }) => Promise<void>; onDelete: (id: string) => Promise<void>; onError: (error: string) => void; copyButton: React.ReactNode; remote: RemoteReviewState | null; onReanchor: (id: string) => void }) {
   const [showResolved, setShowResolved] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const comments = review.comments.filter(comment => showResolved || !comment.resolved);
@@ -813,7 +908,7 @@ function FeedbackPanel({ review, files, onClose, onSelect, onUpdate, onDelete, o
   return <aside className="feedback-panel" aria-label="Review feedback"><div className="feedback-panel-heading"><h2>Feedback <span>{review.comments.filter(comment => !comment.resolved).length}</span></h2><button className="icon-button" aria-label="Close feedback" onClick={onClose}><X size={16} /></button></div><p className="feedback-description">Your notes, ready for the next iteration.</p>{resolvedCount > 0 && <label className="resolved-filter"><input type="checkbox" checked={showResolved} onChange={event => setShowResolved(event.target.checked)} />Show {resolvedCount} resolved</label>}<div className="feedback-comments">{comments.length ? comments.map(comment => {
     const file = files.find(item => item.id === comment.fileId);
     const stale = !file || file.fingerprint !== comment.fingerprint;
-    return <article key={comment.id} className={`feedback-card ${comment.resolved ? 'resolved' : ''}`}><button className="feedback-location" onClick={() => onSelect(comment.fileId)} disabled={!file} title={fileLocation(comment)}><FileCode2 size={13} /><span>{comment.path.split('/').pop()}</span><code>{comment.lineStart === 0 ? 'File' : `L${comment.lineStart}${comment.lineEnd !== comment.lineStart ? `–${comment.lineEnd}` : ''}`}</code><ArrowDownLeft size={12} /></button><span className="feedback-card-path" title={fileLocation(comment)}>{fileLocation(comment)}</span><div className="feedback-card-meta"><span>{comment.side === 'deletions' ? 'Original version' : 'Feature version'}</span>{stale && <span className="stale-label">Earlier revision</span>}</div><p>{comment.body}</p>{stale && comment.context && <details className="saved-context"><summary>Saved line context</summary><pre>{comment.context}</pre></details>}<div className="feedback-card-actions"><button className={comment.resolved ? 'comment-resolved' : ''} disabled={busy === comment.id} onClick={() => void action(comment.id, () => onUpdate(comment.id, { resolved: !comment.resolved }))}>{busy === comment.id ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}{comment.resolved ? 'Reopen' : 'Resolve'}</button><button disabled={busy === comment.id} onClick={() => void action(comment.id, () => onDelete(comment.id))} aria-label={`Delete comment on ${comment.path} line ${comment.lineStart}`} title="Delete comment"><Trash2 size={13} /></button></div></article>;
+    return <article key={comment.id} className={`feedback-card ${comment.resolved ? 'resolved' : ''}`}><button className="feedback-location" onClick={() => onSelect(comment.fileId)} disabled={!file} title={fileLocation(comment)}><FileCode2 size={13} /><span>{comment.path.split('/').pop()}</span><code>{comment.lineStart === 0 ? 'File' : `L${comment.lineStart}${comment.lineEnd !== comment.lineStart ? `–${comment.lineEnd}` : ''}`}</code><ArrowDownLeft size={12} /></button><span className="feedback-card-path" title={fileLocation(comment)}>{fileLocation(comment)}</span><div className="feedback-card-meta"><span>{comment.side === 'deletions' ? 'Original version' : 'Feature version'}</span>{stale && <span className="stale-label">Earlier revision</span>}</div><p>{comment.body}</p>{review.remote && <div className="comment-publication-row"><PublicationStatus publication={remote?.publications[comment.id]} comment={comment} />{!remote?.publications[comment.id]?.remoteId && <button type="button" onClick={() => onReanchor(comment.id)}>Choose current lines…</button>}</div>}{stale && comment.context && <details className="saved-context"><summary>Saved line context</summary><pre>{comment.context}</pre></details>}<div className="feedback-card-actions"><button className={comment.resolved ? 'comment-resolved' : ''} disabled={busy === comment.id} onClick={() => void action(comment.id, () => onUpdate(comment.id, { resolved: !comment.resolved }))}>{busy === comment.id ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}{comment.resolved ? 'Reopen' : 'Resolve'}</button><button disabled={busy === comment.id} onClick={() => void action(comment.id, () => onDelete(comment.id))} aria-label={`Delete comment on ${comment.path} line ${comment.lineStart}`} title="Delete comment"><Trash2 size={13} /></button></div></article>;
   }) : <div className="feedback-empty"><MessageSquare size={26} /><h3>{review.comments.length ? 'All notes resolved.' : 'Room for your thoughts.'}</h3><p>Click a line number in the diff to leave a comment. Your feedback will appear here.</p></div>}</div><div className="feedback-panel-footer">{copyButton}<span>Unresolved comments · paths · line references</span></div></aside>;
 }
 

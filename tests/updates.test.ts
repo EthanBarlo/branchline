@@ -126,6 +126,28 @@ test('missing acknowledgement and late acknowledgement never seal a recovered wo
   flush.resolve(); await new Promise(resolve => setImmediate(resolve));
   await gate.run('refresh', () => {});
 });
+test('normal close drains all accepted IPC writes, permits only flushing comments, and recovers from cancellation', async () => {
+  const gate = new InstallGate('close');
+  const connection = deferred();
+  const flush = deferred();
+  const order: string[] = [];
+  const save = gate.run('connection-save', async () => { await connection.promise; order.push('connection'); });
+  const closing = gate.prepare(async () => { await gate.run('comment-update', async () => { await flush.promise; order.push('comment'); }); });
+  await assert.rejects(gate.run('pullrequests-action', () => {}), /preparing to close/);
+  flush.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(order, ['comment']);
+  connection.resolve();
+  await save; await closing;
+  assert.deepEqual(order, ['comment', 'connection']);
+  await assert.rejects(gate.run('comment-update', () => {}), /preparing to close/);
+  gate.reset();
+  const acknowledgement = deferred();
+  await assert.rejects(gate.prepare(() => acknowledgement.promise, 10), /try closing again/);
+  acknowledgement.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  await gate.run('feedback-publish', () => {});
+});
 test('only the current window, main frame and exact URL can invoke the bridge', () => {
   const mainFrame = {}; const contents = { mainFrame }; const url = 'file:///app/index.html';
   assert.equal(isTrustedReviewSender({ sender: contents, senderFrame: mainFrame }, contents, url, url), true);

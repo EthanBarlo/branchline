@@ -34,7 +34,9 @@ async function launch() {
   // opens a real browser, contacts Jira, or uses the user's review data.
   await desktop.evaluate(({ shell }) => {
     globalThis.__jiraSmokeURLs = [];
+    globalThis.__jiraSmokeLogPaths = [];
     shell.openExternal = async url => { globalThis.__jiraSmokeURLs.push(url); };
+    shell.showItemInFolder = path => { globalThis.__jiraSmokeLogPaths.push(path); };
   });
   const page = await desktop.firstWindow();
   page.setDefaultTimeout(15000);
@@ -59,14 +61,23 @@ async function waitForURLs(expected) {
 
 async function settings(page) {
   await page.getByRole('button', { name: 'App settings', exact: true }).click();
-  const dialog = page.getByRole('dialog');
-  await dialog.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
-  return dialog;
+  const view = page.getByRole('region', { name: 'Settings', exact: true });
+  await view.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 0, 'Settings is a full application view, not a modal.');
+  await browserLinks(view);
+  return view;
 }
 
-async function saveSettings(dialog) {
-  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
-  await dialog.waitFor({ state: 'hidden' });
+async function browserLinks(view) {
+  const details = view.locator('details').filter({ hasText: 'Browser links only' });
+  if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
+}
+
+async function saveSettings(view) {
+  await view.getByRole('button', { name: 'Save link settings', exact: true }).click();
+  assert.equal(await view.isVisible(), true, 'Saving link preferences keeps Settings open.');
+  await view.getByRole('button', { name: 'Back to review', exact: true }).click();
+  await view.waitFor({ state: 'hidden' });
 }
 
 async function choose(page, label, value) {
@@ -89,13 +100,46 @@ try {
   // Global settings must be usable before the first project exists.
   let dialog = await settings(page);
   assert.equal((await state(page)).projects.length, 0);
+  // Exercise the real preload/main external-link path and Electron clipboard.
+  // Preserve the system clipboard around this isolated permission check.
+  await dialog.getByRole('link', { name: 'Create Jira API token', exact: true }).click();
+  await waitForURLs(['https://id.atlassian.com/manage-profile/security/api-tokens']);
+  await desktop.evaluate(() => { globalThis.__jiraSmokeURLs = []; });
+  await desktop.evaluate(({ clipboard }) => { globalThis.__jiraSmokeClipboard = clipboard.readText(); });
+  try {
+    await dialog.getByRole('button', { name: 'Copy required scopes', exact: true }).click();
+    await dialog.getByText('Scopes copied.', { exact: true }).waitFor();
+    assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), 'read:jira-user\nread:jira-work', 'The real desktop permission policy must allow copying required scopes.');
+    await dialog.getByRole('tab', { name: 'Bitbucket', exact: true }).click();
+    const bitbucket = dialog.getByRole('tabpanel', { name: 'Bitbucket', exact: true });
+    await bitbucket.getByRole('button', { name: 'Copy required scopes', exact: true }).click();
+    await bitbucket.getByText('Scopes copied.', { exact: true }).waitFor();
+    const bitbucketScopes = 'read:user:bitbucket\nread:repository:bitbucket\nread:pullrequest:bitbucket\nwrite:pullrequest:bitbucket';
+    assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), bitbucketScopes, 'Bitbucket scope copy excludes optional repository write.');
+    await assert.rejects(page.evaluate(() => window.reviewAPI.copyConnectionScopes('not-a-provider')), 'Unknown providers must be rejected by the main process.');
+    assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), bitbucketScopes, 'Rejected inputs must leave the clipboard unchanged.');
+  } finally {
+    await desktop.evaluate(({ clipboard }) => { clipboard.writeText(globalThis.__jiraSmokeClipboard); delete globalThis.__jiraSmokeClipboard; });
+  }
+  await dialog.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
+  const diagnostics = dialog.getByRole('tabpanel', { name: 'Diagnostics', exact: true });
+  const logPath = join(dataDir, 'logs', 'integrations.log');
+  await diagnostics.getByText(logPath, { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.reviewAPI.getIntegrationDiagnostics()), { path: logPath, available: true }, 'Desktop diagnostics must use the isolated test data directory.');
+  await diagnostics.getByRole('button', { name: 'Open integration log', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('#settings-panel-diagnostics button')?.disabled);
+  assert.deepEqual(await desktop.evaluate(() => [...globalThis.__jiraSmokeLogPaths]), [logPath], 'Opening diagnostics reveals only the main-process log path.');
+  await page.evaluate(() => window.reviewAPI.openIntegrationLog('/arbitrary-renderer-path'));
+  assert.deepEqual(await desktop.evaluate(() => [...globalThis.__jiraSmokeLogPaths]), [logPath, logPath], 'Renderer inputs cannot change the revealed file.');
+  await page.screenshot({ path: 'artifacts/settings-diagnostics.png', animations: 'disabled' });
+  await dialog.getByRole('tab', { name: 'Jira', exact: true }).click();
   assert.equal(await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).inputValue(), '');
   await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).fill('javascript:alert(1)');
-  await dialog.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Save link settings', exact: true }).click();
   await dialog.getByRole('alert').filter({ hasText: /Enter a valid Jira base URL/ }).waitFor();
   assert.equal((await state(page)).settings.jiraBaseUrl, '');
   assert.deepEqual(await openedURLs(), []);
-  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Back to review', exact: true }).click();
 
   await page.getByRole('button', { name: 'Add your first project', exact: true }).click();
   dialog = page.getByRole('dialog');
@@ -111,8 +155,9 @@ try {
 
   // A detected key is still useful before configuration: it opens Settings.
   await ticket(page, 'APP-123').click();
-  dialog = page.getByRole('dialog');
+  dialog = page.getByRole('region', { name: 'Settings', exact: true });
   await dialog.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  await browserLinks(dialog);
   assert.deepEqual(await openedURLs(), []);
   await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).fill(` ${baseURL}/ `);
   await page.screenshot({ path: 'artifacts/jira-settings.png', animations: 'disabled' });
@@ -140,7 +185,7 @@ try {
   assert.equal((await state(page)).settings.jiraBaseUrl, baseURL, 'The normalized global setting must survive a restart.');
   dialog = await settings(page);
   assert.equal(await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).inputValue(), baseURL);
-  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Back to review', exact: true }).click();
 
   // Pause background polling with its existing visibility guard. The main
   // process must resolve the new checkout even while Current still shows APP.
@@ -178,14 +223,15 @@ try {
   assert.equal((await state(page)).settings.jiraBaseUrl, '');
   await choose(page, 'Select review', 'Pinned Jira review');
   await ticket(page, 'APP-123').click();
-  dialog = page.getByRole('dialog');
+  dialog = page.getByRole('region', { name: 'Settings', exact: true });
   await dialog.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  await browserLinks(dialog);
   assert.equal(await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).inputValue(), '');
   assert.deepEqual(await openedURLs(), [`${baseURL}/browse/OPS-456`, `${baseURL}/browse/APP-123`]);
-  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Back to review', exact: true }).click();
   assert.equal(JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8')).settings.jiraBaseUrl, '', 'Clearing the Jira URL must also persist to disk.');
   assert.deepEqual(errors, [], `Renderer errors: ${errors.join('\n')}`);
-  console.log('Jira desktop smoke passed: global settings, validation, normalization, restart persistence, context-path URLs, latest Current checkout, fixed saved branches, no-key branches, and clearing configuration. External opens were stubbed.');
+  console.log('Jira desktop smoke passed: full-page settings, isolated diagnostics and static log reveal, real scope clipboard and token-link handler, global settings, validation, normalization, restart persistence, context-path URLs, latest Current checkout, fixed saved branches, no-key branches, and clearing configuration. External opens were stubbed.');
 } catch (error) {
   const page = desktop?.windows()[0];
   if (page) {

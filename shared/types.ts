@@ -1,4 +1,5 @@
 import type { UpdateAPI } from './updates';
+import type { IntegrationAPI } from './integrations';
 
 export type DiffSide = 'additions' | 'deletions';
 export type FileStatus = 'A' | 'M' | 'D' | 'R' | 'T';
@@ -21,6 +22,7 @@ export interface ReviewConfig {
   featureBranch: string;
   includeWorkingTree: boolean;
   createdAt: string;
+  remote?: boolean;
 }
 
 export interface ReviewFile {
@@ -41,6 +43,8 @@ export interface ReviewFile {
   baseCommit: string;
   headCommit: string;
   source: 'working-tree' | 'committed';
+  unavailable?: string;
+  remotePath?: string;
 }
 
 export interface RepoStatus {
@@ -50,6 +54,7 @@ export interface RepoStatus {
   headCommit?: string;
   workingTreeIncluded: boolean;
   error?: string;
+  pointers?: { path: string; oldHash: string | null; newHash: string | null }[];
 }
 
 export interface ReviewSnapshot {
@@ -122,8 +127,9 @@ export type NewComment = Omit<ReviewComment, 'id' | 'createdAt' | 'resolved'> & 
 
 export interface FileApproval { fileId: string; fingerprint: string }
 
-export interface ReviewAPI extends UpdateAPI {
+export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
   onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
+  onCloseCancelled(callback: (message: string) => void): () => void;
   getState(): Promise<AppState>;
   updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings>;
   openJiraTicket(reviewId: string): Promise<void>;

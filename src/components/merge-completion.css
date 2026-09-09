@@ -1,0 +1,10 @@
+.merge-completion { flex: 0 0 auto; max-height: 48vh; overflow: auto; margin: 15px 18px; padding: 17px 20px 6px; border: 1px solid #45564a; border-radius: 7px; background: #202722; }
+.merge-completion-heading { display: flex; align-items: center; gap: 12px; }
+.merge-completion-heading > svg { flex-shrink: 0; color: #a6c4ab; }
+.merge-completion-heading > div { flex: 1; min-width: 0; }
+.merge-completion-heading h2 { margin: 0; font-size: 15px; font-weight: 550; color: #e1e9e2; }
+.merge-completion-heading h2:focus { outline: none; }
+.merge-completion-heading p { margin: 5px 0 0; font-size: 11px; line-height: 1.6; color: #a7b5aa; }
+.merge-completion-heading > button { flex-shrink: 0; }
+.merge-completion .merge-progress { margin-top: 17px; }
+.merge-completion .integration-error { margin-bottom: 0; }

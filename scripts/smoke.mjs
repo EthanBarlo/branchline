@@ -13,6 +13,7 @@ const fixture = await mkdtemp(join(tmpdir(), 'branchline-desktop-'));
 const repo = join(fixture, 'sample-monorepo');
 const secondRepo = join(fixture, 'sample-service');
 const actionsRepo = join(fixture, 'review-actions');
+const sparseRepo = join(fixture, 'sparse-review');
 const dataDir = join(fixture, 'app-data');
 await mkdir(join(repo, 'src'), { recursive: true });
 function gitAt(directory, ...args) {
@@ -47,6 +48,14 @@ for (const path of actionPaths) await writeFile(join(actionsRepo, path), actionC
 gitAt(actionsRepo, 'add', '.'); gitAt(actionsRepo, 'commit', '-m', 'Initial files');
 gitAt(actionsRepo, 'checkout', '-b', 'feature/actions');
 for (const path of actionPaths) await writeFile(join(actionsRepo, path), actionContents(1));
+await mkdir(sparseRepo);
+gitAt(sparseRepo, 'init', '-b', 'main');
+const sparseLines = Array.from({ length: 720 }, (_, index) => `export const item${index + 1} = ${index + 1};`);
+await writeFile(join(sparseRepo, 'long-review.ts'), `${sparseLines.join('\n')}\n`);
+gitAt(sparseRepo, 'add', '.'); gitAt(sparseRepo, 'commit', '-m', 'Initial sparse file');
+gitAt(sparseRepo, 'checkout', '-b', 'feature/sparse');
+for (const line of [80, 160, 240, 320, 400, 480, 560, 640]) sparseLines[line - 1] = `export const item${line} = ${line + 1};`;
+await writeFile(join(sparseRepo, 'long-review.ts'), `${sparseLines.join('\n')}\n`);
 
 const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -146,6 +155,56 @@ async function commentOnGreeting(page, body) {
   await page.locator('.diff-file-name').click();
   await page.getByRole('textbox', { name: 'Comment text', exact: true }).waitFor({ state: 'hidden' });
   await page.getByText(body, { exact: true }).first().waitFor();
+}
+
+async function diffPosition(page, selector) {
+  // Include two paint opportunities so asynchronous highlighting and scroll
+  // anchoring are observed, rather than merely inspecting React's first render.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  return page.evaluate(selector => {
+    const viewer = document.querySelector('.review-diff-viewer');
+    const shadow = document.querySelector('.review-code-diff')?.shadowRoot;
+    const line = shadow?.querySelector(selector);
+    if (!viewer || !shadow || !line) throw new Error(`Missing rendered diff line: ${selector}`);
+    return { lines: shadow.querySelectorAll('[data-line]').length, scrollTop: viewer.scrollTop, lineY: line.getBoundingClientRect().y };
+  }, selector);
+}
+
+async function assertDiffPosition(page, selector, before, action) {
+  const after = await diffPosition(page, selector);
+  assert.equal(after.lines, before.lines, `${action} must not expand or collapse unchanged code.`);
+  assert.ok(Math.abs(after.scrollTop - before.scrollTop) <= 2, `${action} moved the diff scroll position: ${before.scrollTop} → ${after.scrollTop}.`);
+  assert.ok(Math.abs(after.lineY - before.lineY) <= 2, `${action} moved the selected line in the viewport: ${before.lineY} → ${after.lineY}.`);
+}
+
+async function sparseComment(page, reviewId, selector, body, mode) {
+  const line = page.locator(selector).first();
+  await line.evaluate(node => node.scrollIntoView({ block: 'center' }));
+  const before = await diffPosition(page, selector);
+  assert.ok(before.scrollTop > 0, `${mode} regression must exercise a scrolled diff.`);
+  assert.ok(before.lines < 300, `${mode} regression needs collapsed context, not an entirely rendered file.`);
+  await line.click();
+  const editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
+  await editor.waitFor();
+  await assertDiffPosition(page, selector, before, `Opening a ${mode} comment`);
+  await editor.fill(body);
+  const comment = await waitForComment(page, reviewId, body);
+  await assertDiffPosition(page, selector, before, `Autosaving a ${mode} comment`);
+  await editor.press('Escape');
+  await editor.waitFor({ state: 'hidden' });
+  await assertDiffPosition(page, selector, before, `Closing a ${mode} comment`);
+  const article = page.locator(`[data-comment-id="${comment.id}"]`);
+  await article.getByRole('button', { name: 'Edit comment', exact: true }).click();
+  await editor.waitFor();
+  await assertDiffPosition(page, selector, before, `Editing a ${mode} comment`);
+  await editor.fill(`${body} Edited.`);
+  const edited = await waitForComment(page, reviewId, `${body} Edited.`);
+  assert.equal(edited.id, comment.id, 'Editing the visible comment must preserve its original identity.');
+  await assertDiffPosition(page, selector, before, `Saving edits to a ${mode} comment`);
+  await editor.press('Escape');
+  await editor.waitFor({ state: 'hidden' });
+  await assertDiffPosition(page, selector, before, `Finishing a ${mode} comment`);
+  return { ...edited, renderedLines: before.lines };
 }
 
 try {
@@ -588,8 +647,52 @@ try {
   await restoredInline.waitFor();
   assert.equal(await restoredInline.getAttribute('data-comment-line'), '4');
   await restoredInline.getByText(movingFeedback, { exact: true }).waitFor();
+
+  // Comments must preserve the compact diff and the viewport in both layouts.
+  // A large sparse file catches full-file expansion that the short fixtures do not.
+  await addProject(restoredActions, sparseRepo, 'Sparse review');
+  await chooseCurrentTarget(restoredActions, 'main');
+  await restoredActions.locator('[data-item-path="long-review.ts"]').click();
+  const sparseReviewId = await picker(restoredActions, 'Select review').getAttribute('data-value');
+  for (const [mode, line] of [['Split', 320], ['Unified', 480]]) {
+    await restoredActions.getByRole('button', { name: mode, exact: true }).click();
+    await sparseComment(restoredActions, sparseReviewId, `[data-column-number="${line}"][data-line-type="change-addition"]`, `${mode} feedback on sparse changes.`, mode);
+  }
+
+  // Explicitly expanded unchanged context stays expanded while commenting.
+  const collapsedCount = await restoredActions.locator('.review-code-diff [data-line]').count();
+  const unchangedSelector = '[data-column-number="360"]';
+  assert.equal(await restoredActions.locator(unchangedSelector).count(), 0);
+  await restoredActions.locator('[data-expand-index="4"] [data-expand-button]').first().click();
+  await restoredActions.locator(unchangedSelector).first().waitFor();
+  const expandedCount = await restoredActions.locator('.review-code-diff [data-line]').count();
+  assert.ok(expandedCount > collapsedCount && expandedCount < 300, 'A manual expansion should reveal only the selected unchanged region.');
+  const unchangedComment = await sparseComment(restoredActions, sparseReviewId, unchangedSelector, 'Keep feedback on manually expanded unchanged code.', 'manually expanded');
+  assert.equal(unchangedComment.renderedLines, expandedCount, 'Adding feedback must retain the exact manual expansion.');
+  await restoredActions.screenshot({ path: 'artifacts/compact-diff-comments.png', animations: 'disabled' });
+
+  // Reopening restores the normal collapsed view without hiding saved feedback.
+  await desktop.close();
+  desktop = await electron.launch({ executablePath, args: [resolve('.')], env });
+  const restoredSparse = await desktop.firstWindow();
+  restoredSparse.setDefaultTimeout(15000);
+  restoredSparse.on('pageerror', error => errors.push(error.message));
+  await restoredSparse.locator('.diff-file-name').filter({ hasText: 'long-review.ts' }).waitFor();
+  await restoredSparse.getByRole('button', { name: 'Unified', exact: true }).click();
+  const collapsedComments = restoredSparse.locator('[aria-label="Comments on collapsed lines"]');
+  const unchangedArticle = restoredSparse.locator(`[data-comment-id="${unchangedComment.id}"]`);
+  await collapsedComments.getByText(unchangedComment.body, { exact: true }).waitFor();
+  assert.equal(await unchangedArticle.count(), 1, 'A collapsed-line comment must have exactly one editor.');
+  assert.equal(await restoredSparse.locator(unchangedSelector).count(), 0, 'Restoring comments must keep unchanged code collapsed.');
+  assert.equal(await restoredSparse.locator('.review-code-diff [data-line]').count(), collapsedCount);
+  assert.match(await collapsedComments.innerText(), /360/, 'Collapsed feedback must retain its line reference.');
+  await restoredSparse.screenshot({ path: 'artifacts/collapsed-line-feedback.png', animations: 'disabled' });
+  await restoredSparse.locator('[data-expand-index="4"] [data-expand-button]').first().click();
+  await restoredSparse.locator(`.review-code-diff [data-comment-id="${unchangedComment.id}"]`).getByText(unchangedComment.body, { exact: true }).waitFor();
+  assert.equal(await unchangedArticle.count(), 1, 'Revealing the line must move its editor inline without duplicating feedback.');
+  assert.equal(await restoredSparse.locator('.review-code-diff [data-line]').count(), expandedCount);
   assert.deepEqual(errors, [], `Renderer errors: ${errors.join('\n')}`);
-  console.log('Desktop smoke passed: explorer-order navigation, right-click and Shift-range batch approvals, inline earlier feedback and restart relocation, autosave, completion, resizing, pickers, context isolation, clipboard, and persistence.');
+  console.log('Desktop smoke passed: compact split/unified comments with stable scrolling, manual context expansion and collapsed-feedback recovery, explorer-order navigation, right-click and Shift-range batch approvals, inline earlier feedback and restart relocation, autosave, completion, resizing, pickers, context isolation, clipboard, and persistence.');
 } catch (error) {
   if (desktop) {
     const windows = desktop.windows();

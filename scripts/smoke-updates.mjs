@@ -83,6 +83,16 @@ try {
   const editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
   await mkdir(join(dataDir, 'reviews.json.tmp'));
   await editor.fill('Keep this feedback when saving fails.');
+  await page.evaluate(() => {
+    window.closeCancellations = [];
+    window.stopCloseCancellations = window.reviewAPI.onCloseCancelled(message => window.closeCancellations.push(message));
+  });
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await page.waitForFunction(() => window.closeCancellations.length === 1);
+  assert.equal(page.isClosed(), false, 'A failed ordinary close must leave the review window open.');
+  assert.equal(await editor.inputValue(), 'Keep this feedback when saving fails.');
+  assert.equal(await page.locator('.app-shell').getAttribute('inert'), null, 'Cancelled close must restore editing.');
+  await page.evaluate(() => window.stopCloseCancellations());
   const failed = await page.evaluate(() => window.reviewAPI.installUpdate());
   assert.equal(failed.phase, 'downloaded'); assert.equal(failed.error.action, 'install');
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.installs), 0);

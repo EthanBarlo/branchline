@@ -28,7 +28,7 @@ export function UpdateDetails({ state, bridgeError, onAction, onClose }: {
       <div className="update-version"><span>INSTALLED VERSION</span><code>{state.currentVersion}</code></div>
       <div className="update-status" role="status" aria-live="polite">
         <span className="update-status-icon">{phase === 'downloading' || phase === 'checking' ? <LoaderCircle className="spin" size={22} /> : phase === 'downloaded' ? <RotateCw size={22} /> : phase === 'idle' && state.lastCheckedAt && !error ? <Check size={22} /> : <ArrowDownToLine size={22} />}</span>
-        <div><h3>{title}</h3><p>{phase === 'disabled' ? state.disabledReason : phase === 'downloaded' ? 'Restart to install. Your review work will be saved first.' : phase === 'downloading' ? 'You can close this window and keep reviewing.' : 'Updates are checked automatically. You choose when to download and restart.'}</p></div>
+        <div><h3>{title}</h3><p>{phase === 'disabled' ? state.disabledReason : phase === 'downloaded' ? 'Restart to install. Your review work will be saved first.' : phase === 'downloading' ? 'You can keep reviewing while the download finishes.' : 'Updates are checked automatically. You choose when to download and restart.'}</p></div>
       </div>
       {phase === 'downloading' && <div className="update-download"><progress aria-label="Update download progress" max={100} value={state.progress || 0} /><span>{Math.round(state.progress || 0)}%</span></div>}
       {error && <div className="update-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div>}

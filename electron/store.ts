@@ -55,6 +55,7 @@ function validReview(value: unknown): value is Review {
   if (!record(value) || !['id', 'name', 'repoPath'].every(key => savedText(value[key]))
     || !savedDate(value.createdAt) || typeof value.includeWorkingTree !== 'boolean' || !validFeedback(value)) return false;
   if (value.kind !== undefined && value.kind !== 'current' && value.kind !== 'saved') return false;
+  if (value.remote !== undefined && (value.remote !== true || value.kind !== 'saved' || value.includeWorkingTree !== false)) return false;
   if (value.kind !== 'current') return savedText(value.baseBranch) && savedText(value.featureBranch) && value.currentContexts === undefined;
   if (!savedText(value.projectId) || value.id !== currentReviewId(value.projectId)
     || value.name !== 'Current' || value.includeWorkingTree !== true
@@ -245,7 +246,7 @@ export class ReviewStore {
     });
   }
 
-  createReview(input: NewReview): Promise<Review> {
+  createReview(input: NewReview, remote = false): Promise<Review> {
     return this.mutate(() => {
       const project = input.projectId === undefined
         ? this.ensureProject({ repoPath: nonempty(input.repoPath, 'Repository path', 8192, false) })
@@ -258,10 +259,11 @@ export class ReviewStore {
       const review: Review = {
         id: randomUUID(), projectId: project.id, kind: 'saved', name: input.name === undefined ? featureBranch : nonempty(input.name, 'Review name', 200),
         repoPath: project.repoPath, baseBranch, featureBranch,
-        includeWorkingTree: input.includeWorkingTree ?? true,
+        includeWorkingTree: remote ? false : input.includeWorkingTree ?? true,
+        ...(remote ? { remote: true } : {}),
         createdAt: new Date().toISOString(), comments: [], approvals: {},
       };
-      project.defaultBaseBranch = baseBranch;
+      if (!remote) project.defaultBaseBranch = baseBranch;
       this.state.reviews.unshift(review);
       return review;
     });
@@ -272,6 +274,15 @@ export class ReviewStore {
       if (this.state.reviews.some(review => review.id === id && review.kind === 'current')) throw new Error('Current is permanent. Remove the project to remove its Current review.');
       this.state.reviews = this.state.reviews.filter(review => review.id !== id);
       return this.state;
+    });
+  }
+
+  /** Main-process-only anchor replacement after validating a fresh remote selection. */
+  reanchorComment(id: string, commentId: string, anchor: Pick<NewComment, 'fileId' | 'repoRelativePath' | 'path' | 'side' | 'lineStart' | 'lineEnd' | 'fingerprint' | 'context' | 'contextBefore' | 'contextAfter'>): Promise<Review> {
+    return this.changeReview(id, review => {
+      const comment = review.comments.find(item => item.id === commentId);
+      if (!comment) throw new Error('This comment no longer exists.');
+      Object.assign(comment, anchor);
     });
   }
 
