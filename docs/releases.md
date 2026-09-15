@@ -56,6 +56,10 @@ Rerunning the workflow may replace assets on a draft. It refuses to change an al
 
 Existing unsigned installations cannot bootstrap this updater. Users must manually install 0.10.0 or a later signed build once, opening it from Applications rather than from the mounted DMG. Their reviews and preferences remain in place.
 
+Administrator-owned installations use the native macOS authorization prompt when the app bundle or its parent folder is protected. Branchline saves review work before starting native staging; macOS handles the administrator credentials. Cancelling authorization leaves the app open and the download available for another attempt. Retry recreates the native update session from the cached download so a previous cancellation does not suppress the next prompt. Device management policy can still deny installation.
+
+The published 0.10.0 and 0.11.0 versions reject non-writable installation folders before native authorization starts. Affected installations need one manual installation of a signed version containing this fix; those older updaters cannot install the fix themselves from a protected folder.
+
 ## Checks before publishing
 
 ```sh
@@ -81,6 +85,8 @@ Before the first public update, test two signed versions (N and N+1) on both an 
 4. Confirm N+1 launches with all review data and settings intact, no further update is offered, and the app passes Gatekeeper. Repeat on the other architecture. Test an interrupted download, saving failure and launch from a mounted DMG too.
 5. Rebuild final production artifacts with the public GitHub provider. The release verifier rejects artifacts containing the test feed.
 
+Also repeat the signed update test with an administrator-owned app and protected parent folder while running as a standard user. Check that the system prompt appears only after choosing to restart, cancel it and confirm the app remains editable with feedback intact, then retry and authorize using an administrator account. Confirm the new signed version replaces the old app and retains review data. Test an authorization denial as well. The inert desktop authorization test cannot prove real macOS privilege elevation or device-policy compatibility.
+
 Real signed update testing requires your credentials and both Mac architectures; it cannot be completed with the unpackaged simulator alone.
 
 ## Troubleshooting
@@ -89,10 +95,11 @@ Real signed update testing requires your credentials and both Mac architectures;
 - **No signing identity:** export the Developer ID Application certificate together with its private key; check the `.p12` password.
 - **Notarization rejected:** inspect the Apple submission error in Actions. Confirm the team API key and identifiers match and the key has permission to notarize.
 - **Update cannot be verified:** retry the download. If the release itself is incorrectly signed, publish a corrected higher version using the established signing identity.
-- **Cannot replace the app:** move it out of the DMG/translocated location into a writable Applications folder and reopen it.
+- **Running from a disk image or translocated location:** move the app to Applications and reopen it before updating.
+- **Administrator authorization:** use the macOS system prompt with an administrator account. Cancellation preserves the download; choose Retry update to try again. If your organization denies approval, ask IT to allow or install the update. Published versions 0.10.0 and 0.11.0 require the one-time manual installation described above.
 - **Saving failed:** the app stays open with the downloaded update ready. Resolve the review-save error, then retry.
 - **No updates in development:** expected. Real network checks run only in packaged macOS builds.
 
 On macOS, local updater state logs are written to `~/Library/Logs/Branchline/updates.log` and rotate at 1 MiB. They are not uploaded. Release checks contact GitHub; repository contents and review feedback stay local.
 
-References: [electron-builder v26 macOS configuration](https://www.electron.build/v26/docs/mac/), [GitHub Actions secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets), [Apple notarization tooling](https://github.com/electron/notarize).
+References: [electron-builder v26 macOS configuration](https://www.electron.build/v26/docs/mac/), [GitHub Actions secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets), [Apple notarization tooling](https://github.com/electron/notarize), [bundled Squirrel privilege detection](https://github.com/Squirrel/Squirrel.Mac/blob/0e5d146ba13101a1302d59ea6e6e0b3cace4ae38/Squirrel/SQRLUpdater.m#L294-L315), [native administrator authorization](https://github.com/Squirrel/Squirrel.Mac/blob/0e5d146ba13101a1302d59ea6e6e0b3cace4ae38/Squirrel/SQRLShipItLauncher.m#L70-L145).

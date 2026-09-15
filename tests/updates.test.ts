@@ -5,6 +5,7 @@ import { UpdateService, UPDATE_INTERVAL, newerStable, releaseNotesToText } from 
 import { InstallGate } from '../electron/install-gate';
 import { isTrustedReviewSender } from '../electron/ipc-trust';
 import { validateInstallLocation } from '../electron/install-location';
+import { createMacUpdateInstaller, installMacUpdate } from '../electron/mac-install';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void;
@@ -91,6 +92,87 @@ test('native staging failure restores the workspace and retry succeeds', async (
   assert.equal((await f.service.install()).phase, 'downloaded'); assert.equal(f.releases, 1);
   fail = false; assert.equal((await f.service.install()).phase, 'installing');
 });
+test('native authorization starts only after an explicit install and all pending work is saved', async () => {
+  const gate = new InstallGate();
+  const write = deferred(), flush = deferred(), native = new EventEmitter();
+  const order: string[] = [];
+  let authorizations = 0, quits = 0;
+  const pendingWrite = gate.run('comment-update', async () => { await write.promise; order.push('saved comment'); });
+  const f = fixture({
+    prepare: () => gate.prepare(async () => { await flush.promise; order.push('flushed renderer'); }),
+    install: () => installMacUpdate(native, () => {
+      authorizations++;
+      order.push('native authorization');
+      native.once('update-downloaded', () => { quits++; });
+    }),
+    release: () => gate.reset(),
+  });
+  await f.service.check(); await f.service.download();
+  assert.equal(authorizations, 0);
+  assert.equal(quits, 0);
+  const installing = f.service.install();
+  assert.equal(f.service.install(), installing);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.service.getState().phase, 'preparing');
+  assert.equal(authorizations, 0);
+  flush.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authorizations, 0, 'flushing the renderer must not skip an accepted main-process write');
+  write.resolve(); await pendingWrite;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(order, ['flushed renderer', 'saved comment', 'native authorization']);
+  assert.equal(authorizations, 1);
+  assert.equal(quits, 0, 'waiting for administrator credentials must not quit the app');
+  assert.equal(f.service.getState().phase, 'installing');
+  await assert.rejects(gate.run('comment-update', () => {}), /preparing/);
+  native.emit('update-downloaded');
+  assert.equal((await installing).phase, 'installing');
+  assert.equal(quits, 1);
+  f.service.dispose();
+});
+for (const [name, code, expectedMessage] of [
+  ['canceled authorization', -60006, /authorization was cancelled/i],
+  ['denied authorization', -60005, /administrator account/i],
+  ['authorization interaction unavailable', -60007, /administrator account/i],
+] as const) test(`${name} restores editing and can retry the cached update`, async () => {
+  const error = Object.assign(new Error('The operation could not be completed.'), { code, domain: 'NSOSStatusErrorDomain' });
+  const gate = new InstallGate(), native = new EventEmitter();
+  let authorizations = 0, quits = 0, releases = 0;
+  const f = fixture({
+    prepare: () => gate.prepare(async () => {}),
+    install: () => installMacUpdate(native, () => {
+      authorizations++;
+      native.once('update-downloaded', () => { quits++; });
+    }),
+    release: () => { releases++; gate.reset(); },
+  });
+  await f.service.check(); await f.service.download();
+  const installing = f.service.install();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authorizations, 1);
+  native.emit('error', error);
+  const failed = await installing;
+  assert.equal(failed.phase, 'downloaded');
+  assert.equal(failed.error?.action, 'install');
+  assert.match(failed.error!.message, expectedMessage);
+  assert.doesNotMatch(failed.error!.message, /Applications|writable installation/i);
+  assert.equal(failed.availableVersion, f.updater.version);
+  assert.equal(failed.progress, 100);
+  assert.equal(releases, 1);
+  await gate.run('comment-update', () => {});
+  assert.equal(native.listenerCount('update-downloaded'), 0);
+  native.emit('update-downloaded');
+  assert.equal(quits, 0, 'late completion of a canceled authorization must not restart the restored workspace');
+  const retry = f.service.install();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authorizations, 2);
+  assert.equal(f.updater.downloads, 1, 'the already downloaded update remains reusable');
+  native.emit('update-downloaded');
+  assert.equal((await retry).phase, 'installing');
+  assert.equal(quits, 1);
+  assert.equal(releases, 1);
+  f.service.dispose();
+});
 test('automatic checks are throttled; disabled builds make no network requests', async () => {
   const f = fixture(); f.service.checkIfDue(); await f.service.check();
   f.service.checkIfDue(); assert.equal(f.updater.checks, 1);
@@ -99,6 +181,35 @@ test('automatic checks are throttled; disabled builds make no network requests',
   disabled.service.start(); disabled.service.checkIfDue();
   await disabled.service.check(); await disabled.service.download(); await disabled.service.install();
   assert.equal(disabled.updater.checks, 0); assert.equal(disabled.installs, 0); disabled.service.dispose();
+});
+test('a native failure after update readiness releases editing instead of leaving installation stuck', async () => {
+  const gate = new InstallGate();
+  let quits = 0, releases = 0;
+  const native = Object.assign(new EventEmitter(), {
+    checkForUpdates() {},
+    quitAndInstall() { quits++; },
+  });
+  const f = fixture({
+    prepare: () => gate.prepare(async () => {}),
+    install: createMacUpdateInstaller(native, async () => {}),
+    release: () => { releases++; gate.reset(); },
+  });
+  await f.service.check(); await f.service.download();
+  const installing = f.service.install();
+  await new Promise(resolve => setImmediate(resolve));
+  native.emit('update-downloaded');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(quits, 1);
+  assert.equal(f.service.getState().phase, 'installing');
+  await assert.rejects(gate.run('comment-update', () => {}), /preparing/);
+  native.emit('error', Object.assign(new Error('Relaunch request denied'), { code: -60005, domain: 'NSOSStatusErrorDomain' }));
+  const state = await installing;
+  assert.equal(state.phase, 'downloaded');
+  assert.equal(state.availableVersion, f.updater.version);
+  assert.match(state.error!.message, /administrator account/i);
+  assert.equal(releases, 1);
+  await gate.run('comment-update', () => {});
+  f.service.dispose();
 });
 test('installation drains accepted Git/project work and flushed comments, then seals writes', async () => {
   const gate = new InstallGate(); const git = deferred(); const save = deferred(); const order: string[] = [];
@@ -156,12 +267,12 @@ test('only the current window, main frame and exact URL can invoke the bridge', 
   assert.equal(isTrustedReviewSender({ sender: contents, senderFrame: mainFrame }, contents, `${url}?evil`, url), false);
   assert.equal(isTrustedReviewSender({ sender: contents, senderFrame: mainFrame }, null, url, url), false);
 });
-test('mounted images, translocated apps and unwritable installations explain how to recover', async () => {
-  for (const path of ['/Volumes/Branchline/Branchline.app/Contents/MacOS/Branchline', '/private/var/AppTranslocation/x/Branchline.app/Contents/MacOS/Branchline']) {
-    await assert.rejects(validateInstallLocation(path, async () => {}), /Applications/);
+test('mounted images, translocated apps and invalid bundle paths explain how to recover', async () => {
+  for (const path of ['/Volumes/Branchline/Branchline.app/Contents/MacOS/Branchline', '/private/var/AppTranslocation/x/Branchline.app/Contents/MacOS/Branchline', '/usr/local/bin/Branchline']) {
+    await assert.rejects(validateInstallLocation(path), /Applications/);
   }
-  await assert.rejects(validateInstallLocation('/Applications/Branchline.app/Contents/MacOS/Branchline', async () => { throw new Error('EACCES'); }), /writable/);
-  const checked: string[] = [];
-  await validateInstallLocation('/Applications/Branchline.app/Contents/MacOS/Branchline', async path => { checked.push(path); });
-  assert.deepEqual(checked, ['/Applications/Branchline.app', '/Applications']);
+});
+test('protected Applications and per-user installations can reach the native authorization flow', async () => {
+  await assert.doesNotReject(validateInstallLocation('/Applications/Branchline.app/Contents/MacOS/Branchline'));
+  await assert.doesNotReject(validateInstallLocation('/Users/reviewer/Applications/Branchline.app/Contents/MacOS/Branchline'));
 });

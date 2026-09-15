@@ -96,7 +96,15 @@ export class UpdateService {
   private noUpdate() { this.set({ phase: 'idle', availableVersion: null, releaseNotes: '', progress: null, error: null }); }
   private fail(action: UpdateAction, error: unknown) {
     const raw = error instanceof Error ? error.message : String(error);
-    const message = /read.only|permission|EACCES|EROFS|AppTranslocation|disk image/i.test(raw)
+    const native = error && typeof error === 'object' ? error as { code?: unknown; domain?: unknown } : undefined;
+    const status = native?.domain === 'NSOSStatusErrorDomain' ? Number(native.code) : undefined;
+    const nativeInstall = action === 'install' && this.state.phase === 'installing';
+    const cancelled = nativeInstall && (status === -60006 || /authori[sz]ation.*cancel|errAuthorizationCanceled/i.test(raw));
+    const denied = nativeInstall && (status === -60005 || status === -60007 || /authori[sz]ation.*denied|not authori[sz]ed|permission|EACCES|EPERM/i.test(raw));
+    const message = cancelled
+      ? 'Administrator authorization was cancelled. The update is still downloaded. Choose Retry update when you’re ready.'
+      : denied ? 'macOS could not authorize the update. Retry with an administrator account, or ask your IT administrator to allow or install the update.'
+      : /read.only|EROFS|AppTranslocation|disk image/i.test(raw)
       ? 'Move Branchline to your Applications folder, open it there, and try again.'
       : /signature|codesign|checksum|sha512/i.test(raw)
         ? 'The update could not be verified. Download it again or try a later release.'

@@ -247,6 +247,9 @@ app.whenReady().then(async () => {
       permitClose = true;
     }, () => {
       cancelFlush(); installGate.reset(); permitClose = false; quitting = false;
+      // Native relaunch can fail after it closes the review window. Restore
+      // the saved workspace so authorization or installation can be retried.
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
     updates.subscribe(state => {
       if (window && !window.webContents.isDestroyed()) window.webContents.send('review:update-state-changed', state);

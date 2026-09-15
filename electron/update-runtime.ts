@@ -1,7 +1,7 @@
 import { app, autoUpdater as nativeUpdater } from 'electron';
 import updaterModule from 'electron-updater';
 import log from 'electron-log/main';
-import { installMacUpdate } from './mac-install';
+import { createMacUpdateInstaller } from './mac-install';
 import { UpdateService } from './update-service';
 import { UpdateTestDriver } from './update-test-driver';
 import { validateInstallLocation } from './install-location';
@@ -19,9 +19,10 @@ export function createUpdateService(prepare: () => Promise<void>, release: () =>
   log.transports.console.level = false;
   // Log state and sanitized user-facing errors, without remote response bodies or headers.
   if (updater && !driver) updaterModule.autoUpdater.logger = null;
+  const install = driver ? () => driver.install() : createMacUpdateInstaller(nativeUpdater, () => updaterModule.autoUpdater.downloadUpdate());
   return new UpdateService({ version: app.getVersion(), updater, disabledReason,
     prepare: async () => { if (!test) await validateInstallLocation(app.getPath('exe')); await prepare(); },
-    install: () => driver ? driver.install() : installMacUpdate(nativeUpdater, () => updaterModule.autoUpdater.quitAndInstall()),
+    install,
     release, log: message => log.info(message),
   });
 }

@@ -59,6 +59,7 @@ try {
   await phase('downloaded');
   console.log('Download progress and retry verified.');
   await page.getByRole('dialog').getByRole('button', { name: 'Restart to update', exact: true }).waitFor();
+  await page.getByText('Restart to install. Your review work will be saved first. macOS may ask for an administrator password.', { exact: true }).waitFor();
   await page.screenshot({ path: 'artifacts/update-ready.png', animations: 'disabled' });
   await page.getByRole('button', { name: 'Later', exact: true }).click();
   const closed = page.waitForEvent('close');
@@ -80,7 +81,7 @@ try {
   await page.getByRole('combobox', { name: 'Current target branch', exact: true }).click();
   await page.getByRole('option', { name: 'main', exact: true }).click();
   await page.locator('[data-column-number="1"][data-line-type="change-addition"]').click();
-  const editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
+  let editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
   await mkdir(join(dataDir, 'reviews.json.tmp'));
   await editor.fill('Keep this feedback when saving fails.');
   await page.evaluate(() => {
@@ -105,15 +106,86 @@ try {
   assert.equal((await page.evaluate(() => window.reviewAPI.installUpdate())).phase, 'downloaded');
   let saved = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
   assert.equal(saved.reviews[0].comments[0].body, 'Saved before native staging starts.');
-  const finalFeedback = 'The final keystrokes must survive the update.';
-  await editor.fill(finalFeedback);
-  const appClosed = desktop.waitForEvent('close');
+
+  const feedbackBeforeWindowClose = 'Keep this saved feedback when installation fails after closing the window.';
+  await editor.fill(feedbackBeforeWindowClose);
+  await desktop.evaluate(({ app, BrowserWindow }) => {
+    const driver = app.branchlineUpdateTest;
+    const originalInstall = driver.install;
+    driver.install = async function () {
+      driver.install = originalInstall;
+      const reviewWindow = BrowserWindow.getAllWindows()[0];
+      await new Promise(resolve => { reviewWindow.once('closed', resolve); reviewWindow.close(); });
+      throw new Error('Native installation failed after closing the review window.');
+    };
+  });
+  const failedInstallWindow = page;
+  const restoredWindow = desktop.waitForEvent('window');
+  await page.evaluate(() => { void window.reviewAPI.installUpdate(); });
+  page = await restoredWindow; page.setDefaultTimeout(15_000);
+  page.on('pageerror', error => errors.push(error.message));
+  await page.getByRole('button', { name: 'Restart to update', exact: true }).waitFor();
+  assert.equal(failedInstallWindow.isClosed(), true, 'The simulated native failure must occur after the original window closes.');
+  assert.equal((await state()).phase, 'downloaded');
+  assert.equal((await state()).error.action, 'install');
+  assert.equal((await state()).availableVersion, '99.0.0');
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.installs), 0);
+  assert.equal(await page.locator('.app-shell').getAttribute('inert'), null, 'A failed native restart must restore an editable window.');
+  saved = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
+  assert.equal(saved.reviews[0].comments[0].body, feedbackBeforeWindowClose);
+  await page.locator('.review-comment').waitFor();
+  editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
+  if (!await editor.isVisible()) await page.getByRole('button', { name: 'Edit comment', exact: true }).click();
+  assert.equal(await editor.inputValue(), feedbackBeforeWindowClose);
+  assert.equal(await editor.isEditable(), true);
+  console.log('A native install failure after window close restores the saved, editable workspace and cached update.');
+
+  const downloadsBeforeAuthorization = await desktop.evaluate(({ app }) => {
+    app.branchlineUpdateTest.pauseForAuthorization = true;
+    return app.branchlineUpdateTest.downloads;
+  });
+  const authorizationFeedback = 'Save these pending keystrokes before asking for administrator approval.';
+  await editor.fill(authorizationFeedback);
   await page.evaluate(() => {
     void window.reviewAPI.getState().then(state => {
       void window.reviewAPI.updateProject(state.projects[0].id, { name: 'Saved during update' });
       void window.reviewAPI.installUpdate();
     });
   });
+  await phase('installing');
+  await page.getByText('Your review work is saved. If macOS asks for an administrator password, use the system prompt to continue.', { exact: true }).waitFor();
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationPending), true);
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.installs), 0);
+  assert.equal(page.isClosed(), false, 'The app must stay open until administrator authorization finishes.');
+  assert.notEqual(await page.locator('.app-shell').getAttribute('inert'), null, 'The saved workspace stays locked during authorization.');
+  saved = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
+  assert.equal(saved.reviews[0].comments[0].body, authorizationFeedback, 'Pending feedback must reach disk before authorization.');
+  assert.equal(saved.projects[0].name, 'Saved during update');
+  await page.screenshot({ path: 'artifacts/update-authorization.png', animations: 'disabled' });
+  await desktop.evaluate(({ app }) => app.branchlineUpdateTest.resolveAuthorization('cancel'));
+  await phase('downloaded');
+  const cancelled = await state();
+  assert.equal(cancelled.error.action, 'install');
+  assert.match(cancelled.error.message, /cancelled/i);
+  assert.equal(cancelled.availableVersion, '99.0.0');
+  assert.equal(cancelled.progress, 100);
+  assert.equal(page.isClosed(), false);
+  assert.equal(await page.locator('.app-shell').getAttribute('inert'), null, 'Cancelling authorization must restore editing.');
+  assert.equal(await editor.inputValue(), authorizationFeedback);
+  console.log('Administrator authorization waits until work is saved; cancellation preserves the download and restores editing.');
+
+  const finalFeedback = 'The final keystrokes must survive the update.';
+  await editor.fill(finalFeedback);
+  await page.getByRole('button', { name: 'Restart to update', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Retry update', exact: true }).click();
+  await phase('installing');
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationPending), true);
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationRequests), 2);
+  assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.downloads), downloadsBeforeAuthorization, 'Retrying authorization must reuse the downloaded update.');
+  saved = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
+  assert.equal(saved.reviews[0].comments[0].body, finalFeedback);
+  const appClosed = desktop.waitForEvent('close');
+  await desktop.evaluate(({ app }) => app.branchlineUpdateTest.resolveAuthorization('allow'));
   await appClosed; desktop = undefined;
   saved = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
   assert.equal(saved.reviews[0].comments[0].body, finalFeedback);
@@ -127,7 +199,7 @@ try {
   const persisted = await page.evaluate(() => window.reviewAPI.getState());
   assert.equal(persisted.reviews[0].comments[0].body, finalFeedback);
   assert.deepEqual(errors, []);
-  console.log('Update desktop smoke passed: UI, retries, postponement, window recreation, save failure and safe restart.');
+  console.log('Update desktop smoke passed: UI, retries, postponement, window recreation, save failure, administrator authorization cancellation and safe restart.');
 } catch (error) {
   console.error(error);
   if (page && !page.isClosed()) await page.screenshot({ path: 'artifacts/update-failure.png', timeout: 3000 }).catch(() => {});
