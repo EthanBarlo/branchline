@@ -46,7 +46,7 @@ function environment(allowIdentityConfig = false): NodeJS.ProcessEnv {
 }
 
 function assertHash(value: string): void {
-  if (!objectId.test(value) || /^0+$/.test(value)) throw new Error('A submodule update requires a complete, nonzero Git commit hash.');
+  if (!objectId.test(value) || /^0+$/.test(value)) throw new Error('This operation requires a complete, nonzero Git commit hash.');
 }
 
 function validateIdentity(identity: PointerIdentity): void {
@@ -85,7 +85,7 @@ export class PointerService {
     input?: string; env?: NodeJS.ProcessEnv; credentials?: PointerRemoteInput['credentials'];
     signal?: AbortSignal; allowIdentityConfig?: boolean;
   } = {}): Promise<string> {
-    if (options.signal?.aborted) return Promise.reject(new Error('Submodule pointer operation was cancelled.'));
+    if (options.signal?.aborted) return Promise.reject(new Error('Remote Git operation was cancelled.'));
     const env = { ...environment(options.allowIdentityConfig), ...options.env };
     const config = [
       '-c', `core.hooksPath=${nullFile}`, '-c', 'core.fsmonitor=false', '-c', 'core.quotePath=false',
@@ -107,8 +107,8 @@ export class PointerService {
       }, (error, stdout, stderr) => {
         delete env.BRANCHLINE_GIT_API_TOKEN;
         if (!error) { resolve(stdout.trimEnd()); return; }
-        let message = options.signal?.aborted ? 'Submodule pointer operation was cancelled.'
-          : error.killed ? 'Git timed out. Refresh the remote PR before retrying the submodule update.'
+        let message = options.signal?.aborted ? 'Remote Git operation was cancelled.'
+          : error.killed ? 'Git timed out. Check the remote operation result before retrying.'
             : stderr.trim() || error.message;
         if (options.credentials?.token) {
           message = message.split(options.credentials.token).join('[redacted]');
@@ -262,6 +262,23 @@ export class PointerService {
       await this.initialize(directory);
       const remote = await this.validateRemoteInput(directory, input);
       return await this.remoteHead(directory, input, remote) === input.expectedHead;
+    });
+  }
+
+  /** Delete only the reviewed remote ref; no fetch, checkout or local index is needed. */
+  async deleteBranch(input: PointerRemoteInput): Promise<void> {
+    const directory = this.directory(input.repository);
+    await this.serialized(directory, async () => {
+      await this.initialize(directory);
+      const remote = await this.validateRemoteInput(directory, input);
+      const actual = await this.remoteHead(directory, input, remote);
+      if (actual === undefined) return; // Reconcile a deletion whose response was lost.
+      if (actual !== input.expectedHead) throw new Error('The source branch changed. It was retained instead of deleted.');
+      await this.options.testTransport?.beforePush?.();
+      // Unlike an unconditional provider DELETE, an explicit old-OID lease also
+      // rejects a concurrent push or rollback after the final remote read.
+      await this.command(directory, ['push', '--porcelain', '--no-verify', `--force-with-lease=refs/heads/${input.sourceBranch}:${input.expectedHead}`, '--', remote, `:refs/heads/${input.sourceBranch}`], input);
+      if (await this.remoteHead(directory, input, remote) !== undefined) throw new Error('The deletion completed but the source branch exists again. It was retained; check Bitbucket before continuing.');
     });
   }
 

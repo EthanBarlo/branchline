@@ -53,6 +53,7 @@ export interface RepoStatus {
   baseCommit?: string;
   headCommit?: string;
   workingTreeIncluded: boolean;
+  loading?: boolean;
   error?: string;
   pointers?: { path: string; oldHash: string | null; newHash: string | null }[];
 }
@@ -64,6 +65,7 @@ export interface ReviewSnapshot {
   warnings: string[];
   refreshedAt: string;
   fingerprint: string;
+  loading?: boolean;
 }
 
 export interface ReviewComment {

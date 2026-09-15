@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ProjectIntegration, RemoteReviewChanged, RemoteReviewState } from '../shared/integrations';
-import { pullRequestKey } from '../shared/integrations';
+import { branchReviewKey, pullRequestKey } from '../shared/integrations';
 import { validRelativePath, validateRepositoryMappings } from './repository-mapping';
 
 interface StoredIntegrations { version: 1; projects: Record<string, ProjectIntegration>; reviews: Record<string, RemoteReviewState>; tickets: Record<string, string>; }
@@ -35,7 +35,7 @@ function validateState(value: unknown): asserts value is StoredIntegrations {
   }
   for (const review of Object.values(data.reviews) as any[]) {
     require(record(review) && string(review.connectionId) && Array.isArray(review.pullRequests) && review.pullRequests.length > 0
-      && review.pullRequests.length <= 100 && record(review.publications) && optional(review.ticketKey, ticket));
+      && review.pullRequests.length <= 200 && record(review.publications) && optional(review.ticketKey, ticket));
     identifier(review.connectionId);
     validateRepositoryMappings(review.pullRequests.map((pr: any) => pr?.repository));
     for (const pr of review.pullRequests) {
@@ -49,11 +49,39 @@ function validateState(value: unknown): asserts value is StoredIntegrations {
         && optional(pr.checks, checks => Array.isArray(checks) && checks.every(c => record(c) && string(c.name) && string(c.state) && optional(c.url, safeUrl))));
     }
     const prKeys = new Set(review.pullRequests.map(pullRequestKey));
+    const branchKeys = new Set<string>();
+    if (review.repositories !== undefined) {
+      require(Array.isArray(review.repositories) && review.repositories.length > 0);
+      validateRepositoryMappings(review.repositories.map((row: any) => row?.repository));
+      for (const row of review.repositories) {
+        require(record(row) && string(row.sourceBranch) && !!row.sourceBranch && string(row.targetBranch) && !!row.targetBranch
+          && optional(row.sourceHash, hash) && optional(row.targetHash, hash) && optional(row.mergeBaseHash, hash)
+          && oneOf(row.status, ['pull-request', 'changes', 'no-changes', 'missing-branch', 'unavailable'])
+          && optional(row.prId, positive) && optional(row.error, string));
+        if (row.prId !== undefined) require(prKeys.has(`${row.repository.relativePath}#${row.prId}`));
+        if (['pull-request', 'changes', 'no-changes'].includes(row.status)) require(hash(row.sourceHash) && hash(row.targetHash));
+        if (row.status === 'pull-request') require(positive(row.prId));
+        if (row.check !== undefined) require(record(row.check) && oneOf(row.check.state, ['queued', 'checking', 'ready', 'failed']) && optional(row.check.error, string));
+        require(row.sourceBranch === review.pullRequests[0].sourceBranch && row.targetBranch === review.pullRequests[0].targetBranch);
+        if (row.creation !== undefined) {
+          const c = row.creation;
+          require(record(c) && oneOf(c.state, ['sending', 'unknown', 'failed']) && hash(c.sourceHash) && hash(c.targetHash)
+            && date(c.startedAt) && string(c.marker) && /^[a-f0-9]{24}$/.test(c.marker) && optional(c.error, string));
+        }
+        if (row.cleanup !== undefined) {
+          const c = row.cleanup;
+          require(record(c) && oneOf(c.state, ['pending', 'checking', 'sending', 'deleted', 'retained', 'unknown', 'skipped'])
+            && optional(c.expectedHead, hash) && optional(c.error, string));
+          if (c.state === 'sending') require(hash(c.expectedHead));
+        }
+        branchKeys.add(branchReviewKey(row.repository.relativePath));
+      }
+    }
     for (const [id, publication] of Object.entries(review.publications) as [string, any][]) {
       identifier(id);
       require(record(publication) && publication.commentId === id && record(publication.anchor));
       const anchor = publication.anchor;
-      require(prKeys.has(anchor.prKey) && hash(anchor.sourceHash) && hash(anchor.targetHash) && validRelativePath(anchor.path, false)
+      require((prKeys.has(anchor.prKey) || branchKeys.has(anchor.prKey) && publication.remoteId === undefined) && hash(anchor.sourceHash) && hash(anchor.targetHash) && validRelativePath(anchor.path, false)
         && oneOf(anchor.side, ['additions', 'deletions']) && range(anchor) && string(anchor.fingerprint) && !!anchor.fingerprint);
       require(oneOf(publication.state, ['draft', 'sending', 'synced', 'failed', 'unknown', 'conflict'])
         && optional(publication.action, v => oneOf(v, ['create', 'update', 'delete', 'resolve', 'reopen']))
@@ -110,6 +138,12 @@ export class IntegrationStore {
     this.loadError = null;
     // A process can disappear after the server accepted a request. Never blindly repeat it.
     for (const review of Object.values(this.state.reviews)) {
+      for (const row of review.repositories ?? []) {
+        delete row.check;
+        if (row.creation?.state === 'sending') { row.creation.state = 'unknown'; row.creation.error = 'PR creation was interrupted. Check Bitbucket before retrying.'; }
+        if (row.cleanup?.state === 'sending') { row.cleanup.state = 'unknown'; row.cleanup.error = 'Branch deletion was interrupted. Reconcile the remote branch before retrying.'; }
+        if (row.cleanup?.state === 'checking') row.cleanup.state = 'pending';
+      }
       for (const publication of Object.values(review.publications)) {
         if (publication.state === 'sending') { publication.state = 'unknown'; publication.error = 'Delivery is unknown after restart. Reconcile before retrying.'; }
       }

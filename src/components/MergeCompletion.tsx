@@ -26,6 +26,6 @@ export function MergeCompletion({ reviewId, remote, jiraLink, onDismiss }: {
       <button className="icon-button" type="button" aria-label="Dismiss merge results" onClick={onDismiss}><X size={15} /></button>
     </header>
     {error && <div className="integration-error" role="alert"><TriangleAlert size={14} /><span>{error}</span></div>}
-    <MergeProgressView operation={remote.operation} pullRequests={remote.pullRequests} />
+    <MergeProgressView operation={remote.operation} pullRequests={remote.pullRequests} repositories={remote.repositories} />
   </section>;
 }

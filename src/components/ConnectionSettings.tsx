@@ -14,7 +14,7 @@ const providers = {
   },
   bitbucket: {
     name: 'Bitbucket',
-    description: 'Find pull requests, publish inline feedback and merge across repositories.',
+    description: 'Review branches across repositories, create missing PRs, publish feedback and merge.',
     scopes: connectionScopes.bitbucket,
     docs: 'https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/',
   },
@@ -153,9 +153,9 @@ export function ConnectionSettings({ kind, onChanged, onBusyChange }: {
             void window.reviewAPI.copyConnectionScopes(kind).then(() => setCopyStatus('Scopes copied.')).catch(() => setCopyStatus('Could not copy. Select the scope names below to copy them manually.'));
           }}><Copy size={12} />Copy required scopes</button></div>
           <dl className="connection-scopes">{provider.scopes.map(([scope, description]) => <div key={scope}><dt><code>{scope}</code></dt><dd>{description}</dd></div>)}</dl>
-          {kind === 'bitbucket' && <div className="connection-optional-scope"><span className="connection-optional">Optional · Submodule pointer updates</span><code>write:repository:bitbucket</code><p>Add Repositories · Write if you want Branchline to push parent submodule pointer commits. Your account must also have write access to those repositories.</p></div>}
+          {kind === 'bitbucket' && <div className="connection-optional-scope"><span className="connection-optional">Repository write access</span><p>Repositories · Write lets Branchline delete matching empty branches after merging and optionally update submodule pointers. If your existing token only has repository read access, replace it with a token containing all the scopes above.</p></div>}
           {copyStatus && <p className="connection-copy-status" role="status">{copyStatus}</p>}
-          <p className="connection-help">{kind === 'jira' ? 'Choose these classic scopes within the scoped-token flow. Jira access stays limited to the issues your account can view.' : 'These permissions enable PR discovery, inline feedback, approval and merging. Repository permissions and merge checks still apply.'} <SetupLink url={provider.docs}>Token setup guide</SetupLink></p>
+          <p className="connection-help">{kind === 'jira' ? 'Choose these classic scopes within the scoped-token flow. Jira access stays limited to the issues your account can view.' : 'These permissions enable branch reviews, PR creation, inline feedback, approval, merging and branch cleanup. Repository permissions and merge checks still apply.'} <SetupLink url={provider.docs}>Token setup guide</SetupLink></p>
         </div></li>
         <li><span className="connection-step-number" aria-hidden="true">3</span><div className="connection-step-content"><h4>Paste your token and connect</h4><p>Copy the token when Atlassian displays it, then paste it here.</p>
           <label className="connection-field">API token<input className="text-input connection-token-input" aria-label="API token" type="password" placeholder="Paste your API token" autoComplete="new-password" spellCheck={false} required disabled={!!busy} value={editor.token} onChange={event => setEditor({ ...editor, token: event.target.value })} /></label>

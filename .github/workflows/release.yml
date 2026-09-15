@@ -39,8 +39,11 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run test:desktop
+      - run: npm run test:desktop:background-review
       - run: npm run test:desktop:jira
       - run: npm run test:desktop:updates
+      - run: npm run test:desktop:integrations
+      - run: npm run test:desktop:integration-backend
       - name: Build, sign and notarize universal DMG and ZIP
         run: npx --no-install electron-builder --mac --universal --publish never -c.forceCodeSigning=true
         env:

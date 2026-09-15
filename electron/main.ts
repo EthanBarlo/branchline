@@ -238,6 +238,9 @@ app.whenReady().then(async () => {
     });
     await connections.load();
     integrations = new IntegrationService(store, reviews, integrationStore, connections, new PointerService(join(app.getPath('userData'), 'pointer-workspaces')));
+    integrations.onRemoteReviewLoadProgress(change => {
+      if (window && !window.webContents.isDestroyed()) window.webContents.send('review:remote-review-load', change);
+    });
     jira = new JiraService(store, url => shell.openExternal(url));
     updates = createUpdateService(async () => {
       await installGate.prepare(() => flushWindow('install'));

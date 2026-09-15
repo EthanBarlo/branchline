@@ -10,7 +10,7 @@ import { ReviewService } from '../electron/review-service';
 import { ProviderError, type ConnectionCredentials, type ConnectionManager } from '../electron/connection-manager';
 import type { BitbucketClient } from '../electron/bitbucket-client';
 import type { PointerService } from '../electron/pointer-service';
-import { pullRequestKey, type ConnectionInput, type InlinePayload, type ProjectIntegration, type PullRequest, type RemoteComment, type RepositoryMapping } from '../shared/integrations';
+import { pullRequestKey, type ConnectionInput, type InlinePayload, type ProjectIntegration, type PullRequest, type RemoteComment, type RepositoryMapping, type RemoteReviewLoadProgress } from '../shared/integrations';
 import { currentReviewId, reviewContextKey, type Review, type ReviewFile, type ReviewSnapshot } from '../shared/types';
 
 const hash = (value: string) => value.repeat(40);
@@ -22,7 +22,7 @@ const pr = (mapping = root, id = 7): PullRequest => ({ id, repository: mapping, 
 const file: ReviewFile = { id: 'src/new.ts', repoRelativePath: '.', path: 'src/new.ts', oldPath: 'src/old.ts', remotePath: 'src/new.ts', status: 'R', additions: 2, deletions: 1,
   oldContent: 'old\nline\n', newContent: 'new\nline\nlast\n', binary: false, fingerprint: 'contents-v1', baseCommit: hash('c'), headCommit: hash('a'), source: 'committed' };
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, progressive = false) {
   const directory = await mkdtemp(join(tmpdir(), 'branchline-integration-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const reviewsPath = join(directory, 'reviews.json'), statePath = join(directory, 'integrations.json');
@@ -34,7 +34,7 @@ async function fixture(t: TestContext) {
     ['jira', { info: { id: 'jira', kind: 'jira', label: 'Jira', email: 'jira@other.example', accountId: 'jira-account', displayName: 'Jira User', storage: 'session', connected: true, cloudId: 'separate-cloud', siteUrl: 'https://separate.atlassian.net' }, email: 'jira@other.example', token: 'jira-private-token' }],
   ]);
   const calls = { clientTokens: [] as string[], clients: [] as string[], prs: [] as { repository: RepositoryMapping; id: number }[], jira: [] as [string, string][], localSnapshots: 0, localInspections: 0, remoteSnapshots: 0, credentialReads: 0, commentReads: 0, discoveries: [] as string[], saves: 0 };
-  const hooks: { beforeSnapshot?: () => Promise<void>; beforeSave?: () => Promise<void>; snapshotError?: Error; snapshot?: (value: ReviewSnapshot) => ReviewSnapshot; localSnapshot?: (review: Review) => Promise<ReviewSnapshot>; pr?: (value: PullRequest) => PullRequest; listError?: Error; publishError?: Error } = {};
+  const hooks: { beforeRepository?: (repository: RepositoryMapping) => Promise<void>; beforeComments?: () => Promise<void>; beforeSnapshot?: () => Promise<void>; beforeSave?: () => Promise<void>; snapshotError?: Error; snapshot?: (value: ReviewSnapshot) => ReviewSnapshot; localSnapshot?: (review: Review) => Promise<ReviewSnapshot>; pr?: (value: PullRequest) => PullRequest; listError?: Error; publishError?: Error } = {};
   const live = new Map([pr(), pr(child, 8)].map(value => [pullRequestKey(value), value]));
   const comments: RemoteComment[] = [], sent: InlinePayload[] = [];
   const credentials = (id: string) => { calls.credentialReads++; const value = accounts.get(id); if (!value?.token) throw new Error('Reconnect this account.'); return structuredClone(value); };
@@ -46,15 +46,19 @@ async function fixture(t: TestContext) {
     async getIssue(id: string, key: string) { credentials(id); calls.jira.push([id, key]); return { key, title: `Issue ${key}`, description: { type: 'doc', version: 1, content: [] }, url: `https://separate.atlassian.net/browse/${key}` }; },
   } as unknown as ConnectionManager;
   const client = {
+    async getRepository() { return { defaultBranch: 'main' }; },
+    async getBranch(mapping: RepositoryMapping, name: string) { const value = [...live.values()].find(pr => pr.repository.relativePath === mapping.relativePath); return value ? { name, hash: name === value.sourceBranch ? value.sourceHash : value.targetHash } : null; },
+    async mergeBase() { return hash('c'); },
+    async findPullRequests(mapping: RepositoryMapping, source: string, states = ['OPEN']) { if (hooks.listError) throw hooks.listError; return [...live.values()].filter(value => value.repository.relativePath === mapping.relativePath && value.sourceBranch === source && states.includes(value.state)).map(value => structuredClone(value)); },
     async listPullRequests(mapping: RepositoryMapping) { if (hooks.listError) throw hooks.listError; return [...live.values()].filter(value => value.repository.relativePath === mapping.relativePath).map(value => structuredClone(value)); },
     async getPullRequest(repository: RepositoryMapping, id: number) { calls.prs.push({ repository: structuredClone(repository), id }); const value = live.get(`${repository.relativePath}#${id}`); if (!value) throw new Error('PR not found'); return structuredClone(hooks.pr?.(value) ?? value); },
-    async listComments() { calls.commentReads++; if (hooks.publishError) throw hooks.publishError; return structuredClone(comments); },
+    async listComments() { calls.commentReads++; const result = structuredClone(comments); await hooks.beforeComments?.(); if (hooks.publishError) throw hooks.publishError; return result; },
     async createComment(_pr: PullRequest, payload: InlinePayload) { if (hooks.publishError) throw hooks.publishError; sent.push(structuredClone(payload)); const comment = { id: comments.length + 1, authorId: 'bb-account', body: payload.content.raw, resolved: false, deleted: false, path: payload.inline.path, from: payload.inline.from, to: payload.inline.to, startFrom: payload.inline.start_from, startTo: payload.inline.start_to }; comments.push(comment); return structuredClone(comment); },
     async updateComment(_pr: PullRequest, id: number, body: string) { comments.find(c => c.id === id)!.body = body; return structuredClone(comments.find(c => c.id === id)!); },
     async resolveComment(_pr: PullRequest, id: number, resolved: boolean) { comments.find(c => c.id === id)!.resolved = resolved; },
     async deleteComment(_pr: PullRequest, id: number) { comments.find(c => c.id === id)!.deleted = true; },
   } as unknown as BitbucketClient;
-  const remoteSnapshot = (id: string): ReviewSnapshot => ({ reviewId: id, files: [structuredClone(file)], repos: [{ relativePath: '.', workingTreeIncluded: false, currentBranch: null }], warnings: [], fingerprint: 'snapshot-v1', refreshedAt: new Date().toISOString() });
+  const remoteSnapshot = (id: string): ReviewSnapshot => ({ reviewId: id, files: [structuredClone(file)], repos: [root, child].map(repo => ({ relativePath: repo.relativePath, workingTreeIncluded: false, currentBranch: null })), warnings: [], fingerprint: 'snapshot-v1', refreshedAt: new Date().toISOString() });
   let currentBranch: string | null = 'APP-999-current';
   const inspect = async () => { calls.localInspections++; return { rootPath: project.repoPath, name: project.name, branches: ['main', currentBranch ?? ''], currentBranch }; };
   let service: IntegrationService;
@@ -67,7 +71,15 @@ async function fixture(t: TestContext) {
   service = new IntegrationService(reviews, reviewService, state, connections, {} as PointerService, {
     createClient: value => { calls.clients.push(value.info.id); calls.clientTokens.push(value.token); return client; }, inspect,
     discover: async repoPath => { calls.discoveries.push(repoPath); return [structuredClone(root), structuredClone(child)]; },
-    snapshot: async (_client, id, prs) => { calls.remoteSnapshots++; await hooks.beforeSnapshot?.(); if (hooks.snapshotError) throw hooks.snapshotError; const snapshot = remoteSnapshot(id); return { snapshot: hooks.snapshot?.(snapshot) ?? snapshot, pullRequests: structuredClone(prs) }; },
+    ...(progressive ? {
+      repositorySnapshot: async (_client: BitbucketClient, id: string, row: import('../shared/integrations').BranchReviewRepository, pr?: PullRequest) => {
+        calls.remoteSnapshots++; await hooks.beforeRepository?.(row.repository);
+        const mapping = row.repository;
+        const snapshot: ReviewSnapshot = { ...remoteSnapshot(id), files: [{ ...file, id: mapping.relativePath === '.' ? file.id : `${mapping.relativePath}/${file.id}`, repoRelativePath: mapping.relativePath }],
+          repos: [{ relativePath: mapping.relativePath, workingTreeIncluded: false, currentBranch: row.sourceBranch }] };
+        return { snapshot: hooks.snapshot?.(snapshot) ?? snapshot, pullRequests: pr ? [pr] : [], repositories: [row] };
+      },
+    } : { snapshot: async (_client: BitbucketClient, id: string, prs: PullRequest[]) => { calls.remoteSnapshots++; await hooks.beforeSnapshot?.(); if (hooks.snapshotError) throw hooks.snapshotError; const snapshot = remoteSnapshot(id); return { snapshot: hooks.snapshot?.(snapshot) ?? snapshot, pullRequests: structuredClone(prs) }; } }),
   });
   const settings: ProjectIntegration = { jiraConnectionId: 'jira', bitbucketConnectionId: 'bb', repositories: [root, child], updateSubmodulePointers: false };
   await service.configureProjectIntegration(project.id, settings);
@@ -257,9 +269,8 @@ test('publishing still checks live PR revisions after marking the cached file re
   f.live.get('.#7')!.sourceHash = hash('d');
   const before = structuredClone(f.calls);
 
-  const result = await f.service.publishFeedback(review.id);
-  assert.equal(result.publications[comment.id].state, 'failed');
-  assert.match(result.publications[comment.id].error ?? '', /PR changed/);
+  await assert.rejects(() => f.service.publishFeedback(review.id), /branch changed/);
+  assert.equal(f.state.review(review.id)!.publications[comment.id].state, 'draft');
   assert.ok(f.calls.prs.length > before.prs.length, 'Publication validates the current remote commit before sending.');
   assert.deepEqual(f.sent, [], 'A draft from the earlier snapshot is never posted to changed PR lines.');
   assert.equal(f.calls.remoteSnapshots, before.remoteSnapshots);
@@ -370,9 +381,8 @@ test('permission loss preserves local feedback, reports unavailable refresh, and
   f.hooks.listError = new ProviderError('Permission removed', 403);
   await assert.rejects(() => f.service.listPullRequests(f.project.id, 'all'), /Permission removed/);
   f.hooks.publishError = new ProviderError('Permission removed', 403);
-  const failed = await f.service.publishFeedback(review.id);
-  assert.equal(failed.publications[comment.id].state, 'failed');
-  assert.match(failed.publications[comment.id].error ?? '', /Permission removed/);
+  await assert.rejects(() => f.service.publishFeedback(review.id), /Permission removed/);
+  assert.equal(f.state.review(review.id)!.publications[comment.id].state, 'draft');
   assert.equal(f.sent.length, 0); assert.equal(f.calls.localSnapshots, 0);
 });
 
@@ -461,4 +471,155 @@ test('invalid in-memory state mutations leave the last valid snapshot and disk s
   assert.deepEqual(f.state.review(review.id)?.publications, {});
   await f.service.setReviewTicket(review.id, 'APP-123');
   assert.equal(f.state.ticket(review.id), 'APP-123');
+});
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+}
+async function promptly<T>(action: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([action, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('A remote read blocked the local interaction.')), 1500); })]); }
+  finally { clearTimeout(timer); }
+}
+
+test('remote repositories stream independently and allow comments and markers before all files arrive', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const slow = barrier(), childStarted = barrier(), firstFiles = barrier();
+  t.after(() => slow.release());
+  f.hooks.beforeRepository = async repository => { if (repository.relativePath === child.relativePath) { childStarted.release(); await slow.promise; } };
+  const events: RemoteReviewLoadProgress[] = [];
+  const unsubscribe = f.service.onRemoteReviewLoadProgress(event => {
+    events.push(structuredClone(event));
+    if (event.result?.snapshot.files.some(value => value.id === file.id)) firstFiles.release();
+  });
+  t.after(unsubscribe);
+  const refreshing = f.service.refreshReview(review.id);
+  await promptly(Promise.all([childStarted.promise, firstFiles.promise]));
+  const partial = events.find(event => event.result?.snapshot.files.length)!;
+  assert.equal(partial.complete, false); assert.equal(partial.result!.snapshot.loading, true);
+  assert.deepEqual(partial.result!.snapshot.files.map(value => value.id), [file.id]);
+  assert.equal(partial.result!.snapshot.repos.find(repo => repo.relativePath === child.relativePath)?.loading, true);
+  assert.ok(events.some(event => event.repositories.filter(row => ['checking', 'files'].includes(row.phase)).length === 2));
+  assert.ok(events.some(event => !event.result), 'Phase-only progress does not resend cumulative file contents.');
+  assert.equal(f.calls.remoteSnapshots, 2);
+  const joined = f.service.refreshReview(review.id);
+  assert.equal(events.at(-1)!.result!.snapshot.files.length, 1, 'Reopening an in-flight review replays its cached files.');
+  const before = structuredClone(f.calls);
+  const marked = await promptly(f.service.setApprovals(review.id, [{ fileId: file.id, fingerprint: file.fingerprint }], true));
+  assert.equal(marked.approvals[file.id], file.fingerprint);
+  assert.deepEqual(f.calls, before, 'Mark reviewed performs no remote request.');
+  const saved = await promptly(f.service.addComment(review.id, { fileId: file.id, repoRelativePath: '.', path: file.path, side: 'additions', lineStart: 1, lineEnd: 1, body: 'Saved while child loads', context: 'new', fingerprint: file.fingerprint }));
+  assert.equal(f.state.review(review.id)!.publications[saved.comments[0].id].anchor.sourceHash, hash('a'));
+  for (const action of [() => f.service.previewFeedback(review.id), () => f.service.publishFeedback(review.id), () => f.service.previewMerge(review.id), () => f.service.runPullRequestAction(review.id, 'merge')]) await assert.rejects(action, /finish loading/);
+  await assert.rejects(() => f.service.disconnectConnection('bb'), /Wait for/);
+  await assert.rejects(() => f.service.configureProjectIntegration(f.project.id, f.settings), /current review operation/);
+  slow.release();
+  const [result, sameResult] = await Promise.all([refreshing, joined]);
+  assert.deepEqual(result, sameResult);
+  assert.equal(f.calls.remoteSnapshots, 2, 'Joined refreshes do not repeat discovery/downloads.');
+  assert.equal(result.snapshot.files.length, 2); assert.equal(result.snapshot.loading, false);
+  assert.equal(result.review.comments[0].body, 'Saved while child loads');
+  assert.equal(result.review.approvals[file.id], file.fingerprint);
+  assert.equal(events.at(-1)!.complete, true);
+  assert.ok(events.every((event, index) => !index || event.sequence > events[index - 1].sequence));
+  await f.service.idle(); assert.equal(f.service.busy, false);
+  assert.equal(f.calls.localSnapshots, 0); assert.equal(f.calls.localInspections, 0);
+});
+
+test('progressive refresh retains markers for pending repositories and clears changed versions only when loaded', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const initial = await f.service.refreshReview(review.id);
+  await f.service.setApprovals(review.id, initial.snapshot.files.map(value => ({ fileId: value.id, fingerprint: value.fingerprint })), true);
+  const slow = barrier(), rootLoaded = barrier(); t.after(() => slow.release());
+  f.hooks.beforeRepository = async repository => { if (repository.relativePath === child.relativePath) await slow.promise; };
+  f.hooks.snapshot = snapshot => ({ ...snapshot, files: snapshot.files.map(value => value.repoRelativePath === child.relativePath ? { ...value, fingerprint: 'child-changed', newContent: 'changed\n' } : value) });
+  const unsubscribe = f.service.onRemoteReviewLoadProgress(event => { if (event.repositories.some(row => row.repository.relativePath === '.' && row.phase === 'ready')) rootLoaded.release(); });
+  t.after(unsubscribe);
+  const refreshing = f.service.refreshReview(review.id);
+  await promptly(rootLoaded.promise);
+  const childFile = initial.snapshot.files.find(value => value.repoRelativePath === child.relativePath)!;
+  assert.equal(f.reviews.getReview(review.id).approvals[childFile.id], childFile.fingerprint);
+  const saved = await promptly(f.service.addComment(review.id, { fileId: file.id, repoRelativePath: '.', path: file.path, side: 'additions', lineStart: 1, lineEnd: 1, body: 'Second load draft', context: 'new', fingerprint: file.fingerprint }));
+  slow.release(); const final = await refreshing;
+  assert.equal(final.review.approvals[childFile.id], undefined);
+  assert.equal(final.review.approvals[file.id], file.fingerprint);
+  assert.equal(final.review.comments[0].id, saved.comments[0].id);
+});
+
+test('remote comment reconciliation reads outside the save queue and preserves concurrent edits as conflicts', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const comment = await f.add(review.id); await f.service.publishFeedback(review.id);
+  f.comments[0].body = 'Edited in Bitbucket';
+  const slow = barrier(), entered = barrier(); t.after(() => slow.release());
+  f.hooks.beforeComments = async () => { entered.release(); await slow.promise; };
+  const refreshing = f.service.refreshReview(review.id);
+  await promptly(entered.promise);
+  await promptly(f.service.updateComment(review.id, comment.id, { body: 'Edited locally while syncing' }));
+  slow.release(); const result = await refreshing;
+  assert.equal(result.review.comments[0].body, 'Edited locally while syncing');
+  const publication = f.state.review(review.id)!.publications[comment.id];
+  assert.equal(publication.state, 'conflict'); assert.equal(publication.remote?.body, 'Edited in Bitbucket');
+});
+
+test('a delayed feedback response cannot undo an explicit conflict resolution', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const comment = await f.add(review.id); await f.service.publishFeedback(review.id);
+  await f.service.updateComment(review.id, comment.id, { body: 'Local edit' });
+  f.comments[0].body = 'Chosen remote version';
+  await f.service.previewFeedback(review.id);
+  assert.equal(f.state.review(review.id)!.publications[comment.id].state, 'conflict');
+  // A stale provider read returns the original version after the user chooses
+  // the already-known newer remote version from the conflict preview.
+  f.comments[0].body = 'Initial comment';
+  const slow = barrier(), entered = barrier(); t.after(() => slow.release());
+  f.hooks.beforeComments = async () => { entered.release(); await slow.promise; };
+  const refreshing = f.service.refreshReview(review.id);
+  await promptly(entered.promise);
+  await promptly(f.service.resolveCommentConflict(review.id, comment.id, 'remote'));
+  slow.release(); const result = await refreshing;
+  assert.equal(result.review.comments[0].body, 'Chosen remote version');
+  assert.equal(f.state.review(review.id)!.publications[comment.id].acknowledged?.body, 'Chosen remote version');
+  assert.equal(f.state.review(review.id)!.publications[comment.id].state, 'synced');
+});
+
+test('a failed snapshot commit cannot authorize unaccepted files or leave an endless loading state', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const accept = f.reviewService.acceptRemoteSnapshot.bind(f.reviewService);
+  let commits = 0;
+  f.reviewService.acceptRemoteSnapshot = async (...args) => {
+    if (++commits >= 3) throw new Error('Review storage unavailable');
+    return accept(...args);
+  };
+  const events: RemoteReviewLoadProgress[] = [];
+  const unsubscribe = f.service.onRemoteReviewLoadProgress(event => events.push(structuredClone(event))); t.after(unsubscribe);
+  await assert.rejects(() => f.service.refreshReview(review.id), /storage unavailable/);
+  const failure = events.at(-1)!;
+  assert.equal(failure.complete, true); assert.match(failure.error!, /storage unavailable/);
+  assert.equal(failure.result!.snapshot.loading, false);
+  assert.equal(failure.result!.snapshot.files.length, 1, 'Only successfully accepted repository files are exposed.');
+  assert.ok(failure.result!.snapshot.repos.every(repo => repo.error));
+  for (const action of [() => f.service.previewFeedback(review.id), () => f.service.publishFeedback(review.id), () => f.service.previewMerge(review.id), () => f.service.runPullRequestAction(review.id, 'merge')]) await assert.rejects(action, /last load could not finish/);
+  f.reviewService.acceptRemoteSnapshot = accept;
+  const retried = await f.service.refreshReview(review.id);
+  assert.equal(retried.snapshot.files.length, 2); assert.equal(retried.snapshot.loading, false);
+  assert.deepEqual((await f.service.previewFeedback(review.id)).blockers, []);
+});
+
+test('failure accepting the final grouped snapshot stops loading and blocks actions until retry', async t => {
+  const f = await fixture(t, true), review = await f.open();
+  const accept = f.reviewService.acceptRemoteSnapshot.bind(f.reviewService);
+  f.reviewService.acceptRemoteSnapshot = async (...args) => {
+    if (!args[1].loading) throw new Error('Final snapshot could not be saved');
+    return accept(...args);
+  };
+  const events: RemoteReviewLoadProgress[] = [];
+  const unsubscribe = f.service.onRemoteReviewLoadProgress(event => events.push(structuredClone(event))); t.after(unsubscribe);
+  await assert.rejects(() => f.service.refreshReview(review.id), /could not be saved/);
+  assert.equal(events.at(-1)!.complete, true);
+  assert.equal(events.at(-1)!.result!.snapshot.loading, false);
+  await assert.rejects(() => f.service.previewMerge(review.id), /last load could not finish/);
+  f.reviewService.acceptRemoteSnapshot = accept;
+  assert.equal((await f.service.refreshReview(review.id)).snapshot.loading, false);
 });

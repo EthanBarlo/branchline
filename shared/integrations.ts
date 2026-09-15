@@ -1,4 +1,4 @@
-import type { DiffSide, Review, ReviewComment, ReviewSnapshot } from './types';
+import type { DiffSide, Review, ReviewComment, ReviewSnapshot, ReviewRefresh } from './types';
 
 export type ConnectionKind = 'jira' | 'bitbucket';
 export interface ConnectionInfo { id: string; kind: ConnectionKind; label: string; email: string; accountId: string; displayName: string; siteUrl?: string; cloudId?: string; storage: 'secure' | 'session'; connected: boolean; }
@@ -20,6 +20,17 @@ export interface PullRequest {
   unsupportedReason?: string;
 }
 export interface PullRequestRef { repositoryPath: string; prId: number; }
+/** Captured branch comparison, including repositories that do not yet have a PR. */
+export interface BranchReviewRepository {
+  repository: RepositoryMapping; sourceBranch: string; targetBranch: string;
+  sourceHash?: string; targetHash?: string; mergeBaseHash?: string;
+  status: 'pull-request' | 'changes' | 'no-changes' | 'missing-branch' | 'unavailable';
+  prId?: number; error?: string;
+  check?: { state: 'queued' | 'checking' | 'ready' | 'failed'; error?: string };
+  creation?: { state: 'sending' | 'unknown' | 'failed'; sourceHash: string; targetHash: string; startedAt: string; marker: string; error?: string };
+  cleanup?: { state: 'pending' | 'checking' | 'sending' | 'deleted' | 'retained' | 'unknown' | 'skipped'; expectedHead?: string; error?: string };
+}
+export const branchReviewKey = (repositoryPath: string): string => `${repositoryPath}#branch`;
 export type PullRequestFilter = 'all' | 'reviewer' | 'author';
 export interface JiraIssue { key: string; title: string; description: unknown; url: string; }
 export interface RemoteAnchor { prKey: string; sourceHash: string; targetHash: string; path: string; side: DiffSide; lineStart: number; lineEnd: number; fingerprint: string; }
@@ -45,16 +56,19 @@ export interface MergeProgress {
 export interface MergeOperation { action: 'approve' | 'merge'; state: 'running' | 'paused' | 'complete'; items: MergeProgress[]; updatedAt: string; error?: string; }
 export interface RemoteReviewState {
   connectionId: string; pullRequests: PullRequest[]; publications: Record<string, CommentPublication>;
+  repositories?: BranchReviewRepository[];
   ticketKey?: string; operation?: MergeOperation;
 }
 export interface RemoteReviewChanged { reviewId: string; state: RemoteReviewState; }
-export interface FeedbackItem { commentId: string; repositoryPath: string; prId: number; path: string; side: DiffSide; lineStart: number; lineEnd: number; body: string; action: string; state: CommentPublication['state']; error?: string; remote?: PublishedValue; }
+export interface RemoteRepositoryLoad { repository: RepositoryMapping; phase: 'queued' | 'checking' | 'files' | 'ready' | 'failed'; error?: string; }
+export interface RemoteReviewLoadProgress { reviewId: string; sequence: number; repositories: RemoteRepositoryLoad[]; result?: ReviewRefresh; complete: boolean; error?: string; }
+export interface FeedbackItem { commentId: string; repositoryPath: string; prId: number; createsPullRequest?: boolean; path: string; side: DiffSide; lineStart: number; lineEnd: number; body: string; action: string; state: CommentPublication['state']; error?: string; remote?: PublishedValue; }
 export interface FeedbackPreview { items: FeedbackItem[]; blockers: string[]; }
-export interface MergePreview { pullRequests: PullRequest[]; blockers: string[]; warnings: string[]; updateSubmodulePointers: boolean; operation?: MergeOperation; }
+export interface MergePreview { pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; blockers: string[]; warnings: string[]; updateSubmodulePointers: boolean; operation?: MergeOperation; }
 export interface ReanchorInput { fileId: string; fingerprint: string; side: DiffSide; lineStart: number; lineEnd: number; }
 export interface RemoteComment { id: number; authorId: string; body: string; resolved: boolean; deleted: boolean; path?: string; from?: number; to?: number; startFrom?: number; startTo?: number; createdAt?: string; updatedAt?: string; url?: string; }
 export interface InlinePayload { content: { raw: string }; inline: { path: string; from?: number; to?: number; start_from?: number; start_to?: number }; }
-export interface RemoteSnapshotResult { snapshot: ReviewSnapshot; pullRequests: PullRequest[]; }
+export interface RemoteSnapshotResult { snapshot: ReviewSnapshot; pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; }
 export const pullRequestKey = (pr: Pick<PullRequest, 'repository' | 'id'>): string => `${pr.repository.relativePath}#${pr.id}`;
 export interface IntegrationAPI {
   getIntegrations(): Promise<IntegrationState>;
@@ -70,6 +84,7 @@ export interface IntegrationAPI {
   openPullRequestReview(projectId: string, refs: PullRequestRef[]): Promise<Review>;
   getRemoteReview(reviewId: string): Promise<RemoteReviewState | null>;
   onRemoteReviewChanged(callback: (event: RemoteReviewChanged) => void): () => void;
+  onRemoteReviewLoadProgress(callback: (event: RemoteReviewLoadProgress) => void): () => void;
   getJiraIssue(reviewId: string, key?: string): Promise<JiraIssue>;
   getJiraTicketLink(reviewId: string): Promise<{ key: string; url: string } | null>;
   setReviewTicket(reviewId: string, key: string): Promise<void>;

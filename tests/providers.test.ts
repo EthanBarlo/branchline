@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ConnectionManager, ProviderHttp, type ConnectionCredentials, type SecureStorage } from '../electron/connection-manager';
 import { BitbucketClient } from '../electron/bitbucket-client';
-import { buildRemoteSnapshot } from '../electron/remote-snapshot';
+import { buildRemoteRepositorySnapshot, buildRemoteSnapshot } from '../electron/remote-snapshot';
 import { discoverRepositories, parseBitbucketRemote, validateRepositoryMappings } from '../electron/repository-mapping';
-import type { RepositoryMapping } from '../shared/integrations';
+import type { BranchReviewRepository, RepositoryMapping } from '../shared/integrations';
 
 const S = 'a'.repeat(40), D = 'b'.repeat(40), M = 'c'.repeat(40), CHILD = 'd'.repeat(40);
 const mapping: RepositoryMapping = { relativePath: '.', workspace: 'team', repoSlug: 'repo' };
@@ -158,6 +158,74 @@ test('Bitbucket merges request a normal merge and source cleanup, then handle as
   assert.equal(await client.branchExists(pr), false);
   const fork = rawPR(); fork.source.repository.uuid = '{fork}';
   assert.throws(() => client.normalizePullRequest(mapping, fork), /forks/);
+});
+
+test('branch reads validate repository identity, preserve encoded branch names and resolve captured abbreviated commits', async () => {
+  const requests: string[] = [];
+  const client = new BitbucketClient(credentials, async input => {
+    const url = new URL(String(input)); requests.push(url.pathname);
+    if (url.pathname === '/2.0/repositories/team/repo') return json({ full_name: 'team/repo', uuid: '{11111111-1111-1111-1111-111111111111}', mainbranch: { name: 'main' } });
+    if (url.pathname.endsWith('/refs/branches/feature%2FAPP-123')) return json({ name: 'feature/APP-123', target: { hash: S.slice(0, 12) } });
+    if (url.pathname.endsWith(`/commit/${S.slice(0, 12)}`)) return json({ hash: S });
+    if (url.pathname.includes('/merge-base/')) return json({ hash: M });
+    return json({}, 404);
+  });
+  assert.deepEqual(await client.getRepository({ ...mapping, uuid: '{11111111-1111-1111-1111-111111111111}' }), { defaultBranch: 'main' });
+  assert.deepEqual(await client.getBranch(mapping, 'feature/APP-123'), { name: 'feature/APP-123', hash: S });
+  assert.equal(await client.getBranch(mapping, 'missing'), null);
+  assert.equal(await client.mergeBase(mapping, S, D), M);
+  assert.ok(requests.some(path => path.endsWith(`/commit/${S.slice(0, 12)}`)));
+  await assert.rejects(() => client.getRepository({ ...mapping, uuid: '{22222222-2222-2222-2222-222222222222}' }), /different or incomplete repository/);
+  for (const name of ['', '..', '../main', 'main\n', '/main']) await assert.rejects(() => client.getBranch(mapping, name), /valid branch/);
+  const invalid = new BitbucketClient(credentials, async () => json({ full_name: 'other/repo', mainbranch: { name: 'main' } }));
+  await assert.rejects(() => invalid.getRepository(mapping), /different or incomplete repository/);
+});
+
+test('incomplete branch responses and commit lookup failures never masquerade as missing branches', async () => {
+  for (const value of [{ name: 'other', target: { hash: S } }, { name: 'main' }, { name: 'main', target: { hash: 'invalid' } }]) {
+    const client = new BitbucketClient(credentials, async () => json(value));
+    await assert.rejects(() => client.getBranch(mapping, 'main'), /incomplete branch|invalid captured commit/);
+  }
+  for (const response of [json({}, 404), json({ hash: D })]) {
+    const client = new BitbucketClient(credentials, async input => String(input).includes('/refs/branches/') ? json({ name: 'main', target: { hash: S.slice(0, 12) } }) : response);
+    await assert.rejects(() => client.getBranch(mapping, 'main'));
+  }
+  for (const status of [401, 403, 500]) {
+    const client = new BitbucketClient(credentials, async () => json({}, status));
+    await assert.rejects(() => client.getBranch(mapping, 'main'), error => (error as { status?: number }).status === status);
+  }
+});
+
+test('branch PR discovery escapes the source filter, paginates and preserves divergent targets', async () => {
+  const sourceBranch = 'feature/quoted"branch';
+  const one = rawPR(); one.source.branch.name = sourceBranch;
+  const two = rawPR(); two.id = 4; two.source.branch.name = sourceBranch; two.destination.branch.name = 'release';
+  const client = new BitbucketClient(credentials, async input => {
+    const url = new URL(String(input));
+    assert.equal(url.searchParams.get('q'), `source.branch.name=${JSON.stringify(sourceBranch)}`);
+    assert.deepEqual(url.searchParams.getAll('state'), ['OPEN', 'MERGED']);
+    if (url.searchParams.get('page') === '2') return json({ values: [two] });
+    url.searchParams.set('page', '2'); return json({ values: [one], next: url.href });
+  });
+  const found = await client.findPullRequests(mapping, sourceBranch, ['OPEN', 'MERGED']);
+  assert.deepEqual(found.map(pr => pr.targetBranch), ['main', 'release']);
+  const wrongBranch = new BitbucketClient(credentials, async () => json({ values: [rawPR()] }));
+  await assert.rejects(() => wrongBranch.findPullRequests(mapping, sourceBranch), /outside the requested branch/);
+});
+
+test('explicit PR creation sends native branches and cleanup intent and validates the returned identity', async () => {
+  const sent: any[] = [];
+  const client = new BitbucketClient(credentials, async (input, init) => { sent.push({ path: new URL(String(input)).pathname, method: init?.method, body: JSON.parse(String(init?.body)) }); return json(rawPR(), 201); });
+  const input = { sourceBranch: 'feature/APP-123', targetBranch: 'main', title: 'Review me', description: 'Branchline review reference' };
+  const result = await client.createPullRequest(mapping, input);
+  assert.equal(result.id, 3);
+  assert.deepEqual(sent, [{ path: '/2.0/repositories/team/repo/pullrequests', method: 'POST', body: { title: input.title, description: input.description, source: { branch: { name: input.sourceBranch } }, destination: { branch: { name: input.targetBranch } }, close_source_branch: true } }]);
+  const changed = rawPR(); changed.destination.branch.name = 'release';
+  const wrong = new BitbucketClient(credentials, async () => json(changed, 201));
+  await assert.rejects(() => wrong.createPullRequest(mapping, input), /different branch pair/);
+  const short = rawPR(); short.source.commit.hash = S.slice(0, 12);
+  const unresolved = new BitbucketClient(credentials, async (_input, init) => init?.method === 'POST' ? json(short, 201) : json({}, 403));
+  await assert.rejects(() => unresolved.createPullRequest(mapping, input), error => { assert.equal((error as { status?: number }).status, undefined); assert.match((error as Error).message, /accepted PR creation/); return true; });
 });
 
 test('comments preserve inline ranges and map remote identity/resolution', async () => {
@@ -378,6 +446,125 @@ test('large files stay metadata-only and gitlinks avoid combined-tree file/direc
   const snapshot = (await buildRemoteSnapshot(pointer.client, 'review', [pointer.pr])).snapshot;
   assert.deepEqual(snapshot.files, []);
   assert.deepEqual(snapshot.repos[0].pointers, [{ path: 'new name.txt', oldHash: D, newHash: CHILD }]);
+});
+
+function branchSnapshotClient(options: { move?: string; missing?: string; failed?: string; empty?: boolean; historical?: boolean } = {}) {
+  const child: RepositoryMapping = { relativePath: 'packages/core', workspace: 'team', repoSlug: 'core' };
+  const empty: RepositoryMapping = { relativePath: 'packages/empty', workspace: 'team', repoSlug: 'empty' };
+  const missing: RepositoryMapping = { relativePath: 'packages/missing', workspace: 'team', repoSlug: 'missing' };
+  const requests: string[] = [];
+  const branch = 'feature/APP-123';
+  const client = new BitbucketClient(credentials, async (input, init) => {
+    assert.ok(!init?.method || init.method === 'GET', 'opening a review cannot create PRs, comments or branches');
+    const url = new URL(String(input)); requests.push(url.href);
+    const slug = url.pathname.split('/')[4];
+    if (url.pathname.endsWith('/pullrequests/3')) {
+      const pr = rawPR();
+      if (options.historical) { pr.state = 'MERGED'; pr.destination.commit.hash = 'f'.repeat(40); }
+      return json(pr);
+    }
+    if (url.pathname.includes('/statuses')) return json({ values: [] });
+    if (url.pathname.includes('/refs/branches/')) {
+      const name = decodeURIComponent(url.pathname.split('/').at(-1)!);
+      if (slug === options.failed) return json({}, 403);
+      if (name === branch && (slug === 'missing' && options.move !== 'missing' || slug === options.missing || slug === 'repo' && options.historical)) return json({}, 404);
+      return json({ name, target: { hash: name === 'main' ? D : slug === options.move ? CHILD : slug === 'empty' ? D : S } });
+    }
+    if (url.pathname.includes('/merge-base/')) return json({ hash: slug === 'empty' ? D : M });
+    if (url.pathname.includes('/diffstat/')) {
+      if (slug === 'empty' || options.empty) return json({ values: [] });
+      return json({ values: [{ status: 'renamed', lines_added: 1, lines_removed: 1, old: { path: 'old.txt' }, new: { path: 'new.txt' } }] });
+    }
+    const path = decodeURIComponent(url.pathname.split('/').at(-1)!);
+    if (url.searchParams.get('format') === 'meta') return json({ type: 'commit_file', path, size: url.pathname.includes(M) ? 9 : 8, attributes: [] });
+    return new Response(url.pathname.includes(M) ? 'original\n' : 'changed\n');
+  });
+  const pr = client.normalizePullRequest(mapping, rawPR());
+  if (options.historical) pr.state = 'MERGED';
+  const rows: BranchReviewRepository[] = [
+    { repository: mapping, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, prId: 3, status: 'pull-request' },
+    { repository: child, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, status: 'changes' },
+    { repository: empty, sourceBranch: branch, targetBranch: 'main', sourceHash: D, targetHash: D, mergeBaseHash: D, status: 'no-changes' },
+    { repository: missing, sourceBranch: branch, targetBranch: 'main', targetHash: D, status: 'missing-branch' },
+  ];
+  return { client, pr, rows, requests };
+}
+
+test('branch snapshots include repositories without PRs with exact rename paths and explicit empty or missing status', async () => {
+  const { client, pr, rows, requests } = branchSnapshotClient();
+  const { snapshot, pullRequests, repositories } = await buildRemoteSnapshot(client, 'branch-review', [pr], rows);
+  assert.deepEqual(snapshot.files.map(file => file.id), ['new.txt', 'packages/core/new.txt']);
+  assert.deepEqual(snapshot.files.map(file => file.oldPath), ['old.txt', 'old.txt']);
+  assert.equal(snapshot.files[1].newContent, 'changed\n');
+  assert.equal(snapshot.files[1].baseCommit, M); assert.equal(snapshot.files[1].headCommit, S);
+  assert.equal(pullRequests.length, 1, 'no synthetic PR IDs are introduced');
+  assert.deepEqual(repositories?.map(row => row.status), ['pull-request', 'changes', 'no-changes', 'missing-branch']);
+  assert.ok(snapshot.repos.every(repo => !repo.error), 'a branch that never existed is not an incomplete download');
+  assert.match(snapshot.warnings[0], /Source branch feature\/APP-123 does not exist/);
+  assert.ok(requests.some(url => url.includes('/core/src/')));
+  assert.ok(requests.some(url => url.includes('/empty/refs/branches/feature%2FAPP-123')), 'empty branches are rechecked too');
+  assert.ok(!requests.some(url => /\/core\/pullrequests\//.test(url)));
+});
+
+test('a single captured repository without a PR becomes reviewable independently of its starter PR', async () => {
+  const { client, rows, requests } = branchSnapshotClient();
+  const result = await buildRemoteRepositorySnapshot(client, 'branch-review', rows[1]);
+  assert.deepEqual(result.snapshot.files.map(file => file.id), ['packages/core/new.txt']);
+  assert.deepEqual(result.snapshot.repos.map(repo => repo.relativePath), ['packages/core']);
+  assert.deepEqual(result.pullRequests, []);
+  assert.equal(result.repositories![0].status, 'changes');
+  assert.ok(!requests.some(url => url.includes('/repo/') || url.includes('/pullrequests/')));
+  assert.equal(result.snapshot.files[0].oldContent, 'original\n');
+  assert.equal(result.snapshot.files[0].newContent, 'changed\n');
+});
+
+test('whole-group snapshot downloads run concurrently with four repository pipelines and stable output order', { timeout: 10000 }, async () => {
+  const { client, rows } = branchSnapshotClient();
+  const input = Array.from({ length: 6 }, (_, index): BranchReviewRepository => ({ ...rows[1], repository: { relativePath: `repo${index}`, workspace: 'team', repoSlug: `repo${index}` } }));
+  let release!: () => void, fourStarted!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { fourStarted = resolve; });
+  const requests: string[] = [];
+  const pages = client.pages.bind(client);
+  client.pages = async path => {
+    if (path.includes('/diffstat/')) { requests.push(path); if (requests.length === 4) fourStarted(); await hold; }
+    return pages(path);
+  };
+  const task = buildRemoteSnapshot(client, 'branch-review', [], input);
+  try {
+    await started;
+    assert.equal(requests.length, 4, 'a slow repository does not serialize other repository downloads');
+  } finally { release(); }
+  const result = await task;
+  assert.equal(requests.length, 6);
+  assert.equal(result.snapshot.files.length, 6);
+  assert.ok(result.snapshot.repos.every(repo => !repo.error));
+  assert.deepEqual(result.repositories!.map(row => row.repository.relativePath), input.map(row => row.repository.relativePath));
+});
+
+test('new pushes, newly appearing branches, disappeared branches and denied branch reads remain explicit blockers', async () => {
+  for (const options of [{ move: 'core' }, { move: 'empty' }, { move: 'missing' }, { missing: 'core' }, { failed: 'core' }]) {
+    const { client, pr, rows } = branchSnapshotClient(options);
+    const { snapshot, repositories } = await buildRemoteSnapshot(client, 'branch-review', [pr], rows);
+    const slug = options.move ?? options.missing ?? options.failed;
+    const row = repositories!.find(item => item.repository.repoSlug === slug)!;
+    assert.equal(row.status, 'unavailable');
+    assert.ok(row.error);
+    assert.ok(snapshot.repos.find(repo => repo.relativePath === row.repository.relativePath)?.error);
+    assert.ok(!snapshot.files.some(file => file.repoRelativePath === row.repository.relativePath), 'a stale repository never contributes reviewable file pairs');
+  }
+});
+
+test('merged PR snapshots retain captured history after deletion while no-file unique commits still require merging', async () => {
+  const historical = branchSnapshotClient({ historical: true });
+  const result = await buildRemoteSnapshot(historical.client, 'branch-review', [historical.pr], historical.rows);
+  assert.equal(result.snapshot.repos[0].error, undefined);
+  assert.equal(result.pullRequests[0].targetHash, D, 'the merged destination tip must not replace the reviewed comparison');
+  assert.ok(!historical.requests.some(url => url.includes('/repo/refs/branches/')), 'a deleted merged source need not exist');
+  const empty = branchSnapshotClient({ empty: true });
+  const resultEmpty = await buildRemoteSnapshot(empty.client, 'branch-review', [empty.pr], empty.rows);
+  assert.equal(resultEmpty.repositories![1].status, 'changes', 'unique empty commits still participate in merge');
+  assert.deepEqual(resultEmpty.snapshot.files, []);
 });
 
 test('remote mapping accepts Cloud SSH/HTTPS remotes and rejects traversal or duplicate repositories', () => {

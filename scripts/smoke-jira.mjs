@@ -114,8 +114,8 @@ try {
     const bitbucket = dialog.getByRole('tabpanel', { name: 'Bitbucket', exact: true });
     await bitbucket.getByRole('button', { name: 'Copy required scopes', exact: true }).click();
     await bitbucket.getByText('Scopes copied.', { exact: true }).waitFor();
-    const bitbucketScopes = 'read:user:bitbucket\nread:repository:bitbucket\nread:pullrequest:bitbucket\nwrite:pullrequest:bitbucket';
-    assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), bitbucketScopes, 'Bitbucket scope copy excludes optional repository write.');
+    const bitbucketScopes = 'read:user:bitbucket\nread:repository:bitbucket\nwrite:repository:bitbucket\nread:pullrequest:bitbucket\nwrite:pullrequest:bitbucket';
+    assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), bitbucketScopes, 'Bitbucket scope copy includes repository write for branch cleanup.');
     await assert.rejects(page.evaluate(() => window.reviewAPI.copyConnectionScopes('not-a-provider')), 'Unknown providers must be rejected by the main process.');
     assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), bitbucketScopes, 'Rejected inputs must leave the clipboard unchanged.');
   } finally {

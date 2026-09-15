@@ -19,18 +19,38 @@ function fixtureBridge() {
   const local = { id: 'current:project-1', projectId: project.id, kind: 'current', name: 'Current', repoPath: project.repoPath, baseBranch: 'main', featureBranch: 'feature/APP-123-review', includeWorkingTree: true, createdAt: now, comments: [], approvals: {} };
   const files = [{ id: '.:review.ts', repoRelativePath: '.', path: 'review.ts', status: 'M', additions: 3, deletions: 2, oldContent: 'export function ready() {\n  const enabled = false;\n  return enabled;\n}\n', newContent: 'export function ready() {\n  const enabled = true;\n  const reviewed = true;\n  return enabled && reviewed;\n}\n', binary: false, fingerprint: 'current-file', baseCommit: 'target-hash', headCommit: 'source-hash', source: 'committed' }];
   const mappings = [{ relativePath: '.', workspace: 'acme', repoSlug: 'platform', uuid: 'repo-root' }, { relativePath: 'modules/core', workspace: 'acme', repoSlug: 'core', uuid: 'repo-core', parentRelativePath: '.', submodulePath: 'modules/core' }];
+  mappings.push(...['docs', 'assets', 'absent'].map(repoSlug => ({ relativePath: `modules/${repoSlug}`, workspace: 'acme', repoSlug, uuid: `repo-${repoSlug}`, parentRelativePath: '.', submodulePath: `modules/${repoSlug}` })));
+  files.push({ ...files[0], id: 'modules/docs:guide.ts', repoRelativePath: 'modules/docs', path: 'guide.ts', fingerprint: 'docs-file' });
   const pr = (id, repository, sourceBranch = local.featureBranch, extra = {}) => ({ id, repository, title: `${id === 12 ? 'Core: ' : ''}Make reviews available`, url: `https://bitbucket.org/acme/${repository.repoSlug}/pull-requests/${id}`, sourceBranch, targetBranch: 'main', sourceHash: 'source-hash', targetHash: 'target-hash', author: { id: 'author-2', name: 'Alex Reviewer' }, reviewers: [{ id: 'bb-user', name: 'Casey' }], participants: [], state: 'OPEN', draft: false, mergeStrategies: ['merge_commit'], ...extra });
   const prs = [pr(11, mappings[0]), pr(12, mappings[1]), pr(21, mappings[0], 'feature/APP-456-settings'), pr(99, mappings[0], local.featureBranch, { unsupportedReason: 'Fork pull requests are not supported yet.' })];
   const comment = (suffix, body, fingerprint = 'current-file') => ({ id: `10000000-0000-4000-8000-00000000000${suffix}`, fileId: files[0].id, repoRelativePath: '.', path: 'review.ts', side: 'additions', lineStart: 2, lineEnd: 3, body, fingerprint, context: '  const enabled = true;\n  const reviewed = true;', createdAt: now, resolved: false });
   const review = { ...local, id: 'remote-review', kind: 'saved', name: 'APP-123 · 2 pull requests', includeWorkingTree: false, remote: true, comments: [comment(1, 'Name the flag after the behavior it enables.'), comment(2, 'This comment needs current lines.', 'earlier-file'), comment(3, 'Confirm delivery before retrying.'), comment(4, 'Local wording for the shared comment.')] };
-  const anchor = comment => ({ prKey: '.#11', sourceHash: 'source-hash', targetHash: 'target-hash', path: comment.path, side: comment.side, lineStart: comment.lineStart, lineEnd: comment.lineEnd, fingerprint: comment.fingerprint });
+  review.comments.push({ ...comment(5, 'Explain the new guide option.', 'docs-file'), fileId: files[1].id, repoRelativePath: 'modules/docs', path: 'guide.ts' });
+  const anchor = comment => ({ prKey: comment.repoRelativePath === 'modules/docs' ? 'modules/docs#branch' : '.#11', sourceHash: 'source-hash', targetHash: 'target-hash', path: comment.path, side: comment.side, lineStart: comment.lineStart, lineEnd: comment.lineEnd, fingerprint: comment.fingerprint });
   const remote = { connectionId: 'bb', pullRequests: [prs[0], prs[1]], publications: Object.fromEntries(review.comments.map(comment => [comment.id, { commentId: comment.id, anchor: anchor(comment), state: 'draft' }])) };
+  remote.repositories = mappings.map((repository, index) => ({ repository, sourceBranch: local.featureBranch, targetBranch: 'main', sourceHash: 'source-hash', targetHash: 'target-hash', status: index < 2 ? 'pull-request' : index === 2 ? 'changes' : index === 3 ? 'no-changes' : 'missing-branch', ...(index < 2 ? { prId: remote.pullRequests[index].id } : {}) }));
   remote.publications[review.comments[2].id].state = 'unknown';
   Object.assign(remote.publications[review.comments[3].id], { state: 'conflict', remoteId: 104, authorId: 'bb-user', acknowledged: { body: 'Original wording.', resolved: false, deleted: false }, remote: { body: 'Wording edited in Bitbucket.', resolved: false, deleted: false } });
   const state = { projects: [project], reviews: [local], settings: { jiraBaseUrl: '' } };
   const integrations = { connections: [], projects: {} };
   const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0 };
   const remoteListeners = new Set();
+  const loadListeners = new Set();
+  let loadSequence = 0;
+  let advanceLoad;
+  let advancePreview;
+  let firstRemoteLoad = true;
+  let firstMergePreview = true;
+  let lastLoadEvent;
+  const loadStep = () => new Promise(resolve => { advanceLoad = () => { advanceLoad = undefined; resolve(); }; });
+  const previewStep = () => new Promise(resolve => { advancePreview = () => { advancePreview = undefined; resolve(); }; });
+  const emitLoad = (loadedFiles, phases, complete = false, reviewValue = review) => {
+    const result = { review: clone(reviewValue), snapshot: { ...snapshot(review.id), files: clone(loadedFiles), loading: !complete } };
+    lastLoadEvent = { reviewId: review.id, sequence: ++loadSequence, repositories: mappings.map((repository, index) => ({ repository, phase: phases[index] })), result, complete };
+    for (const listener of loadListeners) listener(clone(lastLoadEvent));
+    emitRemote();
+    return result;
+  };
   let failNextPublication = false;
   let advanceOperation;
   const emitRemote = () => { for (const listener of remoteListeners) listener(clone({ reviewId: review.id, state: remote })); };
@@ -45,17 +65,32 @@ function fixtureBridge() {
       const unchanged = comment && publication.acknowledged?.body === comment.body && publication.acknowledged?.resolved === comment.resolved;
       if (unchanged && !['unknown', 'conflict', 'failed'].includes(publication.state)) return [];
       const state = publication.state;
-      return [{ commentId: publication.commentId, repositoryPath: '.', prId: 11, path: publication.anchor.path, side: publication.anchor.side, lineStart: publication.anchor.lineStart, lineEnd: publication.anchor.lineEnd, body, action: !comment ? 'delete' : publication.remoteId ? 'update' : 'create', state, remote: publication.remote, error: comment?.fingerprint !== files[0].fingerprint && !publication.remoteId ? 'The PR changed. Choose current lines before publishing.' : publication.error }];
+      const repositoryPath = comment?.repoRelativePath || '.';
+      const destination = remote.pullRequests.find(pr => pr.repository.relativePath === repositoryPath);
+      return [{ commentId: publication.commentId, repositoryPath, prId: destination?.id || 0, createsPullRequest: !destination, path: publication.anchor.path, side: publication.anchor.side, lineStart: publication.anchor.lineStart, lineEnd: publication.anchor.lineEnd, body, action: !comment ? 'delete' : publication.remoteId ? 'update' : 'create', state, remote: publication.remote, error: comment?.fingerprint !== files.find(file => file.id === comment?.fileId)?.fingerprint && !publication.remoteId ? 'The PR changed. Choose current lines before publishing.' : publication.error }];
     });
     return { items, blockers: items.filter(item => item.error || item.state === 'unknown' || item.state === 'conflict').map(item => item.error || `${item.state === 'unknown' ? 'Check delivery' : 'Resolve the conflict'} before publishing.`) };
   }
   const api = {
     onBeforeClose: () => () => {}, onCloseCancelled: () => () => {}, onUpdateStateChanged: () => () => {}, onUpdateDialogRequested: () => () => {},
+    onRemoteReviewLoadProgress: listener => { loadListeners.add(listener); return () => { loadListeners.delete(listener); }; },
     onRemoteReviewChanged: listener => { remoteListeners.add(listener); return () => { remoteListeners.delete(listener); }; },
     getUpdateState: async () => ({ revision: 0, currentVersion: '0.10.0', phase: 'disabled', disabledReason: 'Updates disabled in fixture.' }),
     getState: async () => clone(state),
     updateSettings: async changes => { state.settings = changes; return clone(changes); },
-    refreshReview: async id => { calls.refreshes.push(id); return clone({ review: getReview(id), snapshot: snapshot(id), ...(id === local.id ? { inspection: { rootPath: project.repoPath, name: project.name, branches: ['main', local.featureBranch], currentBranch: local.featureBranch } } : {}) }); },
+    refreshReview: async id => { calls.refreshes.push(id);
+      if (id === review.id && firstRemoteLoad) {
+        firstRemoteLoad = false;
+        const originalReview = clone(review);
+        emitLoad([], mappings.map(() => 'checking'));
+        await loadStep();
+        emitLoad([files[0]], ['ready', 'files', 'files', 'checking', 'checking']);
+        await loadStep();
+        emitLoad(files, ['ready', 'ready', 'ready', 'checking', 'checking'], false, originalReview);
+        await loadStep();
+        return emitLoad(files, mappings.map(() => 'ready'), true, originalReview);
+      }
+      return clone({ review: getReview(id), snapshot: snapshot(id), ...(id === local.id ? { inspection: { rootPath: project.repoPath, name: project.name, branches: ['main', local.featureBranch], currentBranch: local.featureBranch } } : {}) }); },
     getIntegrations: async () => clone(integrations),
     getIntegrationDiagnostics: async () => ({ path: '/fixture/logs/integrations.log', available: true }),
     openIntegrationLog: async () => { calls.logOpens++; },
@@ -81,19 +116,34 @@ function fixtureBridge() {
     reanchorComment: async (_, id, input) => { const comment = review.comments.find(item => item.id === id); Object.assign(comment, input); remote.publications[id].anchor = anchor(comment); calls.reanchors.push({ id, ...input }); return clone(review); },
     resolveCommentConflict: async (_, id, choice) => { const publication = remote.publications[id]; const comment = review.comments.find(item => item.id === id); if (choice === 'remote') Object.assign(comment, publication.remote); publication.acknowledged = clone(publication.remote); publication.state = 'synced'; delete publication.remote; calls.conflicts.push(choice); return clone(review); },
     resolveUnknownPublication: async (_, id, remoteId) => { const publication = remote.publications[id]; publication.state = remoteId ? 'synced' : 'draft'; if (remoteId) { publication.remoteId = remoteId; const comment = review.comments.find(item => item.id === id); publication.acknowledged = { body: comment.body, resolved: comment.resolved, deleted: false }; } calls.unknown.push({ id, remoteId }); return clone(remote); },
-    publishFeedback: async () => { calls.publish++; if (failNextPublication) { failNextPublication = false; throw new Error('Bitbucket is temporarily unavailable. Try publishing again.'); } for (const comment of review.comments) Object.assign(remote.publications[comment.id], { state: 'synced', remoteId: remote.publications[comment.id].remoteId || 200 + Number(comment.id.at(-1)), acknowledged: { body: comment.body, resolved: comment.resolved, deleted: false } }); return clone(remote); },
-    previewMerge: async () => clone({ pullRequests: remote.pullRequests, blockers: [], warnings: [], updateSubmodulePointers: !!integrations.projects[project.id]?.updateSubmodulePointers, operation: remote.operation }),
+    publishFeedback: async () => { calls.publish++; if (failNextPublication) { failNextPublication = false; throw new Error('Bitbucket is temporarily unavailable. Try publishing again.'); } if (!remote.pullRequests.some(pr => pr.repository.repoSlug === 'docs')) { remote.repositories[2].creation = { state: 'sending' }; emitRemote(); await new Promise(resolve => setTimeout(resolve, 50)); remote.pullRequests.push(pr(13, mappings[2])); Object.assign(remote.repositories[2], { status: 'pull-request', prId: 13 }); delete remote.repositories[2].creation; } for (const comment of review.comments) Object.assign(remote.publications[comment.id], { state: 'synced', remoteId: remote.publications[comment.id].remoteId || 200 + Number(comment.id.at(-1)), acknowledged: { body: comment.body, resolved: comment.resolved, deleted: false } }); return clone(remote); },
+    previewMerge: async () => {
+      for (const row of remote.repositories) row.check = { state: 'checking' };
+      emitRemote();
+      if (firstMergePreview) {
+        firstMergePreview = false;
+        await previewStep();
+        for (const row of remote.repositories.slice(0, 2)) row.check = { state: 'ready' };
+        emitRemote();
+        await previewStep();
+      }
+      for (const row of remote.repositories) row.check = { state: row.status === 'unavailable' ? 'failed' : 'ready', ...(row.error ? { error: row.error } : {}) };
+      emitRemote();
+      return clone({ pullRequests: remote.pullRequests, repositories: remote.repositories, blockers: remote.repositories.filter(row => row.status === 'unavailable').map(row => row.error), warnings: [], updateSubmodulePointers: !!integrations.projects[project.id]?.updateSubmodulePointers, operation: remote.operation });
+    },
     runPullRequestAction: async (_, action) => {
       calls.actions.push(action);
       const previous = remote.operation;
       remote.operation = { action, state: 'running', updatedAt: now, items: remote.pullRequests.map(pr => ({ prKey: `${pr.repository.relativePath}#${pr.id}`, approval: 'approved', merge: 'pending', sourceHash: pr.sourceHash, targetHash: pr.targetHash })) };
-      const [parent, child] = remote.operation.items;
+      const [parent, child, docs] = remote.operation.items;
+      if (action === 'merge' && docs && previous?.action === 'merge') { Object.assign(docs, { merge: 'merged', cleanup: 'retained' }); remote.pullRequests[2].state = 'MERGED'; }
       if (action === 'approve') {
         emitRemote();
         await new Promise(resolve => setTimeout(resolve, 80));
         remote.operation.state = 'complete';
       } else if (calls.actions.filter(item => item === 'merge').length === 1) {
         Object.assign(child, { merge: 'merging', phase: 'merging' });
+        Object.assign(docs, { merge: 'merging', phase: 'merging' });
         emitRemote();
         await operationStep();
         Object.assign(child, { merge: 'merged', phase: 'cleanup', mergeCommit: 'core-merge-result' });
@@ -101,6 +151,8 @@ function fixtureBridge() {
         await operationStep();
         Object.assign(child, { cleanup: 'deleted' }); delete child.phase;
         remote.pullRequests[1].state = 'MERGED';
+        Object.assign(docs, { merge: 'merged', cleanup: 'retained' }); delete docs.phase;
+        remote.pullRequests[2].state = 'MERGED';
         Object.assign(parent, { merge: 'merging', phase: 'merging' });
         emitRemote();
         await operationStep();
@@ -115,8 +167,13 @@ function fixtureBridge() {
         emitRemote();
         await operationStep();
         parent.cleanup = 'deleted'; delete parent.phase;
-        remote.operation.state = 'complete';
         remote.pullRequests[0].state = 'MERGED';
+        remote.repositories[2].cleanup = { state: 'checking' }; emitRemote(); await operationStep();
+        remote.repositories[2].cleanup = { state: 'sending' }; remote.repositories[3].cleanup = { state: 'sending' }; emitRemote(); await operationStep();
+        remote.repositories[2].cleanup = { state: 'deleted' }; docs.cleanup = 'deleted';
+        remote.repositories[3].cleanup = { state: 'sending' }; emitRemote(); await operationStep();
+        remote.repositories[3].cleanup = { state: 'deleted' }; remote.repositories[4].cleanup = { state: 'skipped' };
+        remote.operation.state = 'complete';
       }
       emitRemote();
       return clone(remote);
@@ -130,7 +187,11 @@ function fixtureBridge() {
   contextBridge.exposeInMainWorld('reviewAPI', api);
   contextBridge.exposeInMainWorld('integrationSmoke', {
     inspect: () => clone({ calls, integrations, state, review, remote }),
+    advanceLoad: () => { if (!advanceLoad) throw new Error('No repository load is waiting.'); advanceLoad(); },
+    advancePreview: () => { if (!advancePreview) throw new Error('No merge preview is waiting.'); advancePreview(); },
+    emitOldLoad: () => { for (const listener of loadListeners) listener(clone({ ...lastLoadEvent, sequence: loadSequence - 1, complete: false, result: { review, snapshot: { ...snapshot(review.id), files: [], loading: true } } })); },
     failNextPublication: () => { failNextPublication = true; },
+    setRepositoryUnavailable: unavailable => { remote.repositories[2].status = unavailable ? 'unavailable' : 'changes'; if (unavailable) remote.repositories[2].error = 'Docs repository permission is missing.'; else delete remote.repositories[2].error; emitRemote(); },
     setSnapshotMode: mode => { snapshotMode = mode; },
     advanceOperation: () => { if (!advanceOperation) throw new Error('No operation step is waiting.'); advanceOperation(); },
     markAsyncFinishedAwaitingResume: () => {
@@ -267,21 +328,77 @@ try {
   await panel.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Browse Bitbucket pull requests', exact: true }).click();
   panel = await dialog(page, 'Pull requests');
-  await panel.getByRole('button', { name: 'Review 2 PRs', exact: true }).waitFor();
-  assert.equal(await panel.getByRole('checkbox', { name: 'Include platform PR 99', exact: true }).isDisabled(), true);
+  await panel.getByRole('button', { name: 'Review branch', exact: true }).first().waitFor();
+  await panel.getByText('Fork pull requests are not supported yet.', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('checkbox').count(), 0, 'Repository inclusion cannot silently exclude changes from a branch review.');
   await panel.getByRole('button', { name: 'Created by me', exact: true }).click();
-  await panel.getByRole('button', { name: 'Review 1 PR', exact: true }).waitFor();
+  await panel.getByRole('button', { name: 'Review branch', exact: true }).waitFor();
   await panel.getByRole('button', { name: 'Needs my review', exact: true }).click();
-  await panel.getByRole('button', { name: 'Review 2 PRs', exact: true }).waitFor();
+  await panel.getByRole('button', { name: 'Review branch', exact: true }).waitFor();
   await panel.getByRole('button', { name: 'All open', exact: true }).click();
-  await panel.getByRole('checkbox', { name: 'Include platform PR 99', exact: true }).waitFor();
+  await panel.getByText('Fork pull requests are not supported yet.', { exact: true }).waitFor();
   await page.screenshot({ path: 'artifacts/integration-inbox.png', animations: 'disabled' });
   // Install before selecting the remote review so any newly scheduled refresh
   // interval is advanced by the clock instead of waiting a real minute.
   await page.clock.install();
-  await panel.getByRole('button', { name: 'Review 2 PRs', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review branch', exact: true }).first().click();
   await page.getByRole('button', { name: 'Publish feedback', exact: true }).waitFor();
+  const centralLoading = page.getByRole('region', { name: 'Repository loading progress', exact: true });
+  await centralLoading.getByRole('listitem', { name: 'platform loading progress', exact: true }).waitFor();
+  assert.equal(await centralLoading.locator('.spin').count(), 5, 'Repository loading is visible in the empty review area.');
+  assert.equal(await page.getByRole('button', { name: 'Publish feedback', exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: 'Approve and merge', exact: true }).isDisabled(), true);
+  await page.screenshot({ path: 'artifacts/integration-loading-repositories.png', animations: 'disabled' });
+  await page.evaluate(() => window.integrationSmoke.advanceLoad());
   await page.locator('.diff-file-name').filter({ hasText: 'review.ts' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Mark reviewed', exact: true }).isEnabled(), true, 'The first repository is reviewable before the remaining repositories load.');
+  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
+  await page.getByText('Loaded files reviewed.', { exact: true }).waitFor();
+  assert.equal(await page.getByText('You’re all caught up.', { exact: true }).count(), 0, 'Finishing the loaded files must not imply the whole review is complete.');
+  assert.equal(await page.getByText('All caught up', { exact: true }).count(), 0, 'The file tree also waits until all repositories finish loading.');
+  await page.evaluate(() => window.integrationSmoke.advanceLoad());
+  await page.locator('.diff-file-name').filter({ hasText: 'guide.ts' }).waitFor();
+  await page.locator('.diff-content').evaluate(node => { window.integrationDiffNode = node; node.scrollTop = 12; window.integrationDiffScroll = node.scrollTop; });
+  await page.screenshot({ path: 'artifacts/integration-review-while-loading.png', animations: 'disabled' });
+  await page.evaluate(() => window.integrationSmoke.advanceLoad());
+  await page.locator('.remote-review-actions > .button:not([disabled])').first().waitFor();
+  await page.evaluate(() => window.integrationSmoke.emitOldLoad());
+  assert.equal(await page.locator('.diff-content').evaluate(node => node === window.integrationDiffNode && node.scrollTop === window.integrationDiffScroll), true, 'Later repository arrivals retain the selected diff and scroll position.');
+  assert.equal(await page.locator('.diff-file-name').filter({ hasText: 'guide.ts' }).count(), 1, 'Older progress cannot replace a finished snapshot.');
+  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().review.approvals['.:review.ts']), 'current-file');
+  await page.getByRole('combobox', { name: 'Filter changed files', exact: true }).click();
+  await page.getByRole('option', { name: 'All files', exact: true }).click();
+  await page.locator('[data-item-path="review.ts"]').click();
+  await page.getByRole('button', { name: 'Reviewed', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Filter changed files', exact: true }).click();
+  await page.getByRole('option', { name: 'Unreviewed', exact: true }).click();
+  const repositoryRoster = page.getByRole('list', { name: 'Branch review repositories', exact: true });
+  await repositoryRoster.getByRole('listitem', { name: 'docs branch review', exact: true }).getByText('Changes without a PR', { exact: true }).waitFor();
+  await repositoryRoster.getByRole('listitem', { name: 'assets branch review', exact: true }).getByText('No changes', { exact: true }).waitFor();
+  await repositoryRoster.getByRole('listitem', { name: 'absent branch review', exact: true }).getByText('Branch missing', { exact: true }).waitFor();
+  await page.locator('[data-item-path="review.ts"]').click();
+  await page.locator('.diff-file-name').filter({ hasText: 'review.ts' }).waitFor();
+  await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
+  panel = await dialog(page, 'Approve and merge');
+  await panel.getByText('Checking repositories…', { exact: true }).waitFor();
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 5, 'Every repository has its own preflight spinner.');
+  assert.equal(await panel.locator('.integration-loading').count(), 0, 'Merge checks do not add a separate generic spinner above the repositories.');
+  await page.screenshot({ path: 'artifacts/integration-merge-parallel-checks.png', animations: 'disabled' });
+  await page.evaluate(() => window.integrationSmoke.advancePreview());
+  await panel.getByText('2 / 5', { exact: true }).waitFor();
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 3);
+  await page.evaluate(() => window.integrationSmoke.advancePreview());
+  await panel.getByRole('listitem', { name: 'docs branch cleanup', exact: true }).getByText('Create PR, then merge', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('button', { name: 'Approve, merge and delete branches', exact: true }).isEnabled(), true, 'A missing PR does not block merging reviewed changes.');
+  await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await page.evaluate(() => window.integrationSmoke.setRepositoryUnavailable(true));
+  await repositoryRoster.getByRole('listitem', { name: 'docs branch review', exact: true }).getByText('Unavailable', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
+  panel = await dialog(page, 'Approve and merge');
+  await panel.getByRole('alert').filter({ hasText: 'Docs repository permission is missing.' }).waitFor();
+  assert.equal(await panel.getByRole('button', { name: 'Approve, merge and delete branches', exact: true }).isDisabled(), true, 'Unavailable repositories cannot silently disappear from a merge.');
+  await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await page.evaluate(() => window.integrationSmoke.setRepositoryUnavailable(false));
   await page.locator('[aria-label="Refresh review"]:not([disabled])').waitFor();
   const refreshCount = id => page.evaluate(id => window.integrationSmoke.inspect().calls.refreshes.filter(value => value === id).length, id);
   const initialRemoteRefreshes = await refreshCount('remote-review');
@@ -303,6 +420,7 @@ try {
   assert.equal(await refreshCount('remote-review'), initialRemoteRefreshes, 'Local checkout polling does not refresh an inactive remote review.');
   await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
   await page.getByRole('option', { name: 'APP-123 · 2 pull requests', exact: true }).click();
+  await page.locator('[data-item-path="review.ts"]').click();
   await page.waitForFunction(count => window.integrationSmoke.inspect().calls.refreshes.filter(id => id === 'remote-review').length > count, initialRemoteRefreshes);
   await page.locator('[aria-label="Refresh review"]:not([disabled])').waitFor();
   assert.equal(await refreshCount('remote-review'), initialRemoteRefreshes + 1, 'Reopening a saved remote review refreshes its snapshot once.');
@@ -343,6 +461,8 @@ try {
   await panel.getByRole('button', { name: 'Use Bitbucket version', exact: true }).click();
   await panel.getByRole('button', { name: 'Use Bitbucket version', exact: true }).waitFor({ state: 'hidden' });
   await page.screenshot({ path: 'artifacts/integration-publish-preview.png', animations: 'disabled' });
+  await panel.getByText('modules/docs · Create PR on publish', { exact: true }).waitFor();
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().remote.pullRequests)).length, 2, 'Draft comments do not create a PR.');
   await page.evaluate(() => window.integrationSmoke.failNextPublication());
   await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).click();
   await panel.getByText('Bitbucket is temporarily unavailable. Try publishing again.', { exact: true }).waitFor();
@@ -357,7 +477,9 @@ try {
   assert.deepEqual((await page.evaluate(() => window.integrationSmoke.inspect().calls.links)).slice(-2), ['https://bitbucket.org/acme/platform/pull-requests/11', 'https://bitbucket.org/acme/core/pull-requests/12'], 'Publishing keeps both repository links after successful items leave the preview.');
   await panel.getByRole('button', { name: 'Refresh delivery status', exact: true }).click();
   await panel.getByText('No feedback to publish.', { exact: true }).waitFor();
-  assert.equal(await panel.getByRole('region', { name: 'Pull requests in Bitbucket', exact: true }).getByRole('link', { name: /^Open PR\s*:/ }).count(), 2, 'PR links also remain after refreshing an empty publication preview.');
+  assert.equal(await panel.getByRole('region', { name: 'Pull requests in Bitbucket', exact: true }).getByRole('link', { name: /^Open PR\s*:/ }).count(), 3, 'PR links also remain after refreshing an empty publication preview.');
+  await panel.getByRole('link', { name: /^Open PR\s*:\s*docs #13$/ }).waitFor();
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().remote.pullRequests)).length, 3, 'Publishing creates the missing PR and keeps its link visible.');
   await page.screenshot({ path: 'artifacts/integration-published-pr-links.png', animations: 'disabled' });
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
 
@@ -394,18 +516,24 @@ try {
   panel = await dialog(page, 'Approve pull requests');
   await panel.getByRole('button', { name: 'Approve pull requests', exact: true }).click();
   await panel.getByText('Repositories approved', { exact: true }).waitFor();
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Skipped · no changes', { exact: true }).waitFor();
+  await panel.getByRole('listitem', { name: 'absent branch cleanup', exact: true }).getByText('Skipped · branch missing', { exact: true }).waitFor();
+  await panel.getByText('5 / 5', { exact: true }).waitFor();
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
   assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'remote-review', 'Approval alone keeps the review open.');
   assert.equal(await page.getByRole('region', { name: 'Merge complete', exact: true }).count(), 0);
 
   await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
   panel = await dialog(page, 'Approve and merge');
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Skipped · no changes', { exact: true }).waitFor();
   await panel.getByRole('button', { name: 'Approve, merge and delete branches', exact: true }).click();
   let coreRow = panel.getByRole('listitem', { name: 'core pull request 12', exact: true });
   let parentRow = panel.getByRole('listitem', { name: 'platform pull request 11', exact: true });
   await coreRow.getByText('Merging…', { exact: true }).waitFor();
   await parentRow.getByText('Waiting', { exact: true }).waitFor();
   assert.equal(await coreRow.locator('.spin').count(), 1, 'The active child repository displays a spinning status.');
+  await panel.getByRole('listitem', { name: 'docs pull request 13', exact: true }).getByText('Merging…', { exact: true }).waitFor();
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 2, 'Independent repositories show simultaneous merge progress.');
   assert.equal(await parentRow.locator('.spin').count(), 0, 'Waiting repositories do not appear to be merging.');
   await page.screenshot({ path: 'artifacts/integration-merge-running.png', animations: 'disabled' });
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
@@ -433,13 +561,28 @@ try {
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
   await parentRow.getByText('Checking branch deletion…', { exact: true }).waitFor();
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
+  const docsCleanupRow = panel.getByRole('listitem', { name: 'docs pull request 13', exact: true });
+  await docsCleanupRow.getByText('Checking branch…', { exact: true }).waitFor();
+  assert.equal(await docsCleanupRow.locator('.spin').count(), 1, 'Checking a retained source branch shows progress even after its PR has merged.');
+  await page.evaluate(() => window.integrationSmoke.advanceOperation());
+  await docsCleanupRow.getByText('Deleting branch…', { exact: true }).waitFor();
+  assert.equal(await docsCleanupRow.locator('.spin').count(), 1, 'Independent PR branch deletion displays a spinner.');
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Deleting branch…', { exact: true }).waitFor();
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 2, 'Independent branch deletions show simultaneous progress.');
+  await page.evaluate(() => window.integrationSmoke.advanceOperation());
+  await docsCleanupRow.getByText('Deleted', { exact: true }).waitFor();
+  const assetsRow = panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true });
+  await assetsRow.getByText('Deleting branch…', { exact: true }).waitFor();
+  assert.equal(await assetsRow.locator('.spin').count(), 1, 'Empty repositories show live cleanup progress.');
+  assert.equal(await page.getByRole('region', { name: 'Merge complete', exact: true }).count(), 0, 'The review stays open until empty branch cleanup completes.');
+  await page.evaluate(() => window.integrationSmoke.advanceOperation());
   const receipt = page.getByRole('region', { name: 'Merge complete', exact: true });
   await receipt.getByRole('heading', { name: 'Pull requests merged', exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'current:project-1');
   await panel.waitFor({ state: 'hidden' });
   assert.equal(await page.getByRole('dialog').count(), 0, 'A successful group merge closes the operation dialog and active review.');
   assert.equal(await page.locator('.remote-review-controls').count(), 0, 'The closed review leaves no stale Bitbucket controls behind the completion receipt.');
-  assert.equal(await receipt.getByText('Deleted', { exact: true }).count(), 2, 'The completed receipt retains every confirmed branch deletion.');
+  assert.equal(await receipt.getByText('Deleted', { exact: true }).count(), 4, 'The completed receipt retains every confirmed branch deletion.');
   await receipt.getByRole('button', { name: 'Open in Jira', exact: true }).click();
   assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.links)).at(-1), 'https://jira.example.atlassian.net/browse/OPS-789', 'The completion action opens the explicitly linked Jira ticket.');
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1050, 680));
@@ -455,6 +598,7 @@ try {
   await receipt.waitFor({ state: 'hidden' });
   await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
   await page.getByRole('option', { name: 'APP-123 · 2 pull requests', exact: true }).click();
+  await page.locator('[data-item-path="review.ts"]').click();
   await page.locator('[data-comment-id="10000000-0000-4000-8000-000000000001"]').getByText('Updated feedback after the first publication.', { exact: true }).waitFor();
   assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'remote-review', 'A completed saved review can still be reopened to inspect its feedback.');
   await page.evaluate(() => window.integrationSmoke.markAsyncFinishedAwaitingResume());
@@ -465,6 +609,7 @@ try {
   assert.equal(await panel.getByRole('button', { name: 'Resume operation', exact: true }).isEnabled(), true, 'A paused asynchronous merge can reconcile after every PR has finished remotely.');
   await panel.getByRole('button', { name: 'Return to review', exact: true }).click();
   const refreshesBeforeReviewed = await refreshCount('remote-review');
+  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
   await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
   await page.getByText('You’re all caught up.', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().review.approvals['.:review.ts']), 'current-file');
@@ -485,7 +630,7 @@ try {
   await settingsView.getByRole('button', { name: 'Back to review', exact: true }).click();
   const data = await page.evaluate(() => window.integrationSmoke.inspect());
   assert.deepEqual(data.calls.filters.slice(0, 4), ['all', 'author', 'reviewer', 'all']);
-  assert.deepEqual(data.calls.opens, [[{ repositoryPath: '.', prId: 11 }, { repositoryPath: 'modules/core', prId: 12 }]]);
+  assert.deepEqual(data.calls.opens, [[{ repositoryPath: '.', prId: 11 }]]);
   assert.equal(data.calls.publish, 3);
   assert.equal(data.review.comments[0].body, 'Updated feedback after the first publication.');
   assert.equal(data.calls.reanchors.length, 1);
@@ -499,7 +644,7 @@ try {
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').id, 'jira');
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').connected, true);
   assert.deepEqual(errors, []);
-  console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic review closing with saved feedback, Jira completion action, and minimum-width layout. Atlassian calls were stubbed.');
+  console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, whole-branch entry with fixed membership, missing PR draft/publication creation links, empty and missing branch visibility and live deletion, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, progressive parallel repository loading with early review and preserved feedback/selection, per-repository preflight spinners, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic review closing with saved feedback, Jira completion action, and minimum-width layout. Atlassian calls were stubbed.');
 } catch (error) {
   const page = desktop?.windows()[0];
   if (page) {

@@ -7,6 +7,7 @@ import type { InlinePayload, PullRequest, RemoteComment, RepositoryMapping } fro
 const hashPattern = /^[a-f0-9]{40,64}$/i;
 export const validCommitHash = (value: unknown): value is string => typeof value === 'string' && hashPattern.test(value);
 const abbreviatedCommitHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{7,39}$/i.test(value);
+const validBranchName = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\x00-\x20\x7f~^:?*\[\\]/.test(value) && !value.includes('..') && !value.includes('@{') && !value.startsWith('/') && !value.endsWith('/') && !value.endsWith('.') && !value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'));
 type PullRequestOperation = 'list' | 'detail' | 'merge' | 'normalization';
 type CommitResolutions = Map<string, Promise<unknown>>;
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -148,6 +149,58 @@ export class BitbucketClient {
     for (const value of values) result.push(await this.responsePullRequest(mapping, value, 'list', true, resolutions));
     return result;
   }
+  private async capturedCommit(mapping: RepositoryMapping, value: unknown): Promise<string> {
+    if (validCommitHash(value)) return value;
+    if (!abbreviatedCommitHash(value)) throw new Error(`Bitbucket returned an invalid captured commit for ${mapping.workspace}/${mapping.repoSlug}.`);
+    const commit = await this.json(`${this.repositoryPath(mapping)}/commit/${value.toLowerCase()}`);
+    if (!validCommitHash(commit?.hash) || !commit.hash.toLowerCase().startsWith(value.toLowerCase())) throw new Error(`Bitbucket did not resolve the captured commit to a matching full hash for ${mapping.workspace}/${mapping.repoSlug}.`);
+    return commit.hash;
+  }
+  async getRepository(mapping: RepositoryMapping): Promise<{ defaultBranch: string }> {
+    const value = await this.json(this.repositoryPath(mapping));
+    if (!object(value) || typeof value.full_name !== 'string' || value.full_name.toLowerCase() !== `${mapping.workspace}/${mapping.repoSlug}`.toLowerCase() || mapping.uuid && value.uuid !== mapping.uuid) throw new Error('Bitbucket returned a different or incomplete repository. Check its mapping.');
+    if (!validBranchName(value.mainbranch?.name)) throw new Error(`Bitbucket did not return a default branch for ${mapping.workspace}/${mapping.repoSlug}.`);
+    return { defaultBranch: value.mainbranch.name };
+  }
+  async getBranch(mapping: RepositoryMapping, name: string): Promise<{ name: string; hash: string } | null> {
+    if (!validBranchName(name)) throw new Error('Choose a valid branch name.');
+    let value: any;
+    try { value = await this.json(`${this.repositoryPath(mapping)}/refs/branches/${encodeURIComponent(name)}`); }
+    catch (error) { if (error instanceof ProviderError && error.status === 404) return null; throw error; }
+    if (!object(value) || value.name !== name) throw new Error(`Bitbucket returned a different or incomplete branch for ${mapping.workspace}/${mapping.repoSlug}.`);
+    return { name, hash: await this.capturedCommit(mapping, value.target?.hash) };
+  }
+  async mergeBase(mapping: RepositoryMapping, sourceHash: string, targetHash: string): Promise<string> {
+    if (!validCommitHash(sourceHash) || !validCommitHash(targetHash)) throw new Error('Capture complete branch revisions before comparing them.');
+    const base = await this.json(`${this.repositoryPath(mapping)}/merge-base/${sourceHash}..${targetHash}`);
+    return this.capturedCommit(mapping, base?.hash);
+  }
+  async findPullRequests(mapping: RepositoryMapping, sourceBranch: string, states: string[] = ['OPEN']): Promise<PullRequest[]> {
+    if (!validBranchName(sourceBranch) || !states.length || states.some(state => !['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(state))) throw new Error('Choose a valid source branch and pull request states.');
+    const query = new URLSearchParams({ pagelen: '50', q: `source.branch.name=${JSON.stringify(sourceBranch)}` });
+    for (const state of new Set(states)) query.append('state', state);
+    const values = await this.pages(`${this.repositoryPath(mapping)}/pullrequests?${query}`);
+    const resolutions: CommitResolutions = new Map();
+    const result: PullRequest[] = [];
+    for (const value of values) {
+      const pr = await this.responsePullRequest(mapping, value, 'list', true, resolutions);
+      if (pr.sourceBranch !== sourceBranch || !states.includes(pr.state)) throw new Error('Bitbucket returned a pull request outside the requested branch or state. Refresh to retry.');
+      result.push(pr);
+    }
+    return result;
+  }
+  async createPullRequest(mapping: RepositoryMapping, input: { sourceBranch: string; targetBranch: string; title: string; description: string }): Promise<PullRequest> {
+    if (!input || !validBranchName(input.sourceBranch) || !validBranchName(input.targetBranch) || input.sourceBranch === input.targetBranch || typeof input.title !== 'string' || !input.title.trim() || typeof input.description !== 'string') throw new Error('Choose different source and target branches and enter a pull request title.');
+    const value = await this.json(`${this.repositoryPath(mapping)}/pullrequests`, { method: 'POST', body: JSON.stringify({ title: input.title, description: input.description, source: { branch: { name: input.sourceBranch } }, destination: { branch: { name: input.targetBranch } }, close_source_branch: true }) });
+    try {
+      const pr = await this.responsePullRequest(mapping, value, 'detail');
+      if (pr.sourceBranch !== input.sourceBranch || pr.targetBranch !== input.targetBranch || pr.state !== 'OPEN') throw new Error('Bitbucket accepted the request but returned a different branch pair or a closed pull request. Reconcile it before trying again.');
+      return pr;
+    } catch (error) {
+      if (error instanceof ProviderError) throw new ProviderError(`${error.message} Bitbucket accepted PR creation; refresh to reconcile before retrying.`, undefined, error.retryAt, error.diagnosticId);
+      throw error;
+    }
+  }
   async getPullRequest(mapping: RepositoryMapping, id: number): Promise<PullRequest> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error('The pull request ID is invalid.');
     const pr = await this.responsePullRequest(mapping, await this.json(`${this.repositoryPath(mapping)}/pullrequests/${id}`), 'detail');
@@ -247,7 +300,7 @@ export class BitbucketClient {
     if (this.metadataCache.size >= 4000) this.metadataCache.delete(this.metadataCache.keys().next().value!);
     this.metadataCache.set(path, result); return result;
   }
-  async pointerEntries(pr: PullRequest): Promise<Array<{ path: string; hash: string }>> {
+  async pointerEntries(pr: Pick<PullRequest, 'repository' | 'sourceHash'>): Promise<Array<{ path: string; hash: string }>> {
     const entries: Array<{ path: string; hash: string }> = [];
     const queue = [''];
     const seen = new Set<string>();

@@ -1,6 +1,7 @@
 import type { ReviewComment, ReviewFile, ReviewSnapshot } from '../shared/types';
 import type { CommentPublication, FeedbackPreview, InlinePayload, PublishedValue, PullRequest, ReanchorInput, RemoteAnchor, RemoteComment, RemoteReviewState } from '../shared/integrations';
-import { pullRequestKey } from '../shared/integrations';
+import { branchReviewKey, pullRequestKey } from '../shared/integrations';
+import type { BranchReviewService } from './branch-review-service';
 import type { BitbucketClient } from './bitbucket-client';
 import { IntegrationStore } from './integration-store';
 import { ReviewStore } from './store';
@@ -41,7 +42,8 @@ export class PublicationService {
   constructor(private readonly reviews: ReviewStore, private readonly state: IntegrationStore,
     private readonly client: (id: string) => BitbucketClient,
     private readonly snapshot: (id: string) => ReviewSnapshot | undefined,
-    private readonly accountId: (id: string) => string) {}
+    private readonly accountId: (id: string) => string,
+    private readonly branches?: Pick<BranchReviewService, 'preflight' | 'ensurePullRequests'>) {}
 
   private binding(id: string): RemoteReviewState { const value = this.state.review(id); if (!value) throw new Error('Open a Bitbucket PR review first.'); return value; }
   private pr(binding: RemoteReviewState, anchor: RemoteAnchor): PullRequest {
@@ -60,8 +62,10 @@ export class PublicationService {
     const lineCount = content === null ? 0 : content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
     if (comment.lineStart > 0 && (file.binary || file.tooLarge || comment.lineEnd > lineCount)) throw new Error('The selected lines are not available in this PR file.');
     const pr = binding.pullRequests.find(pr => pr.repository.relativePath === file.repoRelativePath);
-    if (!pr) throw new Error('This file is not part of a linked PR.');
-    return { prKey: pullRequestKey(pr), sourceHash: pr.sourceHash, targetHash: pr.targetHash, path: file.remotePath ?? file.path,
+    const row = binding.repositories?.find(row => row.repository.relativePath === file.repoRelativePath);
+    const comparison = row ?? pr;
+    if (!comparison?.sourceHash || !comparison.targetHash || row?.status === 'unavailable') throw new Error('This file is not part of an available branch comparison.');
+    return { prKey: pr ? pullRequestKey(pr) : branchReviewKey(file.repoRelativePath), sourceHash: comparison.sourceHash, targetHash: comparison.targetHash, path: file.remotePath ?? file.path,
       side: comment.side, lineStart: comment.lineStart, lineEnd: comment.lineEnd, fingerprint: file.fingerprint };
   }
 
@@ -77,10 +81,10 @@ export class PublicationService {
     }
   }
 
-  async reconcile(id: string): Promise<void> {
+  async reconcile(id: string, commit: <T>(action: () => Promise<T>) => Promise<T> = action => action()): Promise<void> {
     let binding = this.binding(id);
     if (Object.values(binding.publications).some(p => p.state === 'sending')) {
-      await this.state.updateReview(id, r => { for (const p of Object.values(r.publications)) if (p.state === 'sending') { p.state = 'unknown'; p.error = 'Delivery is unknown. Reconcile the remote result before retrying.'; } });
+      await commit(() => this.state.updateReview(id, r => { for (const p of Object.values(r.publications)) if (p.state === 'sending') { p.state = 'unknown'; p.error = 'Delivery is unknown. Reconcile the remote result before retrying.'; } }));
       binding = this.binding(id);
     }
     const client = this.client(binding.connectionId);
@@ -89,40 +93,43 @@ export class PublicationService {
       const pubs = Object.values(binding.publications).filter(p => p.anchor.prKey === pullRequestKey(pr) && (p.remoteId || p.state === 'unknown'));
       if (!pubs.length) continue;
       const remote = await client.listComments(pr);
-      for (const saved of pubs) {
+      for (const saved of pubs) await commit(async () => {
         let publication = this.binding(id).publications[saved.commentId];
+        // A user may explicitly resolve delivery or a conflict during this read.
+        // Its older response cannot undo that choice; a later sync can retry.
+        if (JSON.stringify(publication) !== JSON.stringify(saved)) return;
         if (publication.state === 'unknown' && !publication.remoteId && publication.action === 'create') {
           const matches = remote.filter(c => c.authorId === userId && !c.deleted && !publication.baselineIds?.includes(c.id)
             && c.body === publication.intended?.body && matchesAnchor(c, publication.anchor)
             && (!c.createdAt || Date.parse(c.createdAt) >= Date.parse(publication.startedAt ?? '') - 1000));
-          if (matches.length !== 1) continue;
+          if (matches.length !== 1) return;
           const found = matches[0];
           await this.state.updateReview(id, r => Object.assign(r.publications[saved.commentId], { remoteId: found.id, authorId: found.authorId, url: found.url, acknowledged: actual(found), state: 'synced', error: undefined }));
           publication = this.binding(id).publications[saved.commentId];
         }
-        if (!publication.remoteId) continue;
+        if (!publication.remoteId) return;
         const found = remote.find(c => c.id === publication.remoteId);
         if (found && found.authorId !== userId) {
           await this.state.updateReview(id, r => Object.assign(r.publications[saved.commentId], { state: 'failed', error: 'Reconnect the account that owns this comment before changing it.' }));
-          continue;
+          return;
         }
         const remoteValue = found ? actual(found) : { body: publication.acknowledged?.body ?? '', resolved: publication.acknowledged?.resolved ?? false, deleted: true };
         const local = this.reviews.getReview(id).comments.find(c => c.id === publication.commentId);
         const localValue = desired(local, publication);
         if (same(remoteValue, publication.acknowledged)) {
           if (publication.state === 'unknown' || publication.state === 'conflict' || (publication.state === 'failed' && same(localValue, remoteValue))) await this.state.updateReview(id, r => Object.assign(r.publications[saved.commentId], { state: same(localValue, remoteValue) ? 'synced' : 'draft', error: undefined, remote: undefined }));
-          continue;
+          return;
         }
         if (!same(localValue, publication.acknowledged) && !same(localValue, remoteValue)) {
           await this.state.updateReview(id, r => Object.assign(r.publications[saved.commentId], { state: 'conflict', remote: remoteValue, error: 'This comment changed in Bitbucket while you had local changes.' }));
-          continue;
+          return;
         }
         if (local) {
           if (remoteValue.deleted) await this.reviews.deleteComment(id, local.id);
           else await this.reviews.updateComment(id, local.id, { body: remoteValue.body, resolved: remoteValue.resolved });
         }
         await this.state.updateReview(id, r => Object.assign(r.publications[saved.commentId], { acknowledged: remoteValue, state: 'synced', error: undefined, remote: undefined }));
-      }
+      });
       binding = this.binding(id);
     }
   }
@@ -143,14 +150,18 @@ export class PublicationService {
       const value = desired(comment, p);
       const action = changeAction(p, value);
       if (!action && !['unknown', 'conflict', 'failed'].includes(p.state)) continue;
-      const pr = this.pr(binding, p.anchor);
+      const pr = binding.pullRequests.find(pr => pullRequestKey(pr) === p.anchor.prKey);
+      const row = binding.repositories?.find(row => branchReviewKey(row.repository.relativePath) === p.anchor.prKey || pr?.repository.relativePath === row.repository.relativePath);
+      const comparison = row ?? pr;
       // Known rejections may be retried after correcting their cause.
       let error = p.state === 'unknown' || p.state === 'conflict' ? p.error : undefined;
-      if (action === 'create' && (p.anchor.sourceHash !== pr.sourceHash || p.anchor.targetHash !== pr.targetHash)) error = 'The PR changed. Move this draft to the current lines before publishing.';
+      if (!comparison || row?.status === 'unavailable' || row?.status === 'missing-branch') error = row?.error ?? 'The comment’s branch is unavailable. Refresh the review before publishing.';
+      else if (action === 'create' && (p.anchor.sourceHash !== comparison.sourceHash || p.anchor.targetHash !== comparison.targetHash)) error = 'The PR changed. Move this draft to the current lines before publishing.';
+      if (row?.creation?.state === 'unknown' || row?.creation?.state === 'sending') error = 'PR creation is unconfirmed. Check Bitbucket and refresh before publishing.';
       if (p.authorId && p.authorId !== this.accountId(binding.connectionId)) error = 'This comment belongs to another Bitbucket account.';
       if (error) blockers.push(error);
       if (p.state === 'unknown' && !error) blockers.push('A previous delivery is unknown. Check Bitbucket before retrying.');
-      items.push({ commentId: p.commentId, repositoryPath: pr.repository.relativePath, prId: pr.id, path: p.anchor.path, side: p.anchor.side, lineStart: p.anchor.lineStart, lineEnd: p.anchor.lineEnd,
+      items.push({ commentId: p.commentId, repositoryPath: comparison?.repository.relativePath ?? p.backup?.repoRelativePath ?? '.', prId: pr?.id ?? 0, createsPullRequest: !pr && row?.status === 'changes', path: p.anchor.path, side: p.anchor.side, lineStart: p.anchor.lineStart, lineEnd: p.anchor.lineEnd,
         body: value.body, action: action ?? p.action ?? 'update', state: action && p.state === 'synced' ? 'draft' : p.state, error: error ?? p.error, remote: p.remote });
     }
     return { items, blockers: [...new Set(blockers)] };
@@ -165,6 +176,13 @@ export class PublicationService {
   async publish(id: string): Promise<RemoteReviewState> {
     const preview = await this.preview(id);
     if (preview.blockers.length) throw new Error(preview.blockers.join('\n'));
+    if (this.branches && preview.items.length) {
+      const blockers = await this.branches.preflight(id);
+      if (blockers.length) throw new Error(blockers.join('\n'));
+      await this.branches.ensurePullRequests(id, preview.items.filter(item => item.createsPullRequest).map(item => item.repositoryPath));
+      const after = await this.branches.preflight(id);
+      if (after.length) throw new Error(after.join('\n'));
+    }
     const binding = this.binding(id);
     const client = this.client(binding.connectionId);
     // Freeze intent after autosave; later editor changes belong to a subsequent batch.

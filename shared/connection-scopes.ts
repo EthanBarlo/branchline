@@ -8,6 +8,7 @@ export const connectionScopes = {
   bitbucket: [
     ['read:user:bitbucket', 'User · Read'],
     ['read:repository:bitbucket', 'Repositories · Read'],
+    ['write:repository:bitbucket', 'Repositories · Write'],
     ['read:pullrequest:bitbucket', 'Pull requests · Read'],
     ['write:pullrequest:bitbucket', 'Pull requests · Write'],
   ],

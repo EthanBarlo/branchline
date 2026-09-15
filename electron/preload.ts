@@ -14,6 +14,11 @@ const api: ReviewAPI = {
   listPullRequests: (...args) => ipcRenderer.invoke('review:pullrequests-list', ...args),
   openPullRequestReview: (...args) => ipcRenderer.invoke('review:pullrequests-open', ...args),
   getRemoteReview: id => ipcRenderer.invoke('review:pullrequests-state', id),
+  onRemoteReviewLoadProgress: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, change: import('../shared/integrations').RemoteReviewLoadProgress) => callback(change);
+    ipcRenderer.on('review:remote-review-load', listener);
+    return () => ipcRenderer.removeListener('review:remote-review-load', listener);
+  },
   onRemoteReviewChanged: callback => {
     const listener = (_event: Electron.IpcRendererEvent, change: import('../shared/integrations').RemoteReviewChanged) => callback(change);
     ipcRenderer.on('review:remote-review-changed', listener);

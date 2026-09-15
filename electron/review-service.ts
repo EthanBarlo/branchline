@@ -55,11 +55,20 @@ export class ReviewService {
   }
 
   private async refreshRemote(id: string): Promise<ReviewRefresh> {
-    const previous = this.store.getReview(id);
+    const previous = await this.enqueue(id, async () => this.store.getReview(id));
     const snapshot = await this.snapshot(previous);
-    const review = await this.store.reconcileApprovals(id, snapshot);
-    this.snapshots.set(id, snapshot);
-    return { review, snapshot };
+    return this.acceptRemoteSnapshot(id, snapshot, reviewContextKey(previous));
+  }
+
+  /** A completed repository becomes reviewable without waiting for other remote reads. */
+  acceptRemoteSnapshot(id: string, snapshot: ReviewSnapshot, contextKey: string): Promise<ReviewRefresh> {
+    return this.enqueue(id, async () => {
+      const previous = this.store.getReview(id);
+      if (!previous.remote || reviewContextKey(previous) !== contextKey) throw new Error('The remote review changed while its repositories were loading.');
+      const review = await this.store.reconcileApprovals(id, snapshot, contextKey);
+      this.snapshots.set(id, snapshot);
+      return { review, snapshot };
+    });
   }
 
   private async refreshLocal(id: string, active: { generation: number; promise: Promise<ReviewRefresh> }): Promise<ReviewRefresh> {
@@ -141,12 +150,12 @@ export class ReviewService {
 
   async refreshReview(id: string): Promise<ReviewRefresh> {
     if (this.deleting.has(id)) return Promise.reject(new Error('This review is being removed.'));
-    if (this.store.getReview(id).remote) return this.enqueue(id, () => this.refreshRemote(id));
+    const remote = this.store.getReview(id).remote;
     const generation = this.generations.get(id) ?? 0;
     const existing = this.refreshing.get(id);
     if (existing?.generation === generation) return existing.promise;
     const active = { generation, promise: undefined as unknown as Promise<ReviewRefresh> };
-    active.promise = this.refreshLocal(id, active);
+    active.promise = remote ? this.refreshRemote(id) : this.refreshLocal(id, active);
     this.refreshing.set(id, active);
     const scans = this.scans.get(id) ?? new Set<Promise<ReviewRefresh>>();
     scans.add(active.promise);

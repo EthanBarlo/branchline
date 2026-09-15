@@ -50,6 +50,7 @@ async function fixture(): Promise<{ root: string; local: string; remote: string;
   git(local, 'commit', '--quiet', '-m', 'feature changes');
   const base = git(local, 'rev-parse', 'HEAD');
   git(root, 'clone', '--quiet', '--bare', local, remote);
+  git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
   return { root, local, remote, workspace, base, input: {
     repository: { workspace: 'example', repoSlug: 'parent', relativePath: '.' },
     sourceBranch: 'feature/TICKET-12', expectedHead: base, updates: { 'packages/child': mergedChild },
@@ -225,4 +226,50 @@ test('transport override is rejected outside test mode', () => {
   delete process.env.NODE_ENV;
   try { assert.throws(() => new PointerService('/tmp/unused', { testTransport: { remoteFor: () => '/tmp/remote' } }), /only available in tests/); }
   finally { if (original !== undefined) process.env.NODE_ENV = original; }
+});
+
+test('deletes only the expected remote source branch without fetching or changing local checkout, index or refs', async () => {
+  const { local, remote, workspace, input } = await fixture();
+  await writeFile(path.join(local, 'ordinary.txt'), 'staged edit\n');
+  git(local, 'add', 'ordinary.txt');
+  await writeFile(path.join(local, 'ordinary.txt'), 'unstaged edit\n');
+  const before = {
+    index: await readFile(path.join(local, '.git', 'index')),
+    refs: git(local, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    status: git(local, 'status', '--porcelain=v1', '-z'),
+    head: await readFile(path.join(local, '.git', 'HEAD')),
+    target: git(remote, 'rev-parse', 'main'),
+  };
+  const pointers = service(workspace, remote);
+  await pointers.deleteBranch(input);
+  assert.equal(git(remote, 'for-each-ref', '--format=%(refname)', `refs/heads/${input.sourceBranch}`), '');
+  assert.equal(git(remote, 'rev-parse', 'main'), before.target);
+  assert.deepEqual(await readFile(path.join(local, '.git', 'index')), before.index);
+  assert.deepEqual(await readFile(path.join(local, '.git', 'HEAD')), before.head);
+  assert.equal(git(local, 'for-each-ref', '--format=%(refname) %(objectname)'), before.refs);
+  assert.equal(git(local, 'status', '--porcelain=v1', '-z'), before.status);
+  for (const directory of await readdir(workspace)) {
+    const owned = path.join(workspace, directory);
+    assert.equal(git(owned, 'count-objects', '-v').split('\n').find(line => line.startsWith('count:')), 'count: 0', 'deletion fetched no commits');
+    assert.equal(git(owned, 'for-each-ref', '--format=%(refname)'), '');
+    assert.ok(!(await readFile(path.join(owned, 'config'), 'utf8')).includes(input.credentials.token));
+  }
+  await pointers.deleteBranch(input); // An absent ref is reconciled without a new push.
+});
+
+test('branch deletion rejects a concurrent advance or rollback at its exact Git lease', async () => {
+  for (const direction of ['advance', 'rollback']) {
+    const { local, remote, workspace, input, base } = await fixture();
+    let concurrent = git(remote, 'rev-parse', `${base}^`);
+    if (direction === 'advance') {
+      git(local, 'commit', '--quiet', '--allow-empty', '-m', 'concurrent work');
+      concurrent = git(local, 'rev-parse', 'HEAD');
+      git(local, 'push', '--quiet', remote, 'HEAD:refs/heads/object-fixture');
+    }
+    const pointers = service(workspace, remote, async () => {
+      git(remote, 'update-ref', `refs/heads/${input.sourceBranch}`, concurrent);
+    });
+    await assert.rejects(pointers.deleteBranch(input), /stale info|failed to push/);
+    assert.equal(git(remote, 'rev-parse', input.sourceBranch), concurrent);
+  }
 });

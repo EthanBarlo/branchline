@@ -334,8 +334,10 @@ export class ReviewStore {
     const versions = new Map(snapshot.files.map(file => [file.id, file.fingerprint]));
     const repositories = [...snapshot.repos].sort((a, b) =>
       (b.relativePath === '.' ? 0 : b.relativePath.length) - (a.relativePath === '.' ? 0 : a.relativePath.length));
-    const repositoryFailed = (fileId: string): boolean => Boolean(repositories.find(repository =>
-      repository.relativePath === '.' || fileId === repository.relativePath || fileId.startsWith(`${repository.relativePath}/`))?.error);
+    const repositoryFailed = (fileId: string): boolean => {
+      const repository = repositories.find(repository => repository.relativePath === '.' || fileId === repository.relativePath || fileId.startsWith(`${repository.relativePath}/`));
+      return Boolean(repository?.error || repository?.loading);
+    };
     let changed = false;
     // The check belongs in the queue too: an approval may already be queued
     // behind another disk write when a newly refreshed snapshot arrives.

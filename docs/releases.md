@@ -62,8 +62,11 @@ Existing unsigned installations cannot bootstrap this updater. Users must manual
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:background-review
 npm run test:desktop:jira
 npm run test:desktop:updates
+npm run test:desktop:integrations
+npm run test:desktop:integration-backend
 ```
 
 The update smoke test uses an inert simulator available only to unpackaged test launches. It tests manual downloads, progress, retries, postponement, native-menu access, window recreation and immediate comment persistence before quitting. It does not replace an installed application or prove notarization works.

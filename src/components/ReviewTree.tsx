@@ -17,6 +17,7 @@ interface ReviewTreeProps {
   onSelect: (id: string) => void;
   onReviewFiles: (files: ReviewFile[], approved: boolean) => Promise<void>;
   reviewBusy: boolean;
+  loading?: boolean;
   onOrderChange: (fileIds: string[]) => void;
   filter: 'all' | 'unreviewed' | 'commented';
   query: string;
@@ -271,9 +272,9 @@ export function ReviewTree(props: ReviewTreeProps) {
     </div>}
     {error && <div className="tree-action-error" role="alert"><span>{error}</span><button type="button" aria-label="Dismiss file review error" onClick={() => setError('')}><X size={12} /></button></div>}
     {visibleFiles.length === 0 ? <div className="review-tree-empty">
-      {props.filter === 'unreviewed' && !query ? <CheckCheck size={24} /> : <Search size={24} />}
-      <strong>{props.filter === 'unreviewed' && !query ? 'All caught up' : 'No matching files'}</strong>
-      <p>{props.filter === 'unreviewed' && !query ? 'Every changed file has been reviewed.' : props.filter === 'commented' && !query ? 'Files with open comments will appear here.' : 'Try a different search or filter.'}</p>
+      {props.loading && !query ? <LoaderCircle size={24} className="spin" /> : props.filter === 'unreviewed' && !query ? <CheckCheck size={24} /> : <Search size={24} />}
+      <strong>{props.loading && !query ? 'Loading files…' : props.filter === 'unreviewed' && !query ? 'All caught up' : 'No matching files'}</strong>
+      <p>{props.loading && !query ? 'More repositories are still being checked.' : props.filter === 'unreviewed' && !query ? 'Every changed file has been reviewed.' : props.filter === 'commented' && !query ? 'Files with open comments will appear here.' : 'Try a different search or filter.'}</p>
     </div> : <FileTree model={model} className="review-tree-host" style={treeTheme} aria-label="Changed files" renderContextMenu={(item, context) => {
       const paths = model.getSelectedPaths();
       const targetPaths = paths.includes(item.path) ? paths : [item.path];

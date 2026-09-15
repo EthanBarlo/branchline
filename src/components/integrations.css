@@ -176,3 +176,40 @@
   .merge-progress-row { transition: none; }
   .merge-repository-icon .spin { animation: none; }
 }
+
+.pr-row > svg { flex-shrink: 0; margin-top: 2px; color: #959595; }
+.branch-review-repositories { flex-shrink: 0; border-bottom: 1px solid #363636; background: #202020; }
+.branch-review-repositories > summary { display: flex; align-items: center; gap: 8px; padding: 8px 13px; cursor: pointer; list-style: none; color: #bdbdbd; font-size: 10px; }
+.branch-review-repositories > summary::-webkit-details-marker { display: none; }
+.branch-review-repositories > summary > svg { color: #858585; transform: rotate(-90deg); }
+.branch-review-repositories[open] > summary > svg { transform: none; }
+.branch-review-repositories > summary > strong { font-weight: 500; }
+.branch-review-repositories > summary > span { margin-left: auto; color: #959595; font-size: 9px; }
+.branch-review-repositories > ul { list-style: none; padding: 0 13px 8px; margin: 0; max-height: 158px; overflow: auto; }
+.branch-review-repositories li { display: grid; grid-template-columns: 14px minmax(110px, 1fr) auto auto; align-items: center; gap: 7px 10px; min-height: 35px; padding: 6px 6px; border-top: 1px solid #2e2e2e; color: #959595; font-size: 10px; }
+.branch-review-repositories li > div { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; min-width: 0; }
+.branch-review-repositories li strong { color: #bdbdbd; font-size: 10px; font-weight: 500; overflow-wrap: anywhere; }
+.branch-review-repositories li code { color: #858585; font-size: 9px; overflow-wrap: anywhere; }
+.branch-review-repositories li > .integration-link { font-size: 9px; justify-self: end; }
+.branch-review-repositories li > .integration-inline-error { grid-column: 2 / -1; }
+.branch-review-status { font-size: 9px; text-align: right; }
+.branch-status-warning { color: #d0af92; }
+.branch-status-active, .branch-status-complete { color: #b1c3ad; }
+
+.remote-loading-state { justify-content: flex-start; padding-top: clamp(25px, 7vh, 80px); overflow: auto; }
+.remote-loading-state > h2 { margin-top: 0; }
+.remote-load-repositories { width: min(510px, calc(100% - 44px)); margin: 24px 0 35px; text-align: left; }
+.remote-load-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; color: #bdbdbd; font-size: 11px; }
+.remote-load-heading > strong { font-weight: 500; }
+.remote-load-heading > span { color: #959595; font: 10px var(--code-font); }
+.remote-load-repositories > ul { list-style: none; margin: 0; padding: 0; border: 1px solid #414141; border-radius: 6px; overflow: hidden; }
+.remote-load-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 13px 15px; background: #222222; }
+.remote-load-row + .remote-load-row { border-top: 1px solid #363636; }
+.remote-load-row > div { min-width: 0; }
+.remote-load-row strong { display: block; color: #dedede; font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.remote-load-row code { display: block; color: #858585; font-size: 9px; margin-top: 4px; overflow-wrap: anywhere; }
+.remote-load-row > span { font-size: 10px; }
+.remote-load-row > small { grid-column: 2 / -1; font-size: 10px; line-height: 1.6; color: #d0af92; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) {
+  .remote-load-row .spin { animation: none; }
+}
