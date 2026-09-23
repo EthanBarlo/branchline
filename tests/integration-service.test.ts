@@ -732,3 +732,225 @@ test('startup finishes orphan metadata cleanup after interruption between review
   assert.equal(checked.ticket(currentReviewId(f.project.id)), 'APP-123');
   assert.deepEqual(checked.project(f.project.id), f.settings);
 });
+
+test('closed-review checks use saved PR identities and remove only locally after every grouped PR is closed', async t => {
+  const f = await fixture(t);
+  const review = await f.service.openPullRequestReview(f.project.id, [{ repositoryPath: '.', prId: 7 }, { repositoryPath: child.relativePath, prId: 8 }]);
+  const before = structuredClone(f.calls);
+  for (const method of ['getRepository', 'getBranch', 'findPullRequests', 'listPullRequests', 'approve', 'merge', 'createPullRequest', 'createComment', 'updateComment', 'resolveComment', 'deleteComment']) {
+    (f.client as any)[method] = async () => { throw new Error(`Unexpected provider operation: ${method}`); };
+  }
+  f.live.get('.#7')!.state = 'MERGED';
+  for (const closedState of ['DECLINED', 'SUPERSEDED', 'MERGED']) {
+    f.live.get(`${child.relativePath}#8`)!.state = closedState;
+    const checked = await f.service.checkClosedReview(review.id);
+    assert.equal(checked.status, 'closed'); assert.equal(checked.name, review.name);
+    assert.deepEqual(checked.pullRequests.map(pr => pr.state), ['MERGED', closedState]);
+    assert.equal(f.reviews.getReview(review.id).id, review.id, 'Checking does not delete the review.');
+  }
+  const removed = await f.service.removeClosedReviews(f.project.id, [review.id, review.id]);
+  assert.deepEqual(removed.removedIds, [review.id]); assert.deepEqual(removed.retained, []);
+  assert.equal(f.state.review(review.id), null);
+  assert.ok(!removed.state.reviews.some(value => value.id === review.id));
+  assert.ok(removed.state.reviews.some(value => value.id === currentReviewId(f.project.id)));
+  assert.equal(f.calls.localInspections, before.localInspections);
+  assert.equal(f.calls.localSnapshots, before.localSnapshots); assert.equal(f.calls.remoteSnapshots, before.remoteSnapshots);
+  assert.deepEqual(f.calls.prs.slice(before.prs.length).map(({ repository, id }) => [repository.repoSlug, id]), Array.from({ length: 4 }, () => [['root', 7], ['child', 8]]).flat());
+  const reloaded = new ReviewStore(f.reviewsPath); await reloaded.load();
+  assert.ok(!reloaded.getState().reviews.some(value => value.id === review.id));
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, [review.id], 'Lost responses can be retried.');
+});
+
+test('closed-review checks retain groups with open PRs and recheck a reopened PR before removing', async t => {
+  const f = await fixture(t);
+  const review = await f.service.openPullRequestReview(f.project.id, [{ repositoryPath: '.', prId: 7 }, { repositoryPath: child.relativePath, prId: 8 }]);
+  f.live.get('.#7')!.state = 'MERGED';
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'open');
+  f.live.get(`${child.relativePath}#8`)!.state = 'DECLINED';
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
+  f.live.get(`${child.relativePath}#8`)!.state = 'OPEN';
+  const result = await f.service.removeClosedReviews(f.project.id, [review.id]);
+  assert.deepEqual(result.removedIds, []); assert.equal(result.retained[0].status, 'open');
+  assert.deepEqual(result.retained[0].pullRequests.map(pr => pr.state), ['MERGED', 'OPEN']);
+  assert.equal(f.reviews.getReview(review.id).id, review.id);
+});
+
+test('closed-review checks keep unknown, inaccessible and mismatched PRs without assuming 404 means closed', async t => {
+  const f = await fixture(t), review = await f.open();
+  for (const status of [401, 403, 404, 429, 500]) {
+    f.hooks.pr = () => { throw new ProviderError(`Bitbucket returned ${status}`, status); };
+    const check = await f.service.checkClosedReview(review.id);
+    assert.equal(check.status, 'unavailable'); assert.equal(check.pullRequests[0].state, 'UNAVAILABLE');
+    assert.match(check.reason!, new RegExp(String(status)));
+    assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, []);
+  }
+  f.hooks.pr = value => ({ ...value, state: 'UNRECOGNIZED' });
+  assert.match((await f.service.checkClosedReview(review.id)).reason!, /unrecognized PR state/);
+  for (const change of [(value: PullRequest) => ({ ...value, id: 99 }), (value: PullRequest) => ({ ...value, repository: { ...value.repository, workspace: 'elsewhere' } })]) {
+    f.hooks.pr = value => change({ ...value, state: 'MERGED' });
+    const check = await f.service.checkClosedReview(review.id);
+    assert.equal(check.status, 'unavailable'); assert.match(check.reason!, /different repository or PR identity/);
+  }
+  f.hooks.pr = undefined;
+  await f.service.disconnectConnection('bb');
+  const disconnected = await f.service.checkClosedReview(review.id);
+  assert.equal(disconnected.status, 'unavailable'); assert.match(disconnected.reason!, /original Bitbucket account/);
+  assert.equal(f.reviews.getReview(review.id).id, review.id);
+});
+
+test('closed-review checks use the original account and repository mappings after project settings change', async t => {
+  const f = await fixture(t), review = await f.open();
+  const other = structuredClone(f.accounts.get('bb')!);
+  other.info.id = 'another-account'; other.info.accountId = 'another-user'; other.token = 'another-token';
+  f.accounts.set(other.info.id, other);
+  await f.service.configureProjectIntegration(f.project.id, { ...f.settings, bitbucketConnectionId: other.info.id, repositories: [{ ...root, workspace: 'different', repoSlug: 'new-root' }] });
+  f.live.get('.#7')!.state = 'MERGED';
+  const before = f.calls.prs.length;
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
+  assert.deepEqual(f.calls.clients, ['bb']);
+  assert.deepEqual(f.calls.prs.slice(before), [{ repository: root, id: 7 }]);
+  await f.service.disconnectConnection('bb');
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'unavailable', 'The replacement project account cannot be used silently.');
+});
+
+test('closed-review removal protects local reviews, missing metadata and reviews belonging to another project', async t => {
+  const f = await fixture(t), review = await f.open();
+  const local = await f.reviews.createReview({ projectId: f.project.id, name: 'Local branch', featureBranch: 'feature', baseBranch: 'main', includeWorkingTree: false });
+  const other = await f.reviews.createProject({ repoPath: '/local/other-project', name: 'Other project' });
+  const otherReview = await f.reviews.createReview({ projectId: other.id, name: 'Other Bitbucket review', featureBranch: review.featureBranch, baseBranch: 'main', includeWorkingTree: false }, true);
+  await f.state.setReview(otherReview.id, f.state.review(review.id)!);
+  const before = f.calls.prs.length;
+  for (const id of [local.id, currentReviewId(f.project.id)]) assert.equal((await f.service.checkClosedReview(id)).status, 'blocked');
+  const result = await f.service.removeClosedReviews(f.project.id, [local.id, currentReviewId(f.project.id), otherReview.id]);
+  assert.deepEqual(result.removedIds, []); assert.ok(result.retained.every(check => check.status === 'blocked'));
+  assert.match(result.retained.find(check => check.reviewId === otherReview.id)!.reason!, /another project/);
+  await f.state.removeReview(review.id);
+  assert.match((await f.service.checkClosedReview(review.id)).reason!, /missing Bitbucket metadata/);
+  assert.equal(f.calls.prs.length, before, 'Ineligible reviews do not call the provider.');
+  for (const invalid of [null, [], [null], ['__proto__', review.id], new Array(1001).fill(review.id)]) await assert.rejects(() => f.service.removeClosedReviews(f.project.id, invalid as any), /Choose saved reviews/);
+  await assert.rejects(() => f.service.checkClosedReview('__proto__'), /Choose a saved review/);
+});
+
+test('closed-review cleanup preserves incomplete merge, approval, pointer and branch-deletion operations', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  const clean = await completedMerge(f, review.id);
+  const cases: Array<(remote: typeof clean) => void> = [
+    remote => { remote.operation!.state = 'running'; },
+    remote => { remote.operation!.state = 'paused'; },
+    remote => { remote.operation!.action = 'approve'; remote.operation!.state = 'paused'; },
+    remote => { remote.operation!.items[0].merge = 'failed'; },
+    remote => { remote.operation!.items[0].merge = 'unknown'; },
+    remote => { remote.operation!.items[0].cleanup = 'retained'; },
+    remote => { remote.operation!.items[0].cleanup = 'unknown'; },
+    remote => { delete remote.operation!.items[0].cleanup; },
+    remote => { remote.operation!.items[0].pointerState = 'review'; },
+    remote => { remote.operation!.items[0].error = 'Cleanup failed'; },
+    remote => { remote.operation!.error = 'Checks still pending'; },
+  ];
+  const reads = f.calls.prs.length;
+  for (const change of cases) {
+    const pending = structuredClone(clean); change(pending); await f.state.setReview(review.id, pending);
+    const check = await f.service.checkClosedReview(review.id);
+    assert.equal(check.status, 'blocked'); assert.match(check.reason!, /unfinished.*resume or reconcile/);
+    assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, []);
+  }
+  assert.equal(f.calls.prs.length, reads);
+  await f.state.setReview(review.id, clean);
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
+});
+
+test('closed-review checks keep no-PR work and uncertain branch operations but tolerate previously deleted merged branches', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  const legacy = f.state.review(review.id)!;
+  const row = { repository: child, sourceBranch: review.featureBranch, targetBranch: review.baseBranch, sourceHash: hash('a'), targetHash: hash('b'), status: 'no-changes' as const };
+  for (const pending of [
+    { ...row, status: 'changes' as const },
+    { ...row, status: 'unavailable' as const },
+    { ...row, creation: { state: 'unknown' as const, sourceHash: hash('a'), targetHash: hash('b'), startedAt: new Date().toISOString(), marker: 'a'.repeat(24) } },
+    ...(['pending', 'checking', 'sending', 'retained', 'unknown'] as const).map(state => ({ ...row, cleanup: { state, expectedHead: hash('a') } })),
+  ]) {
+    await f.state.setReview(review.id, { ...legacy, repositories: [pending] });
+    const check = await f.service.checkClosedReview(review.id);
+    assert.equal(check.status, 'blocked');
+    assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, []);
+  }
+  await f.state.setReview(review.id, { ...legacy, repositories: [{ repository: root, sourceBranch: review.featureBranch, targetBranch: review.baseBranch, status: 'missing-branch', prId: 7, cleanup: { state: 'deleted' } }] });
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, [review.id]);
+});
+
+test('closed-review check reports unpublished drafts, edits and deletion records without publishing or losing them during checking', async t => {
+  const f = await fixture(t), review = await f.open();
+  const initial = await f.add(review.id);
+  assert.equal((await f.service.checkClosedReview(review.id)).unpublishedComments, 1);
+  await f.service.publishFeedback(review.id);
+  assert.equal((await f.service.checkClosedReview(review.id)).unpublishedComments, 0);
+  await f.service.updateComment(review.id, initial.id, { body: 'Pending edit' });
+  assert.equal((await f.service.checkClosedReview(review.id)).unpublishedComments, 1);
+  await f.service.updateComment(review.id, initial.id, { body: 'Initial comment' });
+  assert.equal((await f.service.checkClosedReview(review.id)).unpublishedComments, 0);
+  await f.service.deleteComment(review.id, initial.id);
+  const draft = await f.add(review.id);
+  const before = structuredClone(f.comments);
+  f.live.get('.#7')!.state = 'MERGED';
+  f.live.get(`${child.relativePath}#8`)!.state = 'MERGED';
+  const checked = await f.service.checkClosedReview(review.id);
+  assert.equal(checked.status, 'closed'); assert.equal(checked.unpublishedComments, 2);
+  assert.equal(f.reviews.getReview(review.id).comments[0].id, draft.id);
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, [review.id]);
+  assert.deepEqual(f.comments, before, 'Explicitly removing local feedback never edits published Bitbucket comments.');
+});
+
+test('closed-review cleanup handles partial metadata storage failure and retries without repeating successful deletions', async t => {
+  const f = await fixture(t), review = await f.open();
+  const second = await f.reviews.createReview({ projectId: f.project.id, name: 'Second old review', featureBranch: review.featureBranch, baseBranch: review.baseBranch, includeWorkingTree: false }, true);
+  await f.state.setReview(second.id, f.state.review(review.id)!);
+  f.live.get('.#7')!.state = 'MERGED';
+  const remove = f.state.removeReview.bind(f.state);
+  let fail = true;
+  f.state.removeReview = async id => { if (id === review.id && fail) { fail = false; throw new Error('Metadata storage unavailable'); } return remove(id); };
+  const result = await f.service.removeClosedReviews(f.project.id, [review.id, second.id]);
+  assert.deepEqual(result.removedIds, [second.id]);
+  assert.equal(result.retained[0].reviewId, review.id); assert.match(result.retained[0].reason!, /metadata still needs cleanup/);
+  assert.ok(!result.state.reviews.some(value => [review.id, second.id].includes(value.id)));
+  assert.ok(f.state.review(review.id)); assert.equal(f.state.review(second.id), null);
+  const calls = f.calls.prs.length;
+  const retried = await f.service.removeClosedReviews(f.project.id, [review.id, second.id]);
+  assert.deepEqual(new Set(retried.removedIds), new Set([review.id, second.id])); assert.deepEqual(retried.retained, []);
+  assert.equal(f.state.review(review.id), null); assert.equal(f.calls.prs.length, calls, 'Metadata-only retries need no remote requests.');
+});
+
+test('closed-review cleanup retains reviews if primary storage cannot remove them and continues the batch', async t => {
+  const f = await fixture(t), review = await f.open();
+  const second = await f.reviews.createReview({ projectId: f.project.id, name: 'Second old review', featureBranch: review.featureBranch, baseBranch: review.baseBranch, includeWorkingTree: false }, true);
+  await f.state.setReview(second.id, f.state.review(review.id)!);
+  f.live.get('.#7')!.state = 'MERGED';
+  const remove = f.reviewService.deleteReview.bind(f.reviewService);
+  f.reviewService.deleteReview = async id => { if (id === review.id) throw new Error('Review storage unavailable'); return remove(id); };
+  const result = await f.service.removeClosedReviews(f.project.id, [review.id, second.id]);
+  assert.deepEqual(result.removedIds, [second.id]); assert.match(result.retained[0].reason!, /Review storage unavailable/);
+  assert.ok(result.state.reviews.some(value => value.id === review.id)); assert.ok(f.state.review(review.id));
+  f.reviewService.deleteReview = remove;
+  f.live.get('.#7')!.state = 'OPEN';
+  assert.equal((await f.service.removeClosedReviews(f.project.id, [review.id])).retained[0].status, 'open', 'A failed primary deletion must be revalidated.');
+});
+
+test('closed-review checking locks account and project settings and rejects overlapping review actions', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  const get = f.client.getPullRequest.bind(f.client);
+  let release!: () => void, entered!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  f.client.getPullRequest = async (...args) => { entered(); await pending; return get(...args); };
+  const checking = f.service.checkClosedReview(review.id); await started;
+  const overlap = await f.service.checkClosedReview(review.id);
+  assert.equal(overlap.status, 'blocked'); assert.match(overlap.reason!, /current operation/);
+  assert.equal((await f.service.removeClosedReviews(f.project.id, [review.id])).retained[0].status, 'blocked');
+  await assert.rejects(() => f.service.disconnectConnection('bb'), /current integration operation/);
+  await assert.rejects(() => f.service.configureProjectIntegration(f.project.id, f.settings), /current review operation/);
+  release(); assert.equal((await checking).status, 'closed');
+  assert.equal(f.reviews.getReview(review.id).id, review.id);
+});

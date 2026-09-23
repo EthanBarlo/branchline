@@ -31,9 +31,27 @@ function fixtureBridge() {
   remote.repositories = mappings.map((repository, index) => ({ repository, sourceBranch: local.featureBranch, targetBranch: 'main', sourceHash: 'source-hash', targetHash: 'target-hash', status: index < 2 ? 'pull-request' : index === 2 ? 'changes' : index === 3 ? 'no-changes' : 'missing-branch', ...(index < 2 ? { prId: remote.pullRequests[index].id } : {}) }));
   remote.publications[review.comments[2].id].state = 'unknown';
   Object.assign(remote.publications[review.comments[3].id], { state: 'conflict', remoteId: 104, authorId: 'bb-user', acknowledged: { body: 'Original wording.', resolved: false, deleted: false }, remote: { body: 'Wording edited in Bitbucket.', resolved: false, deleted: false } });
-  const state = { projects: [project], reviews: [local], settings: { jiraBaseUrl: '' } };
+  const cleanupReviews = [
+    ['closed-merged', 'Old merged review'], ['closed-declined', 'Old declined review'], ['closed-reopened', 'Reopened during cleanup'],
+    ['closed-open', 'Still active review'], ['closed-unavailable', 'Unavailable review'], ['closed-blocked', 'Unfinished cleanup review'],
+  ].map(([id, name]) => ({ ...local, id, name, kind: 'saved', remote: true, includeWorkingTree: false, comments: id === 'closed-merged' ? [comment(6, 'An unpublished local note.')] : [] }));
+  const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '' } };
   const integrations = { connections: [], projects: {} };
   const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
+  Object.assign(calls, { cleanupChecks: [], cleanupRemovals: [], activeCleanupChecks: 0, maxCleanupChecks: 0 });
+  let holdCleanupChecks = true;
+  const cleanupWaiters = [];
+  let reopenedDuringCleanup = false;
+  let recoveredCleanupAccess = false;
+  let cleanupMetadataFailed = false;
+  const cleanupResult = id => {
+    const saved = cleanupReviews.find(item => item.id === id);
+    if (!saved) throw new Error('Unknown cleanup fixture review');
+    const status = id === 'closed-open' || id === 'closed-reopened' && reopenedDuringCleanup ? 'open' : id === 'closed-unavailable' && !recoveredCleanupAccess ? 'unavailable' : id === 'closed-blocked' ? 'blocked' : 'closed';
+    return { reviewId: id, name: saved.name, status, unpublishedComments: id === 'closed-merged' ? 1 : 0,
+      pullRequests: [{ repositoryPath: '.', repoSlug: 'platform', id: 31, url: 'https://bitbucket.org/acme/platform/pull-requests/31', state: status === 'open' ? 'OPEN' : id === 'closed-declined' ? 'DECLINED' : 'MERGED' }],
+      ...(status === 'open' ? { reason: 'A pull request is still open.' } : status === 'unavailable' ? { reason: 'Bitbucket could not verify this review. Reconnect and check again.' } : status === 'blocked' ? { reason: 'Finish branch cleanup before removing this review.' } : {}) };
+  };
   const remoteListeners = new Set();
   const loadListeners = new Set();
   let loadSequence = 0;
@@ -58,7 +76,7 @@ function fixtureBridge() {
   const operationStep = () => new Promise(resolve => { advanceOperation = () => { advanceOperation = undefined; resolve(); }; });
   let snapshotMode = 'normal';
   const snapshot = id => ({ reviewId: id, files: snapshotMode === 'pointers' || snapshotMode === 'incomplete' ? [] : files.map(file => ({ ...file, ...(snapshotMode === 'unavailable' ? { unavailable: 'Bitbucket could not return this file.' } : {}) })), repos: [{ relativePath: '.', currentBranch: local.featureBranch, workingTreeIncluded: false, baseCommit: 'target-hash', headCommit: 'source-hash', ...(snapshotMode === 'pointers' ? { pointers: [{ path: 'modules/core', oldHash: 'abc1234567890123456789', newHash: 'def1234567890123456789' }] } : {}), ...(snapshotMode === 'incomplete' ? { error: 'The parent repository is temporarily unavailable.' } : {}) }], warnings: snapshotMode === 'incomplete' ? ['The parent repository is temporarily unavailable.'] : [], refreshedAt: now, fingerprint: `snapshot-${snapshotMode}` });
-  const getReview = id => id === review.id ? review : local;
+  const getReview = id => state.reviews.find(item => item.id === id) || local;
   function previewFeedback() {
     const items = Object.values(remote.publications).flatMap(publication => {
       const comment = review.comments.find(comment => comment.id === publication.commentId);
@@ -105,8 +123,27 @@ function fixtureBridge() {
     configureProjectIntegration: async (id, value) => { integrations.projects[id] = clone(value); return clone(value); },
     discoverRepositories: async () => clone(mappings),
     listPullRequests: async (_, filter) => { calls.filters.push(filter); return clone(filter === 'author' ? [prs[2]] : filter === 'reviewer' ? prs.slice(0, 2) : prs); },
-    openPullRequestReview: async (_, refs) => { calls.opens.push(refs); state.reviews = [local, review]; return clone(review); },
-    getRemoteReview: async id => id === review.id && state.reviews.some(item => item.id === id) ? clone(remote) : null,
+    openPullRequestReview: async (_, refs) => { calls.opens.push(refs); state.reviews = [local, review, ...cleanupReviews]; return clone(review); },
+    getRemoteReview: async id => id === review.id && state.reviews.some(item => item.id === id) ? clone(remote) : cleanupReviews.some(item => item.id === id) ? { connectionId: 'bb', pullRequests: [pr(31, mappings[0], local.featureBranch, { state: 'MERGED' })], publications: {} } : null,
+    checkClosedReview: async id => {
+      calls.cleanupChecks.push(id); calls.activeCleanupChecks++;
+      calls.maxCleanupChecks = Math.max(calls.maxCleanupChecks, calls.activeCleanupChecks);
+      try { if (holdCleanupChecks) await new Promise(resolve => cleanupWaiters.push(resolve)); return clone(cleanupResult(id)); }
+      finally { calls.activeCleanupChecks--; }
+    },
+    removeClosedReviews: async (projectId, reviewIds) => {
+      if (projectId !== project.id) throw new Error('Wrong cleanup project');
+      calls.cleanupRemovals.push(clone(reviewIds)); reopenedDuringCleanup = true;
+      const results = reviewIds.map(cleanupResult);
+      const removedIds = results.filter(item => item.status === 'closed').map(item => item.reviewId);
+      state.reviews = state.reviews.filter(item => !removedIds.includes(item.id));
+      if (removedIds.includes('closed-unavailable') && !cleanupMetadataFailed) {
+        cleanupMetadataFailed = true;
+        const failed = results.find(item => item.reviewId === 'closed-unavailable');
+        return clone({ state, removedIds: removedIds.filter(id => id !== failed.reviewId), retained: [{ ...failed, status: 'unavailable', reason: 'The review was removed, but its local metadata still needs cleanup. Retry this removal or restart Branchline.' }] });
+      }
+      return clone({ state, removedIds, retained: results.filter(item => item.status !== 'closed') });
+    },
     completeMergedReview: async id => { calls.completed.push(id); state.reviews = state.reviews.filter(item => item.id !== id); if (calls.completed.length === 1) throw new Error('The completion response was lost. Retry finishing this review.'); return clone(state); },
     getJiraTicketLink: async id => { if (id === review.id && !state.reviews.some(item => item.id === id)) throw new Error('Review not found.'); return { key: remote.ticketKey || 'APP-123', url: `https://jira.example.atlassian.net/browse/${remote.ticketKey || 'APP-123'}` }; },
     openJiraTicket: async () => { const link = await api.getJiraTicketLink(); calls.links.push(link.url); return link; },
@@ -222,6 +259,8 @@ function fixtureBridge() {
   let beforeAsyncScenario;
   contextBridge.exposeInMainWorld('integrationSmoke', {
     inspect: () => clone({ calls, integrations, state, review, remote }),
+    releaseCleanupChecks: () => { holdCleanupChecks = false; for (const resolve of cleanupWaiters.splice(0)) resolve(); },
+    recoverCleanupAccess: () => { recoveredCleanupAccess = true; },
     advanceLoad: () => { if (!advanceLoad) throw new Error('No repository load is waiting.'); advanceLoad(); },
     advancePreview: () => { if (!advancePreview) throw new Error('No merge preview is waiting.'); advancePreview(); },
     emitOldLoad: () => { for (const listener of loadListeners) listener(clone({ ...lastLoadEvent, sequence: loadSequence - 1, complete: false, result: { review, snapshot: { ...snapshot(review.id), files: [], loading: true } } })); },
@@ -770,6 +809,56 @@ try {
   assert.equal(data.integrations.projects['project-1'].updateSubmodulePointers, true);
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').id, 'jira');
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').connected, true);
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  await page.getByRole('option', { name: 'Old merged review', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'closed-merged');
+  await page.getByRole('button', { name: 'Workspace menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Clean up closed Bitbucket reviews', exact: true }).click();
+  const cleanupDialog = await dialog(page, 'Clean up closed Bitbucket reviews');
+  await page.waitForFunction(() => window.integrationSmoke.inspect().calls.activeCleanupChecks === 4);
+  assert.equal(await cleanupDialog.getByRole('button', { name: /Remove .*closed reviews/ }).count(), 0, 'Removal is unavailable before any closed review is verified.');
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.cleanupRemovals)).length, 0, 'Opening cleanup only checks reviews.');
+  await page.evaluate(() => window.integrationSmoke.releaseCleanupChecks());
+  await cleanupDialog.getByRole('button', { name: 'Remove 3 closed reviews', exact: true }).waitFor();
+  await page.waitForFunction(() => window.integrationSmoke.inspect().calls.cleanupChecks.length === 6 && window.integrationSmoke.inspect().calls.activeCleanupChecks === 0);
+  assert.equal(await cleanupDialog.getByRole('button', { name: 'Remove 3 closed reviews', exact: true }).isEnabled(), true);
+  await cleanupDialog.getByText('Bitbucket could not verify this review. Reconnect and check again.', { exact: true }).waitFor();
+  await cleanupDialog.getByText('Finish branch cleanup before removing this review.', { exact: true }).waitFor();
+  assert.match(await cleanupDialog.innerText(), /1 unpublished/i);
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.maxCleanupChecks)), 4, 'Status reads have a bounded four-review concurrency.');
+  await page.screenshot({ path: 'artifacts/integration-closed-review-cleanup.png', animations: 'disabled' });
+  await cleanupDialog.getByRole('button', { name: 'Remove 3 closed reviews', exact: true }).click();
+  await cleanupDialog.getByText('Removed 2 reviews. 1 review was kept after rechecking. See the reasons below.', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'current:project-1');
+  const cleaned = await page.evaluate(() => window.integrationSmoke.inspect());
+  assert.deepEqual(cleaned.calls.cleanupRemovals, [['closed-merged', 'closed-declined', 'closed-reopened']]);
+  assert.equal(cleaned.state.reviews.some(item => ['closed-merged', 'closed-declined'].includes(item.id)), false);
+  assert.ok(['current:project-1', 'closed-open', 'closed-reopened', 'closed-unavailable', 'closed-blocked'].every(id => cleaned.state.reviews.some(item => item.id === id)), 'Open, reopened, unavailable and unfinished reviews stay saved.');
+  assert.deepEqual(cleaned.calls.actions, data.calls.actions, 'List cleanup never merges or deletes remote branches.');
+  await cleanupDialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  assert.equal(await page.getByRole('option', { name: 'Old merged review', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('option', { name: 'Old declined review', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('option', { name: 'Reopened during cleanup', exact: true }).count(), 1);
+  await page.getByRole('option', { name: 'Unavailable review', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'closed-unavailable');
+  await page.evaluate(() => window.integrationSmoke.recoverCleanupAccess());
+  await page.getByRole('button', { name: 'Workspace menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Clean up closed Bitbucket reviews', exact: true }).click();
+  const retryDialog = await dialog(page, 'Clean up closed Bitbucket reviews');
+  await retryDialog.getByRole('button', { name: 'Remove 1 closed review', exact: true }).click();
+  await retryDialog.getByText('Cleanup pending', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'current:project-1');
+  await retryDialog.getByRole('button', { name: 'Rescan', exact: true }).click();
+  await retryDialog.getByText('Review check complete', { exact: true }).waitFor();
+  await retryDialog.getByText('Cleanup pending', { exact: true }).waitFor();
+  await retryDialog.getByRole('button', { name: 'Retry removal', exact: true }).click();
+  await retryDialog.getByRole('listitem', { name: 'Unavailable review', exact: true }).getByText('Removed', { exact: true }).waitFor();
+  assert.deepEqual((await page.evaluate(() => window.integrationSmoke.inspect().calls.cleanupRemovals)).slice(1), [['closed-unavailable'], ['closed-unavailable']], 'Metadata-only failure retains a retry action even after rescan and review removal.');
+  await retryDialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  assert.equal(await page.getByRole('option', { name: 'Unavailable review', exact: true }).count(), 0);
+  await page.keyboard.press('Escape');
   assert.deepEqual(errors, []);
   console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, whole-branch entry with fixed membership, missing PR draft/publication creation links, empty and missing branch visibility and live deletion, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, progressive parallel repository loading with early review and preserved feedback/selection, stable per-repository preview/merge/cleanup stages across repeated safety checks with unchanged completion counts and deletion receipts, conflict-blocked merging with direct PR links, no branch cleanup after partial merge failure, parallel cleanup after every required merge, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic removal of completed reviews, compact repository and Jira dialogs, modal completion with captured Jira link and lost-response retry without more provider calls, and minimum-width layout. Atlassian calls were stubbed.');
 } catch (error) {

@@ -66,6 +66,12 @@ export interface RemoteReviewLoadProgress { reviewId: string; sequence: number; 
 export interface FeedbackItem { commentId: string; repositoryPath: string; prId: number; createsPullRequest?: boolean; path: string; side: DiffSide; lineStart: number; lineEnd: number; body: string; action: string; state: CommentPublication['state']; error?: string; remote?: PublishedValue; }
 export interface FeedbackPreview { items: FeedbackItem[]; blockers: string[]; }
 export interface MergePreview { pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; blockers: string[]; warnings: string[]; updateSubmodulePointers: boolean; operation?: MergeOperation; }
+export interface ClosedReviewCheck {
+  reviewId: string; name: string; status: 'closed' | 'open' | 'blocked' | 'unavailable';
+  pullRequests: { repositoryPath: string; repoSlug: string; id: number; url: string; state: string }[];
+  reason?: string; unpublishedComments: number;
+}
+export interface ClosedReviewCleanupResult { state: AppState; removedIds: string[]; retained: ClosedReviewCheck[]; }
 export interface ReanchorInput { fileId: string; fingerprint: string; side: DiffSide; lineStart: number; lineEnd: number; }
 export interface RemoteComment { id: number; authorId: string; body: string; resolved: boolean; deleted: boolean; path?: string; from?: number; to?: number; startFrom?: number; startTo?: number; createdAt?: string; updatedAt?: string; url?: string; }
 export interface InlinePayload { content: { raw: string }; inline: { path: string; from?: number; to?: number; start_from?: number; start_to?: number }; }
@@ -117,5 +123,7 @@ export interface IntegrationAPI {
   previewMerge(reviewId: string, action?: 'approve' | 'merge'): Promise<MergePreview>;
   runPullRequestAction(reviewId: string, action: 'approve' | 'merge'): Promise<RemoteReviewState>;
   completeMergedReview(reviewId: string): Promise<AppState>;
+  checkClosedReview(reviewId: string): Promise<ClosedReviewCheck>;
+  removeClosedReviews(projectId: string, reviewIds: string[]): Promise<ClosedReviewCleanupResult>;
   openIntegrationLink(url: string): Promise<void>;
 }

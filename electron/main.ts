@@ -134,6 +134,8 @@ function installHandlers() {
   handle('merge-preview', (id: string, action?: 'approve' | 'merge') => integrations.previewMerge(id, action));
   handle('pullrequests-action', (id: string, action: 'approve' | 'merge') => integrations.runPullRequestAction(id, action));
   handle('pullrequests-complete', (id: string) => integrations.completeMergedReview(id));
+  handle('closed-review-check', (id: string) => integrations.checkClosedReview(id));
+  handle('closed-reviews-remove', (projectId: string, ids: string[]) => integrations.removeClosedReviews(projectId, ids));
   handle('integration-open', (url: string) => shell.openExternal(integrations.validateLink(url)));
   handle('close-listener', (ready: boolean) => {
     closeListenerReady = ready === true;

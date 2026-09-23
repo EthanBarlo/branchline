@@ -1,6 +1,6 @@
 import type { NewComment, Review, ReviewSnapshot, ReviewRefresh } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
-import type { BranchReviewRepository, ConnectionInput, IntegrationState, ProjectIntegration, PullRequest, PullRequestFilter, PullRequestRef, ReanchorInput, RemoteReviewState, RemoteReviewLoadProgress, RemoteRepositoryLoad, RemoteSnapshotResult } from '../shared/integrations';
+import type { BranchReviewRepository, ClosedReviewCheck, ClosedReviewCleanupResult, ConnectionInput, IntegrationState, ProjectIntegration, PullRequest, PullRequestFilter, PullRequestRef, ReanchorInput, RemoteReviewState, RemoteReviewLoadProgress, RemoteRepositoryLoad, RemoteSnapshotResult } from '../shared/integrations';
 import { isMergeComplete } from '../shared/integrations';
 import { extractJiraTicketKey, jiraTicketUrl } from '../shared/jira';
 import { BitbucketClient } from './bitbucket-client';
@@ -33,6 +33,8 @@ export class IntegrationService {
   private snapshots = new Map<string, ReviewSnapshot>();
   private clients = new Map<string, BitbucketClient>();
   private remoteRefreshes = new Map<string, Promise<ReviewRefresh>>();
+  // Keep project ownership when the review write succeeds but metadata cleanup fails.
+  private closedReviewRemovals = new Map<string, { projectId: string; check: ClosedReviewCheck }>();
   private failedLoads = new Map<string, string>();
   private loadProgress = new Map<string, RemoteReviewLoadProgress>();
   private loadListeners = new Set<(event: RemoteReviewLoadProgress) => void>();
@@ -360,6 +362,109 @@ export class IntegrationService {
     if (!review.remote || !isMergeComplete(this.state.review(id))) throw new Error('Finish merging and confirm branch cleanup before removing this review.');
     return this.removeReview(id);
   }); }
+  private closedReviewCheck(id: string): ClosedReviewCheck {
+    const review = this.reviews.getState().reviews.find(review => review.id === id), binding = this.state.review(id);
+    const commentIds = new Set([...(review?.comments.map(comment => comment.id) ?? []), ...Object.keys(binding?.publications ?? {})]);
+    const unpublishedComments = [...commentIds].filter(commentId => {
+      const comment = review?.comments.find(comment => comment.id === commentId), publication = binding?.publications[commentId];
+      if (!publication) return !!comment;
+      if (publication.state !== 'synced') return !!comment || !!publication.remoteId || ['sending', 'unknown', 'conflict'].includes(publication.state);
+      const acknowledged = publication.acknowledged;
+      return comment ? !acknowledged || acknowledged.deleted || comment.body !== acknowledged.body || comment.resolved !== acknowledged.resolved
+        : !!publication.remoteId && !acknowledged?.deleted;
+    }).length;
+    return { reviewId: id, name: review?.name ?? this.closedReviewRemovals.get(id)?.check.name ?? 'Review unavailable', status: 'unavailable', unpublishedComments,
+      pullRequests: binding?.pullRequests.map(pr => ({ repositoryPath: pr.repository.relativePath, repoSlug: pr.repository.repoSlug, id: pr.id, url: pr.url, state: 'UNCHECKED' })) ?? [] };
+  }
+  private closedReviewBusyReason(id: string): string | undefined {
+    const review = this.reviews.getState().reviews.find(review => review.id === id);
+    if (this.connectionChange) return 'Wait for the connection change to finish, then check again.';
+    if (this.pending.has(id) || this.localRefreshes.has(id) || this.remoteRefreshes.has(id)) return 'Wait for this review’s current operation to finish, then check again.';
+    if (review && this.pending.has(`project:${review.projectId}`)) return 'Wait for project integration settings to finish, then check again.';
+  }
+  private async inspectClosedReview(id: string): Promise<ClosedReviewCheck> {
+    const result = this.closedReviewCheck(id), review = this.reviews.getState().reviews.find(review => review.id === id), binding = this.state.review(id);
+    const blocked = (reason: string): ClosedReviewCheck => ({ ...result, status: 'blocked', reason });
+    if (!review) return { ...result, reason: 'This review is no longer saved in Branchline.' };
+    if (!review.remote || review.kind === 'current') return blocked('Only saved Bitbucket reviews can be removed by this check.');
+    if (!binding?.pullRequests.length) return blocked('This review has missing Bitbucket metadata. Open it to recover its repository links before removing it.');
+    const operation = binding.operation;
+    if (operation && (operation.state !== 'complete' || operation.action === 'merge' && !isMergeComplete(binding))) {
+      return blocked('This review has an unfinished approval, merge or branch cleanup. Open the review and resume or reconcile that operation first.');
+    }
+    for (const row of binding.repositories ?? []) {
+      const label = row.repository.relativePath === '.' ? row.repository.repoSlug : row.repository.relativePath;
+      if (row.creation) return blocked(`${label}: PR creation needs attention. Open this review and reconcile or retry it first.`);
+      if (row.status === 'changes' && !row.prId) return blocked(`${label}: reviewed changes do not have a PR. Finish reviewing and merging them first.`);
+      if (row.status === 'unavailable') return blocked(`${label}: repository contents could not be checked. Refresh this review before removing it.`);
+      if (row.cleanup && !['deleted', 'skipped'].includes(row.cleanup.state)) return blocked(`${label}: branch cleanup is unfinished. Open this review and resume or reconcile cleanup first.`);
+    }
+    let client: BitbucketClient;
+    try { client = this.client(binding.connectionId); }
+    catch (error) { return { ...result, reason: `Reconnect this review’s original Bitbucket account and check again. ${error instanceof Error ? error.message : String(error)}` }; }
+    const failures: string[] = [];
+    await mapConcurrent(binding.pullRequests, 4, async (saved, index) => {
+      const item = result.pullRequests[index];
+      try {
+        const fresh = await client.getPullRequest(saved.repository, saved.id);
+        if (fresh.id !== saved.id || fresh.repository.relativePath !== saved.repository.relativePath
+          || fresh.repository.workspace.toLowerCase() !== saved.repository.workspace.toLowerCase() || fresh.repository.repoSlug.toLowerCase() !== saved.repository.repoSlug.toLowerCase()
+          || saved.repository.uuid && fresh.repository.uuid && saved.repository.uuid !== fresh.repository.uuid) throw new Error('Bitbucket returned a different repository or PR identity.');
+        item.state = fresh.state;
+        if (!['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(fresh.state)) failures.push(`${item.repoSlug} #${item.id}: Bitbucket returned an unrecognized PR state (${fresh.state || 'empty'}).`);
+      } catch (error) {
+        item.state = 'UNAVAILABLE';
+        failures.push(`${item.repoSlug} #${item.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    if (failures.length) return { ...result, reason: `${failures.join(' ')} This review was kept; check the account’s access and try again.` };
+    if (result.pullRequests.some(pr => pr.state === 'OPEN')) return { ...result, status: 'open', reason: 'At least one PR in this review is still open.' };
+    return { ...result, status: 'closed' };
+  }
+  async checkClosedReview(id: string): Promise<ClosedReviewCheck> {
+    if (typeof id !== 'string' || !id || ['__proto__', 'prototype', 'constructor'].includes(id)) throw new Error('Choose a saved review to check.');
+    const reason = this.closedReviewBusyReason(id);
+    if (reason) return { ...this.closedReviewCheck(id), status: 'blocked', reason };
+    try { return await this.serial(id, () => this.inspectClosedReview(id)); }
+    catch (error) { return { ...this.closedReviewCheck(id), reason: error instanceof Error ? error.message : String(error) }; }
+  }
+  async removeClosedReviews(projectId: string, ids: string[]): Promise<ClosedReviewCleanupResult> {
+    this.reviews.getProject(projectId);
+    if (!Array.isArray(ids) || !ids.length || ids.length > 1000 || ids.some(id => typeof id !== 'string' || !id || ['__proto__', 'prototype', 'constructor'].includes(id))) throw new Error('Choose saved reviews to remove.');
+    const removedIds: string[] = [], retained: ClosedReviewCheck[] = [];
+    await mapConcurrent([...new Set(ids)], 4, async id => {
+      const review = this.reviews.getState().reviews.find(review => review.id === id), receipt = this.closedReviewRemovals.get(id);
+      if (review && review.projectId !== projectId || receipt && receipt.projectId !== projectId) {
+        retained.push({ ...this.closedReviewCheck(id), status: 'blocked', reason: 'This review belongs to another project. Check it from that project’s review list.' }); return;
+      }
+      const reason = this.closedReviewBusyReason(id);
+      if (reason) { retained.push({ ...this.closedReviewCheck(id), status: 'blocked', reason }); return; }
+      let checked = this.closedReviewCheck(id);
+      try {
+        await this.serial(id, async () => {
+          const saved = this.reviews.getState().reviews.find(review => review.id === id);
+          if (!saved) {
+            if (this.state.review(id) && !receipt) { retained.push({ ...checked, status: 'blocked', reason: 'This review is no longer saved. Restart Branchline to finish cleaning its integration metadata.' }); return; }
+            await this.state.removeReview(id); this.forgetReview(id); this.closedReviewRemovals.delete(id); removedIds.push(id); return;
+          }
+          if (saved.projectId !== projectId) { retained.push({ ...checked, status: 'blocked', reason: 'This review belongs to another project.' }); return; }
+          checked = await this.inspectClosedReview(id);
+          if (checked.status !== 'closed') { retained.push(checked); return; }
+          this.closedReviewRemovals.set(id, { projectId, check: checked });
+          try { await this.removeReview(id); }
+          finally {
+            if (!this.reviews.getState().reviews.some(review => review.id === id)) this.forgetReview(id);
+            else this.closedReviewRemovals.delete(id);
+          }
+          this.closedReviewRemovals.delete(id); removedIds.push(id);
+        });
+      } catch (error) {
+        const deleted = !this.reviews.getState().reviews.some(review => review.id === id);
+        retained.push({ ...checked, status: 'unavailable', reason: `${deleted ? 'The review was removed, but its local metadata still needs cleanup. Retry this removal or restart Branchline.' : 'The review could not be removed. Try again.'} ${error instanceof Error ? error.message : String(error)}` });
+      }
+    });
+    return { state: this.reviews.getState(), removedIds, retained };
+  }
   /** Retire completed reviews from earlier versions and after interrupted UI completion. */
   async removeCompletedReviews(): Promise<void> {
     // Deletion commits the review store first. Finish metadata cleanup if the

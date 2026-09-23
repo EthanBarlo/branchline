@@ -6,8 +6,9 @@ import { UpdateButton, UpdateDetails } from './components/UpdateControls';
 import { SettingsView, type SettingsSection } from './components/SettingsView';
 import { JiraIssuePanel, ProjectIntegrationDialog, PublicationStatus, PullRequestsDialog, RemoteLoadRepositories, RemoteReviewControls } from './components/IntegrationControls';
 import { MergeCompletion } from './components/MergeCompletion';
+import { ClosedReviewCleanup } from './components/ClosedReviewCleanup';
 import { isMergeComplete } from '../shared/integrations';
-import type { IntegrationState, RemoteReviewLoadProgress, RemoteReviewState } from '../shared/integrations';
+import type { ClosedReviewCleanupResult, IntegrationState, RemoteReviewLoadProgress, RemoteReviewState } from '../shared/integrations';
 import {
   ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown,
   Circle, CircleCheck, Clipboard, ExternalLink, FileCode2, FolderGit2, FolderOpen,
@@ -95,6 +96,7 @@ export default function App() {
   const [integrationRevision, setIntegrationRevision] = useState(0);
   const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
   const [showPullRequests, setShowPullRequests] = useState(false);
+  const [cleanupProject, setCleanupProject] = useState<Project | null>(null);
   const [remoteStates, setRemoteStates] = useState<Record<string, RemoteReviewState>>({});
   const [remoteLoads, setRemoteLoads] = useState<Record<string, RemoteReviewLoadProgress>>({});
   const remoteLoadSequences = useRef<Record<string, number>>({});
@@ -321,8 +323,8 @@ export default function App() {
     let live = true;
     const id = review.id;
     void window.reviewAPI.getJiraTicketLink(id).then(link => {
-      if (live) setJiraLinks(previous => ({ ...previous, [id]: link }));
-    }).catch(() => { if (live) setJiraLinks(previous => ({ ...previous, [id]: null })); });
+      if (live && !deletedReviewIds.current.has(id)) setJiraLinks(previous => ({ ...previous, [id]: link }));
+    }).catch(() => { if (live && !deletedReviewIds.current.has(id)) setJiraLinks(previous => ({ ...previous, [id]: null })); });
     return () => { live = false; };
   }, [review?.id, review?.remote, review?.featureBranch, integrationRevision, jiraLinkRevision, settings.jiraBaseUrl]);
   const currentDetached = Boolean(isCurrent && metadata?.inspection && !metadata.inspection.currentBranch);
@@ -364,6 +366,7 @@ export default function App() {
   }
 
   function activateReview(id: string | null) {
+    if (id && deletedReviewIds.current.has(id)) return;
     selectedIdRef.current = id;
     setSelectedReviewId(id);
     setReanchorId(null);
@@ -507,6 +510,41 @@ export default function App() {
     catch { /* Optional display history cannot block a confirmed completion. */ }
     setMergeCompletion({ reviewId: mergedReview.id, projectId: mergedReview.projectId, remote: state, jiraLink });
     if (selectedIdRef.current === mergedReview.id) activateReview(currentReviewId(mergedReview.projectId));
+  }
+
+  function closedReviewsRemoved(result: ClosedReviewCleanupResult) {
+    const savedIds = new Set(result.state.reviews.map(review => review.id));
+    const removed = new Set([...result.removedIds, ...latestReviews.current.filter(review => !savedIds.has(review.id)).map(review => review.id)]);
+    const removedIds = [...removed];
+    for (const id of removed) deletedReviewIds.current.add(id);
+    if (!mounted.current) return;
+    const belongsToRemoved = (key: string) => removed.has(key) || removedIds.some(id => key.startsWith(`${id}:`));
+    const withoutRemoved = <T,>(record: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(record).filter(([key]) => !belongsToRemoved(key)));
+    latestReviews.current = result.state.reviews;
+    setProjects(result.state.projects); setReviews(result.state.reviews); setSettings(result.state.settings);
+    setSnapshots(withoutRemoved); setReviewMetadata(withoutRemoved); setSelectedFiles(withoutRemoved);
+    setRemoteStates(withoutRemoved); setRemoteLoads(withoutRemoved); setJiraLinks(withoutRemoved);
+    contexts.current = withoutRemoved(contexts.current);
+    mutationVersions.current = withoutRemoved(mutationVersions.current);
+    targetVersions.current = withoutRemoved(targetVersions.current);
+    refreshMutationVersions.current = withoutRemoved(refreshMutationVersions.current);
+    remoteLoadSequences.current = withoutRemoved(remoteLoadSequences.current);
+    latestFiles.current = withoutRemoved(latestFiles.current);
+    explorerOrder.current = withoutRemoved(explorerOrder.current);
+    knownApprovals.current = withoutRemoved(knownApprovals.current);
+    for (const id of removed) { refreshInFlight.current.delete(id); targetInFlight.current.delete(id); }
+    try {
+      localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current));
+      if (removed.has(localStorage.getItem('branchline.selectedReview') || '')) localStorage.removeItem('branchline.selectedReview');
+      for (const item of result.state.projects) {
+        const key = `branchline.selectedReview.${item.id}`;
+        if (removed.has(localStorage.getItem(key) || '')) localStorage.removeItem(key);
+      }
+    } catch { /* Optional display history cannot block confirmed removal. */ }
+    setMergeCompletion(previous => previous && removed.has(previous.reviewId) ? null : previous);
+    if (selectedIdRef.current && removed.has(selectedIdRef.current)) {
+      activateReview(selectedProjectRef.current ? currentReviewId(selectedProjectRef.current) : null);
+    }
   }
 
   function remoteOpened(created: Review) {
@@ -685,12 +723,12 @@ export default function App() {
             {jiraTicket && !projectIntegration?.jiraConnectionId && <button className="jira-ticket-button" aria-label={`Open ${jiraTicket} in Jira`} title={settings.jiraBaseUrl ? `Open ${jiraTicket} in Jira · ${settings.jiraBaseUrl}` : `Set up Jira to open ${jiraTicket}`} disabled={openingJira} onClick={() => void openJira()}><span>{jiraTicket}</span>{openingJira ? <LoaderCircle size={12} className="spin" /> : <ExternalLink size={12} />}</button>}
             <span className="working-tree-label" title={review.includeWorkingTree ? 'Includes eligible uncommitted changes and new files' : 'Reviewing committed changes only'}>{review.includeWorkingTree ? 'Local edits' : 'Commits only'}</span>
             <div className="toolbar-actions">
-              {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} loadingRepositories={remoteLoading ? loadingRepositories : undefined} reviewLoading={remoteLoading} onRemote={state => setRemoteStates(previous => ({ ...previous, [review.id]: state }))} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
+              {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} loadingRepositories={remoteLoading ? loadingRepositories : undefined} reviewLoading={remoteLoading} onRemote={state => { if (!deletedReviewIds.current.has(review.id)) setRemoteStates(previous => ({ ...previous, [review.id]: state })); }} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
               {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraTicket} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
               <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : review.remote ? 'Refresh the cached PR diff. Also refreshes when reopened or preparing feedback for publication.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
               <button className={`button button-feedback ${showFeedback ? 'active' : ''}`} aria-label={`Feedback${unresolvedComments.length ? ` (${unresolvedComments.length})` : ''}`} aria-pressed={showFeedback} onClick={() => setShowFeedback(!showFeedback)} title="Show review feedback"><MessageSquare size={15} />{unresolvedComments.length > 0 && <span className="soft-count">{unresolvedComments.length}</span>}</button>
               {!review.remote && copyButton}
-              <WorkspaceMenu key={`${project?.id}:${review.id}`} onSettings={() => project && setSettingsProject(project)} onRepositories={() => setShowRepoDetails(!showRepoDetails)} onIntegrations={() => project && setIntegrationProject(project)} onHelp={() => setShowHelp(true)} onDelete={isCurrent ? undefined : () => setDeleteReview(review)} />
+              <WorkspaceMenu key={`${project?.id}:${review.id}`} onCleanupClosed={projectReviews.some(item => item.remote) ? () => project && setCleanupProject(project) : undefined} onSettings={() => project && setSettingsProject(project)} onRepositories={() => setShowRepoDetails(!showRepoDetails)} onIntegrations={() => project && setIntegrationProject(project)} onHelp={() => setShowHelp(true)} onDelete={isCurrent ? undefined : () => setDeleteReview(review)} />
             </div>
           </header>
           {!!pointerChanges.length && <details className="pointer-changes" open={files.length ? undefined : true}><summary><GitFork size={13} /><span>{pointerChanges.length} submodule pointer {pointerChanges.length === 1 ? 'change' : 'changes'}</span><ChevronDown size={12} /></summary><div>{pointerChanges.map(pointer => <div className="pointer-change-row" key={`${pointer.repositoryPath}:${pointer.path}`}><span>{pointer.repositoryPath === '.' ? '' : `${pointer.repositoryPath}/`}{pointer.path}</span><code title={pointer.oldHash || 'Not present'}>{pointer.oldHash?.slice(0, 12) || 'not present'}</code><ArrowRight size={11} /><code title={pointer.newHash || 'Removed'}>{pointer.newHash?.slice(0, 12) || 'removed'}</code></div>)}</div></details>}
@@ -730,6 +768,7 @@ export default function App() {
     <div hidden={showUpdates}>
     {showAddProject && <AddProjectDialog onClose={() => setShowAddProject(false)} onCreated={projectCreated} />}
     {integrationProject && <ProjectIntegrationDialog key={integrationProject.id} project={integrationProject} onClose={() => setIntegrationProject(null)} onSaved={loadIntegrations} onAccounts={() => { setIntegrationProject(null); void openSettings('bitbucket'); }} />}
+    {cleanupProject && <ClosedReviewCleanup key={cleanupProject.id} project={cleanupProject} reviews={reviews.filter(item => item.projectId === cleanupProject.id && item.remote)} onClose={() => { setCleanupProject(null); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Workspace menu"]')?.focus()); }} onRemoved={closedReviewsRemoved} />}
     {showPullRequests && project && <PullRequestsDialog key={project.id} project={project} onClose={() => setShowPullRequests(false)} onOpened={remoteOpened} onSettings={() => { setShowPullRequests(false); setIntegrationProject(project); }} />}
     {showNewReview && project && <NewReviewDialog key={project.id} project={project} onClose={() => setShowNewReview(false)} onCreated={created => { contexts.current[created.id] = reviewContextKey(created); setReviews(previous => mergeReview(previous, created)); setProjects(previous => previous.map(item => item.id === created.projectId ? { ...item, defaultBaseBranch: created.baseBranch } : item)); void selectReview(created.id); setShowNewReview(false); }} />}
     {settingsProject && <ProjectSettingsDialog project={settingsProject} currentTarget={reviews.find(item => item.projectId === settingsProject.id && item.kind === 'current')?.baseBranch || ''} onClose={() => setSettingsProject(null)} onUpdated={updated => { setProjects(previous => previous.map(item => item.id === updated.id ? updated : item)); setSettingsProject(null); }} onRemove={() => { setDeleteProject(settingsProject); setSettingsProject(null); }} />}
@@ -748,8 +787,8 @@ function CurrentSetup({ detached, onReviewBranch }: { detached: boolean; onRevie
   return <div className="current-setup"><div className="current-setup-content"><GitCompareArrows size={24} strokeWidth={1.4} /><h2>{detached ? 'Check out a branch to continue.' : 'Choose a target branch.'}</h2><p>{detached ? 'Current will resume automatically when you check out a branch.' : 'Select a target in the toolbar above. It will stay selected as you work.'}</p>{detached && <button className="button button-secondary" onClick={onReviewBranch}><GitBranch size={14} />Review another branch</button>}</div></div>;
 }
 
-function WorkspaceMenu({ onSettings, onRepositories, onIntegrations, onHelp, onDelete }: {
-  onSettings: () => void; onRepositories: () => void; onIntegrations: () => void; onHelp: () => void; onDelete?: () => void;
+function WorkspaceMenu({ onSettings, onRepositories, onIntegrations, onHelp, onDelete, onCleanupClosed }: {
+  onSettings: () => void; onRepositories: () => void; onIntegrations: () => void; onHelp: () => void; onDelete?: () => void; onCleanupClosed?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -776,6 +815,7 @@ function WorkspaceMenu({ onSettings, onRepositories, onIntegrations, onHelp, onD
     }}>
       <button role="menuitem" onClick={() => choose(onSettings)}><Settings2 size={14} />Project settings</button>
       <button role="menuitem" onClick={() => choose(onIntegrations)}><GitPullRequest size={14} />Project integrations</button>
+      {onCleanupClosed && <button role="menuitem" onClick={() => choose(onCleanupClosed)}><Trash2 size={14} />Clean up closed Bitbucket reviews</button>}
       <button role="menuitem" onClick={() => choose(onRepositories)}><Layers3 size={14} />Repositories</button>
       <button role="menuitem" onClick={() => choose(onHelp)}><HelpCircle size={14} />How Branchline works</button>
       {onDelete && <button role="menuitem" className="menu-danger" onClick={() => choose(onDelete)}><Trash2 size={14} />Delete this review</button>}

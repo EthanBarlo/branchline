@@ -228,6 +228,8 @@ try {
   // Jira is selected afterward so these counters isolate remote file review.
   await page.reload();
   const reviewPicker = page.getByRole('combobox', { name: 'Select review', exact: true });
+  const openCheck = await page.evaluate(id => window.reviewAPI.checkClosedReview(id), setup.review.id);
+  assert.equal(openCheck.status, 'blocked', 'Branch-only work without a PR must remain available for review.');
   const counters = () => desktop.evaluate(() => ({ requests: globalThis.providerSmoke.requests.length, git: globalThis.providerSmoke.git.length }));
   await reviewPicker.waitFor();
   const beforeOpen = await counters();
@@ -365,13 +367,25 @@ try {
   const log = await readFile(diagnostics.path, 'utf8');
   assert.ok(log.includes('pull_request_commit_resolved')); assert.ok(log.includes('pull_request_invalid')); assert.ok(log.includes('source.commit.hash'));
   for (const secret of ['fake-bb-token', 'fake-jira-token', 'Updated inline feedback', 'Connected issue', 'Authorization', 'smoke/repository']) assert.ok(!log.includes(secret), `Diagnostics must exclude ${secret}.`);
-  const removed = await page.evaluate(async id => {
-    const first = await window.reviewAPI.completeMergedReview(id);
+  await desktop.evaluate(() => { globalThis.providerSmoke.invalidPullRequest = false; });
+  const cleanupStart = await desktop.evaluate(() => ({ requests: globalThis.providerSmoke.requests.length, git: globalThis.providerSmoke.git.length }));
+  const removed = await page.evaluate(async ({ id, projectId }) => {
+    const check = await window.reviewAPI.checkClosedReview(id);
+    const cleanup = await window.reviewAPI.removeClosedReviews(projectId, [id]);
+    const retry = await window.reviewAPI.removeClosedReviews(projectId, [id]);
+    const first = cleanup.state;
     const again = await window.reviewAPI.completeMergedReview(id);
     let missingReviewError;
     try { await window.reviewAPI.getRemoteReview(id); } catch (error) { missingReviewError = error.message; }
-    return { first, again, missingReviewError };
-  }, result.review.id);
+    return { first, again, check, cleanup, retry, missingReviewError };
+  }, { id: result.review.id, projectId: result.project.id });
+  assert.equal(removed.check.status, 'closed');
+  assert.deepEqual(removed.cleanup.removedIds, [result.review.id]);
+  assert.deepEqual(removed.cleanup.retained, []);
+  assert.deepEqual(removed.retry, removed.cleanup, 'Closed-review removal IPC is safe to retry.');
+  const cleanupEnd = await desktop.evaluate(() => globalThis.providerSmoke);
+  assert.equal(cleanupEnd.git.length, cleanupStart.git, 'Saved-review cleanup does not invoke Git.');
+  assert.ok(cleanupEnd.requests.slice(cleanupStart.requests).every(request => request.method === 'GET'), 'Saved-review cleanup only reads from Bitbucket.');
   assert.ok(!removed.first.reviews.some(review => review.id === result.review.id));
   assert.deepEqual(removed.again, removed.first, 'Completion IPC is safe to retry.');
   assert.match(removed.missingReviewError || '', /This review no longer exists/);
