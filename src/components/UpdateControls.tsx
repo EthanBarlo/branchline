@@ -1,6 +1,7 @@
 import { ArrowDownToLine, Check, LoaderCircle, RefreshCw, RotateCw, TriangleAlert } from 'lucide-react';
 import './updates.css';
 import type { UpdateState } from '../../shared/updates';
+import { ReleaseNotes } from './ReleaseNotes';
 
 export function UpdateButton({ state, onClick }: { state: UpdateState | null; onClick: () => void }) {
   const busy = state?.phase === 'checking' || state?.phase === 'downloading';
@@ -32,7 +33,7 @@ export function UpdateDetails({ state, bridgeError, onAction, onClose }: {
       </div>
       {phase === 'downloading' && <div className="update-download"><progress aria-label="Update download progress" max={100} value={state.progress || 0} /><span>{Math.round(state.progress || 0)}%</span></div>}
       {error && <div className="update-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div>}
-      {state.availableVersion && state.releaseNotes && <section className="update-notes"><h4>What’s new in {state.availableVersion}</h4><pre>{state.releaseNotes}</pre></section>}
+      {state.availableVersion && state.releaseNotes && <section className="update-notes"><h4>What’s new in {state.availableVersion}</h4><ReleaseNotes key={state.availableVersion} text={state.releaseNotes} /></section>}
     </div>
     <div className="modal-footer">
       <button className="button button-secondary" onClick={onClose}>{phase === 'available' || phase === 'downloaded' ? 'Later' : 'Close'}</button>

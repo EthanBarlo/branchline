@@ -41,7 +41,7 @@ test('only newer stable versions can be offered', () => {
   assert.equal(newerStable('1.0.0', '0.99.99'), true);
 });
 test('GitHub HTML release notes become readable plain text', () => {
-  assert.equal(releaseNotesToText('<h2>Fixes &amp; improvements</h2><ul><li>Save comments</li></ul><script>bad()</script>'), 'Fixes & improvements\n• Save comments');
+  assert.equal(releaseNotesToText('<h2>Fixes &amp; improvements</h2><ul><li>Save comments</li></ul><script>bad()</script>'), 'Fixes & improvements\n\n• Save comments');
 });
 test('checks never download; download never installs; actions and progress are explicit', async () => {
   const f = fixture(); const states: string[] = [];

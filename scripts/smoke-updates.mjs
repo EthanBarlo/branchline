@@ -34,6 +34,16 @@ try {
   console.log('Update test app opened.');
   await desktop.evaluate(({ app, Menu }) => {
     app.branchlineUpdateTest.failCheckOnce = true;
+    app.branchlineUpdateTest.releaseNotes = `<p>This release improves Bitbucket review cleanup, merge recovery and the space available for reviewing code.</p>
+      <ul>
+        <li><p><strong>Automatically clear completed reviews</strong></p><p>Opening or refreshing a review detects PRs completed outside Branchline and removes the review once every repository is confirmed finished.</p><p>Unpublished feedback and unfinished work keep the review available.</p></li>
+        <li><p><strong>Clean up older reviews</strong></p><p>Use the workspace menu to clear older completed Bitbucket reviews.</p></li>
+        <li><p><strong>Catch conflicts before merging</strong></p><p>Merge previews show affected repositories and files before you merge.</p></li>
+        <li><p><strong>Keep branches until all merges succeed</strong></p><p>Source branches remain until every required PR has merged successfully.</p></li>
+        <li><p><strong>More room for code</strong></p><p>Jira details, repository details and merge results open in dialogs.</p></li>
+        <li>Clearer Bitbucket diagnostics</li>
+      </ul><p>The universal macOS build supports Intel and Apple Silicon.</p>
+      <script>window.releaseNotesExecuted = true</script><img src="https://example.invalid/release-note-tracker">`;
     Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === 'Check for Updates…').click();
   });
   await page.getByRole('dialog').getByRole('button', { name: 'Retry check', exact: true }).waitFor();
@@ -48,6 +58,25 @@ try {
   const counts = await page.evaluate(() => { window.stopUpdateEvents(); return window.updateEventCounts; });
   assert.ok(counts.kept >= 2); assert.equal(counts.removed, 0);
   await page.getByRole('button', { name: 'Download update', exact: true }).waitFor();
+  const notes = page.locator('.release-notes-content');
+  assert.equal(await notes.locator('details').count(), 5);
+  assert.equal(await notes.locator('details[open]').count(), 0, 'Descriptions start collapsed.');
+  assert.equal(await notes.locator('.release-note-simple').count(), 1, 'A bullet without a description is not an accordion.');
+  assert.equal(await notes.locator('> p').count(), 2, 'Introductory and closing paragraphs stay outside the list.');
+  assert.equal(await notes.locator('script, img, iframe, style, a').count(), 0, 'Remote release markup is never inserted into the page.');
+  assert.equal(await page.evaluate(() => window.releaseNotesExecuted), undefined);
+  const firstNote = notes.locator('details').first();
+  await page.getByRole('dialog').screenshot({ path: 'artifacts/update-notes-collapsed.png', animations: 'disabled' });
+  await firstNote.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  assert.equal(await firstNote.getAttribute('open'), '');
+  assert.equal(await firstNote.locator('.release-note-description p').count(), 2);
+  await firstNote.getByText('Unpublished feedback and unfinished work keep the review available.', { exact: true }).waitFor();
+  await page.getByRole('dialog').screenshot({ path: 'artifacts/update-notes-expanded.png', animations: 'disabled' });
+  await page.keyboard.press('Enter');
+  assert.equal(await firstNote.getAttribute('open'), null);
+  const footer = await page.getByRole('button', { name: 'Download update', exact: true }).boundingBox();
+  assert.ok(footer && footer.y + footer.height <= await page.evaluate(() => window.innerHeight), 'Update controls remain visible.');
   await page.screenshot({ path: 'artifacts/update-available.png', animations: 'disabled' });
   await desktop.evaluate(({ app }) => { app.branchlineUpdateTest.failDownloadOnce = true; });
   await page.getByRole('button', { name: 'Download update', exact: true }).click();

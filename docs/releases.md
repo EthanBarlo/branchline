@@ -60,6 +60,28 @@ Administrator-owned installations use the native macOS authorization prompt when
 
 The published 0.10.0 and 0.11.0 versions reject non-writable installation folders before native authorization starts. Affected installations need one manual installation of a signed version containing this fix; those older updaters cannot install the fix themselves from a protected folder.
 
+## Write release notes
+
+Give each detailed bullet a short, bold title. After a blank line, indent its description by two spaces to keep it inside that bullet. In the app, the title appears as a collapsed accordion; readers can expand it to see the description. Bullets without a description remain ordinary list items.
+
+```markdown
+This release improves Bitbucket review cleanup.
+
+- **Automatically clear completed reviews**
+
+  Opening or refreshing a review removes it once every repository is confirmed finished.
+
+- **Clearer merge progress**
+
+  Follow each repository's checks, merge and branch cleanup in the progress dialog.
+
+- Improved keyboard navigation.
+
+Your existing reviews and feedback stay available after updating.
+```
+
+Leave standalone paragraphs unindented and separate them with blank lines so they appear outside the list with their own spacing. Preview the draft on GitHub, then check the in-app Updates dialog: detailed items should start collapsed, simple bullets should stay visible, and introductory or closing paragraphs should sit separately from the list.
+
 ## Checks before publishing
 
 ```sh

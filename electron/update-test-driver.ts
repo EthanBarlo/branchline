@@ -17,12 +17,13 @@ export class UpdateTestDriver extends EventEmitter {
   downloads = 0;
   installs = 0;
   version = '99.0.0';
+  releaseNotes = 'A better Branchline.\n\n• Faster reviews\n• Reliable updates';
   private authorization?: { resolve: () => void; reject: (error: Error) => void };
   constructor(private quit: () => void) { super(); }
   async checkForUpdates() {
     this.checks++;
     if (this.failCheckOnce) { this.failCheckOnce = false; throw new Error('Offline'); }
-    this.emit('update-available', { version: this.version, releaseNotes: 'A better Branchline.\n\n• Faster reviews\n• Reliable updates' });
+    this.emit('update-available', { version: this.version, releaseNotes: this.releaseNotes });
   }
   async downloadUpdate() {
     this.downloads++;

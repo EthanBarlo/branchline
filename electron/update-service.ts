@@ -1,5 +1,7 @@
 import type { EventEmitter } from 'node:events';
 import type { UpdateAction, UpdateState } from '../shared/updates';
+import { releaseNotesToText } from '../shared/release-notes';
+export { releaseNotesToText } from '../shared/release-notes';
 
 export interface ReleaseInfo { version: string; releaseNotes?: string | Array<{ version: string; note: string | null }> | null }
 export interface UpdaterPort extends EventEmitter {
@@ -22,16 +24,6 @@ interface UpdateOptions {
   now?: () => number;
 }
 export const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
-
-/** GitHub's Atom feed supplies HTML. Return plain text, never renderer markup. */
-export function releaseNotesToText(notes: string): string {
-  return notes.slice(0, 30_000)
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<br\s*\/?\s*>|<\/(?:p|div|li|h[1-6]|ul|ol)>/gi, '\n')
-    .replace(/<li\b[^>]*>/gi, '• ').replace(/<[^>]*>/g, '')
-    .replace(/&(amp|lt|gt|quot|apos|nbsp);/g, (_, key: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[key] || '')
-    .replace(/\n{3,}/g, '\n\n').trim();
-}
 
 export function newerStable(candidate: string, current: string): boolean {
   const pattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
