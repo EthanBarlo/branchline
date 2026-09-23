@@ -25,11 +25,12 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
   onUpdateAction: (action: 'check' | 'download' | 'install') => void;
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
-  const [busy, setBusy] = useState({ jira: false, bitbucket: false, links: false });
+  const [busy, setBusy] = useState({ jira: false, bitbucket: false, links: false, ticketView: false });
   const scroll = useRef<HTMLDivElement>(null);
   const jiraBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, jira: value })), []);
   const bitbucketBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, bitbucket: value })), []);
   const linksBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, links: value })), []);
+  const ticketViewBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, ticketView: value })), []);
   const saving = Object.values(busy).some(Boolean);
   useEffect(() => { document.getElementById(`settings-tab-${initialSection}`)?.focus(); }, [initialSection]);
   function select(next: SettingsSection) { setSection(next); scroll.current?.scrollTo({ top: 0 }); }
@@ -51,6 +52,7 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
       <div className="settings-content">
         <div id="settings-panel-jira" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-jira" hidden={section !== 'jira'}>
           <ConnectionSettings kind="jira" onChanged={onConnectionsChanged} onBusyChange={jiraBusy} />
+          <JiraViewSettings settings={settings} onSaved={onSaved} onBusyChange={ticketViewBusy} />
           <JiraLinkSettings settings={settings} ticket={ticket} initiallyOpen={showLegacyLinks || !!settings.jiraBaseUrl} onSaved={onSaved} onBusyChange={linksBusy} />
         </div>
         <div id="settings-panel-bitbucket" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-bitbucket" hidden={section !== 'bitbucket'}>
@@ -65,6 +67,35 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
         </div>
       </div>
     </div>
+  </section>;
+}
+
+function JiraViewSettings({ settings, onSaved, onBusyChange }: {
+  settings: AppSettings; onSaved: (settings: AppSettings) => void; onBusyChange: (value: boolean) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const inFlight = useRef(false);
+  const selectedView = settings.jiraTicketView ?? 'website';
+  async function save(view: NonNullable<AppSettings['jiraTicketView']>) {
+    if (inFlight.current || view === selectedView) return;
+    inFlight.current = true; setSaving(true); onBusyChange(true); setError(''); setSaved(false);
+    try { onSaved(await window.reviewAPI.updateSettings({ jiraTicketView: view })); setSaved(true); }
+    catch (reason) { setError(message(reason)); }
+    finally { inFlight.current = false; setSaving(false); onBusyChange(false); }
+  }
+  return <section className="settings-ticket-view" aria-labelledby="jira-ticket-view-heading">
+    <h3 id="jira-ticket-view-heading">Opening tickets</h3>
+    <label htmlFor="jira-ticket-view">Default ticket view</label>
+    <select id="jira-ticket-view" className="text-input" value={selectedView} disabled={saving} aria-describedby="jira-ticket-view-hint" onChange={event => void save(event.target.value as NonNullable<AppSettings['jiraTicketView']>)}>
+      <option value="website">Full Jira page</option>
+      <option value="summary">Ticket summary</option>
+    </select>
+    <p id="jira-ticket-view-hint">{selectedView === 'website' ? 'Edit tickets and add comments inside Branchline. Sign in to Jira separately for each account.' : 'Show the ticket title and description in a compact, read-only view using your API token.'}</p>
+    {saving && <span className="settings-ticket-view-status" role="status"><LoaderCircle className="spin" size={13} />Saving preference…</span>}
+    {saved && <span className="settings-ticket-view-status" role="status"><Check size={13} />Preference saved</span>}
+    {error && <div className="form-error" role="alert"><TriangleAlert size={15} /><span>{error}</span></div>}
   </section>;
 }
 

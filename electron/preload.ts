@@ -25,7 +25,22 @@ const api: ReviewAPI = {
     return () => { ipcRenderer.removeListener('review:remote-review-changed', listener); };
   },
   getJiraIssue: (...args) => ipcRenderer.invoke('review:jira-issue', ...args),
+  getJiraTicketSuggestions: (...args) => ipcRenderer.invoke('review:jira-ticket-suggestions', ...args),
   getJiraTicketLink: id => ipcRenderer.invoke('review:jira-ticket-link', id),
+  openJiraBrowser: (...args) => ipcRenderer.invoke('review:jira-browser-open', ...args),
+  resizeJiraBrowser: (...args) => ipcRenderer.invoke('review:jira-browser-resize', ...args),
+  focusJiraBrowser: id => ipcRenderer.invoke('review:jira-browser-focus', id),
+  closeJiraBrowser: id => ipcRenderer.invoke('review:jira-browser-close', id),
+  onJiraBrowserClosed: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
+    ipcRenderer.on('review:jira-browser-closed', listener);
+    return () => ipcRenderer.removeListener('review:jira-browser-closed', listener);
+  },
+  onJiraBrowserClearTicket: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
+    ipcRenderer.on('review:jira-browser-clear-ticket', listener);
+    return () => ipcRenderer.removeListener('review:jira-browser-clear-ticket', listener);
+  },
   setReviewTicket: (...args) => ipcRenderer.invoke('review:jira-ticket', ...args),
   previewFeedback: id => ipcRenderer.invoke('review:feedback-preview', id),
   publishFeedback: id => ipcRenderer.invoke('review:feedback-publish', id),

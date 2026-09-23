@@ -16,6 +16,7 @@ import { PublicationService } from './publication-service';
 import { MergeService } from './merge-service';
 import { BranchReviewService } from './branch-review-service';
 import { inspectRepo } from './git';
+import type { JiraBrowserTarget } from './jira-browser';
 
 export interface IntegrationDependencies {
   client?: (connectionId: string) => BitbucketClient;
@@ -549,8 +550,17 @@ export class IntegrationService {
       if (review.remote && isMergeComplete(this.state.review(review.id))) await this.completeMergedReview(review.id);
     }
   }
-  async setReviewTicket(id: string, key: string) {
+  async getJiraTicketSuggestions(id: string, query: string) {
+    const review = this.reviews.getReview(id);
+    const connectionId = this.state.project(review.projectId).jiraConnectionId;
+    if (!connectionId) throw new Error('Choose a Jira connection in Project integrations to search tickets.');
+    const result = await this.connections.getIssueSuggestions(connectionId, query);
+    if (this.state.project(review.projectId).jiraConnectionId !== connectionId) throw new Error('The Jira connection changed. Search again.');
+    return result;
+  }
+  async setReviewTicket(id: string, key: string | null) {
     this.reviews.getReview(id);
+    if (key === null) { await this.state.setTicket(id, null); return; }
     if (typeof key !== 'string' || (key.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key.trim()))) throw new Error('Enter a Jira issue key such as APP-123.');
     await this.state.setTicket(id, key.trim().toUpperCase());
   }
@@ -563,18 +573,31 @@ export class IntegrationService {
     const baseUrl = connection?.siteUrl || this.reviews.getSettings().jiraBaseUrl;
     if (!baseUrl) return null;
     let key = this.state.ticket(id);
-    if (!key) {
+    if (key === undefined) {
       const branch = review.kind === 'current' ? (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch : review.featureBranch;
       key = extractJiraTicketKey(branch ?? '') ?? undefined;
     }
     return key ? { key: key.toUpperCase(), url: jiraTicketUrl(baseUrl, key) } : null;
+  }
+  async getJiraBrowserTarget(id: string): Promise<JiraBrowserTarget> {
+    const review = this.reviews.getReview(id);
+    const connectionId = this.state.project(review.projectId).jiraConnectionId;
+    const connection = this.connections.list().find(value => value.id === connectionId && value.kind === 'jira');
+    if (!connection?.siteUrl) throw new Error('Choose a Jira connection in Project integrations before opening Jira in Branchline.');
+    const siteUrl = this.validateLink(connection.siteUrl);
+    const link = await this.getJiraTicketLink(id);
+    if (!link) throw new Error('Enter a Jira ticket key to open it in Branchline.');
+    if (this.state.project(review.projectId).jiraConnectionId !== connectionId || new URL(link.url).origin !== new URL(siteUrl).origin) {
+      throw new Error('The project’s Jira connection changed. Open the ticket again.');
+    }
+    return { connectionId: connection.id, siteUrl, url: this.validateLink(link.url), key: link.key, accountLabel: `${connection.displayName || connection.label} (${connection.email})` };
   }
   getJiraIssue(id: string, override?: string) { return this.trackLocalRefresh(id, async () => {
     const review = this.reviews.getReview(id);
     const settings = this.state.project(review.projectId);
     if (!settings.jiraConnectionId) throw new Error('Choose a Jira connection in project integrations.');
     let key = override || this.state.ticket(id);
-    if (!key) {
+    if (key === undefined) {
       const branch = review.kind === 'current' ? (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch : review.featureBranch;
       key = extractJiraTicketKey(branch ?? '') ?? undefined;
     }

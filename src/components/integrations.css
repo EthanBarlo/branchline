@@ -89,6 +89,29 @@
 .jira-description table { border-collapse: collapse; max-width: 100%; }
 .jira-description td, .jira-description th { padding: 7px 11px; border: 1px solid #414141; text-align: left; }
 .jira-description .integration-link { color: #dfdfdf; text-decoration: underline; }
+.modal-backdrop.jira-browser-backdrop { padding: 24px; animation: none; }
+.modal.jira-browser-modal { display: flex; flex-direction: column; width: min(1600px, 100%); height: calc(100dvh - 48px); max-height: none; overflow: hidden; border-radius: 7px; }
+.modal.jira-browser-picker { width: 520px; height: auto; max-height: calc(100dvh - 48px); overflow: visible; border-radius: 11px; }
+.jira-browser-picker .jira-browser-surface { display: none; }
+.jira-browser-picker .modal-footer { border-radius: 0 0 11px 11px; }
+.jira-browser-picker .modal-header h2 { font-size: 24px; }
+.jira-picker-body .modal-introduction { margin-bottom: 20px; }
+.jira-picker-status { display: flex; align-items: center; gap: 7px; color: #aaa; font-size: 11px; margin: 10px 0 0; }
+.jira-browser-retry { display: flex; align-items: center; gap: 15px; }
+.jira-browser-modal:focus { outline: none; }
+.jira-browser-surface { position: relative; flex: 1; min-height: 0; margin: 1px; background: #202020; }
+.jira-browser-placeholder { display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; gap: 13px; padding: 24px; color: #bdbdbd; font-size: 12px; line-height: 1.7; text-align: center; }
+.jira-browser-placeholder > span { max-width: 560px; overflow-wrap: anywhere; }
+.jira-browser-placeholder[role='alert'] > svg { color: #d0af92; }
+.jira-browser-footer { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 9px 16px; min-height: 43px; padding: 7px 12px; border-top: 1px solid #414141; }
+.jira-browser-footer .button { min-height: 27px; padding: 0 10px; font-size: 10px; }
+.jira-browser-footer .jira-picker-status { margin: 0; }
+.jira-browser-ticket-form { display: flex; flex-direction: column; align-items: stretch; gap: 8px; font-size: 11px; }
+.jira-browser-ticket-form label { color: #bdbdbd; }
+.jira-browser-ticket-form .text-input { height: 38px; padding: 0 12px; font-size: 12px; }
+.jira-browser-details { margin-left: auto; font-size: 10px; min-height: 27px; }
+.jira-browser-error { display: flex; align-items: flex-start; gap: 7px; flex-basis: 100%; color: #d0af92; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.jira-browser-error > svg { flex-shrink: 0; margin-top: 2px; }
 .remote-review-controls { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .remote-review-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .remote-review-actions > .button, .remote-review-controls > .button { min-height: 27px; height: 27px; font-size: 10px; padding: 0 9px; gap: 6px; }
@@ -209,3 +232,26 @@
 @media (prefers-reduced-motion: reduce) {
   .remote-load-row .spin { animation: none; }
 }
+
+/* Keep suggestions in layout so Electron's Jira view cannot cover the list. */
+.jira-ticket-select { position: relative; width: 100%; min-width: 0; }
+.jira-ticket-select-input { position: relative; }
+.jira-browser-ticket-form .jira-ticket-select-input .text-input { width: 100%; padding-right: 36px; }
+.jira-ticket-select-toggle { position: absolute; right: 3px; top: 3px; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 4px; color: #aaa; background: transparent; cursor: pointer; }
+.jira-ticket-select-toggle:hover { color: #eee; background: #ffffff08; }
+.jira-ticket-select-toggle:disabled { opacity: .4; cursor: default; }
+.jira-ticket-popup { position: absolute; z-index: 2; top: calc(100% + 7px); left: 0; right: 0; display: flex; flex-direction: column; border: 1px solid #515151; border-radius: 7px; background: #292929; overflow: hidden; box-shadow: 0 8px 25px #0007; }
+.jira-ticket-popup[data-above='true'] { top: auto; bottom: calc(100% + 7px); }
+.jira-ticket-popup > :not(.jira-ticket-options) { flex-shrink: 0; }
+.jira-ticket-search-heading { display: flex; align-items: center; gap: 7px; padding: 9px 10px; color: #dedede; font-size: 10px; font-weight: 500; border-bottom: 1px solid #3b3b3b; }
+.jira-ticket-options { min-height: 0; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.jira-ticket-group-label { padding: 7px 10px 4px; font-size: 9px; color: #959595; }
+.jira-ticket-option { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: baseline; gap: 7px; padding: 9px 10px; cursor: pointer; color: #c6c6c6; font-size: 11px; line-height: 1.5; }
+.jira-ticket-option.active { background: #41413e; color: #fff; }
+.jira-ticket-option strong { font: 10px var(--code-font); overflow-wrap: anywhere; }
+.jira-ticket-option span { overflow-wrap: anywhere; }
+.jira-ticket-search-status { display: flex; gap: 7px; align-items: flex-start; padding: 12px 10px; font-size: 10px; color: #aaa; line-height: 1.5; overflow-wrap: anywhere; }
+.jira-ticket-search-status svg { flex-shrink: 0; margin-top: 1px; }
+.jira-ticket-search-status small { display: block; margin-top: 6px; font-size: 10px; color: #aaa; }
+.jira-ticket-search-error { color: #d0af92; }
+.jira-ticket-search-hint { border-top: 1px solid #3b3b3b; margin: 0; padding: 8px 10px; color: #959595; font-size: 9px; line-height: 1.5; }

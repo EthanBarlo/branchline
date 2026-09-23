@@ -1,11 +1,12 @@
 import { createPortal } from 'react-dom';
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, Circle, CirclePause, ExternalLink, FolderGit2, Ticket, GitMerge, GitPullRequest, LoaderCircle, Plus, RefreshCw, Send, Settings2, SkipForward, Trash2, TriangleAlert, X } from 'lucide-react';
-import type { Project, Review, ReviewComment } from '../../shared/types';
+import type { AppSettings, Project, Review, ReviewComment } from '../../shared/types';
 import type { BranchReviewRepository, CommentPublication, FeedbackPreview, IntegrationState, JiraIssue, MergeOperation, MergePreview, ProjectIntegration, PullRequest, PullRequestFilter, RemoteRepositoryLoad, RemoteReviewState } from '../../shared/integrations';
 import { isMergeComplete, pullRequestKey } from '../../shared/integrations';
 import { flushPendingComments } from './commentAutosave';
 import { repositoryMergeProgress } from './mergeProgress';
+import { JiraBrowserDialog } from './JiraBrowserDialog';
 import './integrations.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : String(error);
@@ -183,8 +184,8 @@ export function JiraDescription({ value }: { value: unknown }) {
   return <div className="jira-description">{typeof value === 'string' ? <p>{value}</p> : value ? render(value) : <p className="integration-note">No description provided.</p>}</div>;
 }
 
-export function JiraIssuePanel({ review, ticket, refreshKey = '', onTicketChanged }: { review: Review; ticket: string | null; refreshKey?: string; onTicketChanged?: () => void }) {
-  const [open, setOpen] = useState(false);
+export function JiraIssuePanel({ review, ticket, ticketView = 'website', refreshKey = '', onTicketChanged }: { review: Review; ticket: string | null; ticketView?: AppSettings['jiraTicketView']; refreshKey?: string; onTicketChanged?: () => void }) {
+  const [view, setView] = useState<'summary' | 'website' | null>(null);
   const [issue, setIssue] = useState<JiraIssue | null>(null);
   const [key, setKey] = useState(ticket || '');
   const [loading, setLoading] = useState(false);
@@ -197,24 +198,32 @@ export function JiraIssuePanel({ review, ticket, refreshKey = '', onTicketChange
     catch (reason) { if (generation === request.current) { setIssue(null); setError(message(reason)); } }
     finally { if (generation === request.current) setLoading(false); }
   }, [review.id]);
-  useEffect(() => { setIssue(null); setKey(ticket || ''); void load(); return () => { request.current++; }; }, [load, ticket, refreshKey]);
+  useEffect(() => { setIssue(null); setKey(ticket || ''); setError(''); }, [ticket, refreshKey]);
+  useEffect(() => {
+    if (view === 'summary' && ticket) void load();
+    else setLoading(false);
+    return () => { request.current++; };
+  }, [load, ticket, refreshKey, view]);
   async function changeTicket(event: React.FormEvent) {
     event.preventDefault(); setLoading(true); setError('');
     try { await window.reviewAPI.setReviewTicket(review.id, key.trim()); onTicketChanged?.(); await load(); }
     catch (reason) { setError(message(reason)); setLoading(false); }
   }
+  const linkedTicket = issue?.key || ticket;
   return <>
-    <button className="button button-secondary integration-context-button jira-ticket-button" type="button" aria-label={`View Jira ticket${issue?.key || ticket ? ` ${issue?.key || ticket}` : ''}`} aria-haspopup="dialog" title={error ? `Jira ticket: ${error}` : issue?.title || 'View Jira ticket'} onClick={() => setOpen(true)}>
+    <button className="button button-secondary integration-context-button jira-ticket-button" type="button" aria-label={`View Jira ticket${linkedTicket ? ` ${linkedTicket}` : ''}`} aria-haspopup="dialog" title={error ? `Jira ticket: ${error}` : issue?.title || 'View Jira ticket'} onClick={() => setView(ticketView === 'website' ? 'website' : 'summary')}>
       {loading ? <LoaderCircle size={12} className="spin" aria-hidden="true" /> : <Ticket size={13} aria-hidden="true" />}<span>{issue?.key || ticket || 'Jira ticket'}</span>{error && <TriangleAlert size={12} className="integration-context-warning" aria-label="Ticket unavailable" />}
     </button>
-    {open && <IntegrationDialog title="Jira ticket" onClose={() => setOpen(false)}>
+    {view === 'website' && <JiraBrowserDialog reviewId={review.id} ticket={linkedTicket} onClose={() => setView(null)} onDetails={() => setView('summary')} onTicketChanged={() => { setIssue(null); onTicketChanged?.(); }} />}
+    {view === 'summary' && <IntegrationDialog title="Jira ticket" onClose={() => setView(null)}>
       <div className="integration-body jira-ticket-body">
         <form className="jira-ticket-form" onSubmit={event => void changeTicket(event)}><label htmlFor={`review-ticket-key-${review.id}`}>Ticket</label><input id={`review-ticket-key-${review.id}`} aria-label="Review ticket key" className="text-input" placeholder="APP-123" value={key} onChange={event => setKey(event.target.value)} disabled={loading} /><button type="submit" className="button button-secondary" disabled={loading}>Use ticket</button><button className="icon-button" type="button" aria-label="Refresh Jira ticket" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? 'spin' : ''} size={13} /></button></form>
         {loading && <p className="integration-loading" role="status"><LoaderCircle size={14} className="spin" />Loading ticket…</p>}
         {error && <Problem>{error}</Problem>}
         {issue && <><div className="jira-ticket-heading"><span className="jira-issue-key">{issue.key}</span><h3>{issue.title}</h3></div><JiraDescription value={issue.description} /></>}
+        <p className="integration-note">{linkedTicket ? 'Open the full Jira page to edit this ticket and add comments. Sign in separately the first time.' : 'Enter a ticket key to link Jira to this review.'}</p>
       </div>
-      <div className="modal-footer">{issue && <IntegrationLink url={issue.url} className="button button-secondary"><ExternalLink size={12} />Open in Jira<span className="sr-only">: {issue.key}</span></IntegrationLink>}<button className="button button-primary" type="button" onClick={() => setOpen(false)}>Done</button></div>
+      <div className="modal-footer">{issue && <IntegrationLink url={issue.url} className="button button-secondary"><ExternalLink size={12} />Open in Jira<span className="sr-only">: {issue.key}</span></IntegrationLink>}{linkedTicket && <button className="button button-primary" type="button" disabled={loading} onClick={() => setView('website')}>Open in Branchline</button>}<button className="button button-secondary" type="button" onClick={() => setView(null)}>Done</button></div>
     </IntegrationDialog>}
   </>;
 }

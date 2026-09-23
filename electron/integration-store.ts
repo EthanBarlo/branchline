@@ -4,7 +4,7 @@ import type { ProjectIntegration, RemoteReviewChanged, RemoteReviewState } from 
 import { branchReviewKey, pullRequestKey } from '../shared/integrations';
 import { validRelativePath, validateRepositoryMappings } from './repository-mapping';
 
-interface StoredIntegrations { version: 1; projects: Record<string, ProjectIntegration>; reviews: Record<string, RemoteReviewState>; tickets: Record<string, string>; }
+interface StoredIntegrations { version: 1; projects: Record<string, ProjectIntegration>; reviews: Record<string, RemoteReviewState>; tickets: Record<string, string | null>; }
 const record = (x: unknown): x is Record<string, any> => !!x && typeof x === 'object' && !Array.isArray(x);
 const identifier = (id: string) => { if (typeof id !== 'string' || !id || ['__proto__', 'prototype', 'constructor'].includes(id)) throw new Error('Invalid integration identifier.'); };
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -114,7 +114,7 @@ function validateState(value: unknown): asserts value is StoredIntegrations {
       }
     }
   }
-  require(Object.values(data.tickets).every(ticket));
+  require(Object.values(data.tickets).every(value => value === null || ticket(value)));
 }
 
 /** Credentials live in a separate encrypted store. Writes become visible only after rename. */
@@ -160,7 +160,7 @@ export class IntegrationStore {
   projects(): Record<string, ProjectIntegration> { return structuredClone(this.state.projects); }
   project(id: string): ProjectIntegration { identifier(id); return structuredClone(this.state.projects[id] ?? { repositories: [], updateSubmodulePointers: false }); }
   review(id: string): RemoteReviewState | null { identifier(id); return structuredClone(this.state.reviews[id] ?? null); }
-  ticket(id: string): string | undefined { identifier(id); return this.state.tickets[id]; }
+  ticket(id: string): string | null | undefined { identifier(id); return this.state.tickets[id]; }
   onReviewChanged(callback: (event: RemoteReviewChanged) => void): () => void {
     this.reviewListeners.add(callback);
     return () => { this.reviewListeners.delete(callback); };
@@ -192,7 +192,7 @@ export class IntegrationStore {
   updateReview(id: string, fn: (value: RemoteReviewState) => void): Promise<RemoteReviewState> {
     identifier(id); return this.write(next => { const review = next.reviews[id]; if (!review) throw new Error('This remote review is unavailable.'); fn(review); return review; }, id);
   }
-  setTicket(id: string, key: string): Promise<void> { identifier(id); return this.write(next => { if (key) next.tickets[id] = key; else delete next.tickets[id]; }); }
+  setTicket(id: string, key: string | null): Promise<void> { identifier(id); return this.write(next => { if (key === '') delete next.tickets[id]; else next.tickets[id] = key; }); }
   removeReview(id: string): Promise<void> { identifier(id); return this.write(next => { delete next.reviews[id]; delete next.tickets[id]; }); }
   async removeOrphanedReviews(reviewIds: string[]): Promise<void> {
     const active = new Set(reviewIds);

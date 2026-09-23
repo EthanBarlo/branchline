@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <title>Jira · Branchline</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #e7e5e0; background: #222222; }
+    body { margin: 0; overflow: hidden; }
+    header { border-bottom: 1px solid #41413e; }
+    .top { height: 47px; padding: 0 12px; display: flex; gap: 6px; align-items: center; }
+    .ticket-badge { display: flex; align-items: center; gap: 3px; min-width: 0; height: 30px; padding: 0 3px 0 9px; margin: 0 4px; border: 1px solid #484844; border-radius: 5px; background: #2b2b29; }
+    h1 { font-size: 13px; font-weight: 600; margin: 0; white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+    button { cursor: pointer; background: transparent; border: 1px solid transparent; border-radius: 5px; color: inherit; font: inherit; font-size: 12px; height: 30px; padding: 0 9px; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; }
+    button:hover { background: #353532; border-color: #484844; }
+    button:focus-visible { outline: 2px solid #c8c3a7; outline-offset: 2px; }
+    button:disabled { opacity: .4; cursor: default; }
+    button:disabled:hover { background: transparent; border-color: transparent; }
+    button.icon { padding: 0; width: 30px; }
+    .ticket-badge button.icon { width: 24px; height: 24px; color: #aaa9a3; }
+    .ticket-badge button.icon:hover { color: #e7e5e0; }
+    button svg { height: 15px; width: 15px; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .external { background: #2b2b29; border-color: #484844; }
+    #origin { flex: 1; min-width: 140px; margin-right: 8px; color: #aaa9a3; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status-row { padding: 8px 14px; border-top: 1px solid #383835; max-height: 112px; overflow-y: auto; }
+    #status { margin: 0; font-size: 12px; line-height: 17px; color: #bab8b0; overflow-wrap: anywhere; }
+    #status[data-error="true"] { color: #efbe91; }
+    #loading { width: 10px; height: 10px; flex-shrink: 0; border: 1.5px solid #62625d; border-top-color: #ddd7be; border-radius: 50%; animation: spin 1s linear infinite; }
+    [hidden] { display: none !important; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { #loading { animation: none; } }
+  </style>
+</head>
+<body>
+  <header aria-label="Jira browser controls">
+    <div class="top">
+      <button data-action="back" class="icon" disabled aria-label="Go back" title="Go back"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m9 4-6 6 6 6M3 10h14"/></svg></button>
+      <button data-action="reload" class="icon" aria-label="Reload" title="Reload"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M16 8a6.5 6.5 0 1 0 .1 4M16 3v5h-5"/></svg></button>
+      <div class="ticket-badge"><h1 id="ticket">Jira</h1><button data-action="clear-ticket" class="icon" aria-label="Clear ticket" title="Clear ticket"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8"/></svg></button></div>
+      <span id="loading" role="status" aria-label="Loading Jira" hidden></span>
+      <span id="origin">Opening Jira…</span>
+      <button data-action="external" class="external">Open in browser <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M11 3h6v6m0-6-9 9M7 4H3v13h13v-4"/></svg></button>
+      <button data-action="menu" class="icon" aria-label="Jira browser options" title="Jira browser options" aria-haspopup="menu"><svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="4" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="16" cy="10" r=".8"/></svg></button>
+      <button data-action="close" class="icon" aria-label="Close Jira" title="Close Jira"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+    </div>
+    <span id="connection" hidden></span>
+    <div class="status-row" aria-live="polite" hidden><p id="status"></p></div>
+  </header>
+</body>
+</html>

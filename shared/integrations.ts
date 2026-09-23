@@ -33,6 +33,9 @@ export interface BranchReviewRepository {
 }
 export const branchReviewKey = (repositoryPath: string): string => `${repositoryPath}#branch`;
 export type PullRequestFilter = 'all' | 'reviewer' | 'author';
+export interface JiraBrowserBounds { x: number; y: number; width: number; height: number; }
+export interface JiraTicketOption { key: string; title: string; }
+export interface JiraTicketSuggestions { recent: JiraTicketOption[]; matches: JiraTicketOption[]; }
 export interface JiraIssue { key: string; title: string; description: unknown; url: string; }
 export interface RemoteAnchor { prKey: string; sourceHash: string; targetHash: string; path: string; side: DiffSide; lineStart: number; lineEnd: number; fingerprint: string; }
 export interface PublishedValue { body: string; resolved: boolean; deleted: boolean; }
@@ -113,8 +116,15 @@ export interface IntegrationAPI {
   onRemoteReviewChanged(callback: (event: RemoteReviewChanged) => void): () => void;
   onRemoteReviewLoadProgress(callback: (event: RemoteReviewLoadProgress) => void): () => void;
   getJiraIssue(reviewId: string, key?: string): Promise<JiraIssue>;
+  getJiraTicketSuggestions(reviewId: string, query: string): Promise<JiraTicketSuggestions>;
   getJiraTicketLink(reviewId: string): Promise<{ key: string; url: string } | null>;
-  setReviewTicket(reviewId: string, key: string): Promise<void>;
+  openJiraBrowser(reviewId: string, bounds: JiraBrowserBounds): Promise<string>;
+  resizeJiraBrowser(id: string, bounds: JiraBrowserBounds): Promise<void>;
+  focusJiraBrowser(id: string): Promise<void>;
+  closeJiraBrowser(id: string): Promise<boolean>;
+  onJiraBrowserClosed(callback: (id: string) => void): () => void;
+  onJiraBrowserClearTicket(callback: (id: string) => void): () => void;
+  setReviewTicket(reviewId: string, key: string | null): Promise<void>;
   previewFeedback(reviewId: string): Promise<FeedbackPreview>;
   publishFeedback(reviewId: string): Promise<RemoteReviewState>;
   reanchorComment(reviewId: string, commentId: string, input: ReanchorInput): Promise<Review>;

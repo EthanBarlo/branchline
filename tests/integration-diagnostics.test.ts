@@ -18,6 +18,7 @@ test('provider endpoint templates redact accounts, repository names, branches, f
   assert.equal(safeProviderEndpoint(bitbucket, `/2.0/repositories/${secret}/${secret}/src/${secret}/private/file.ts`), `${base}/src/:revision/:path`);
   assert.equal(safeProviderEndpoint(bitbucket, `/2.0/repositories/${secret}/${secret}/pullrequests/17/merge/task-status/${secret}`), `${base}/pullrequests/17/merge/task-status/:task`);
   assert.equal(safeProviderEndpoint('https://api.atlassian.com', `/ex/jira/${secret}/rest/api/3/issue/SECRET-123?fields=${secret}`), '/ex/jira/:site/rest/api/3/issue/:issue');
+  assert.equal(safeProviderEndpoint('https://api.atlassian.com', `/ex/jira/${secret}/rest/api/3/issue/picker?query=${secret}`), '/ex/jira/:site/rest/api/3/issue/picker');
   assert.equal(safeProviderEndpoint(`https://${secret}.atlassian.net`, '/_edge/tenant_info'), '/_edge/tenant_info');
   assert.equal(safeProviderEndpoint(bitbucket, `/private/${secret}`), '/:unknown');
 });

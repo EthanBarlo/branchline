@@ -325,14 +325,14 @@ export default function App() {
   const featureBranch = isCurrent && metadata?.inspection ? metadata.inspection.currentBranch || '' : review?.featureBranch || '';
   const jiraTicket = extractJiraTicketKey(featureBranch);
   useEffect(() => {
-    if (!review?.remote || !window.reviewAPI.getJiraTicketLink) return;
+    if (!review || (!review.remote && !projectIntegration?.jiraConnectionId) || !window.reviewAPI.getJiraTicketLink) return;
     let live = true;
     const id = review.id;
     void window.reviewAPI.getJiraTicketLink(id).then(link => {
       if (live && !deletedReviewIds.current.has(id)) setJiraLinks(previous => ({ ...previous, [id]: link }));
     }).catch(() => { if (live && !deletedReviewIds.current.has(id)) setJiraLinks(previous => ({ ...previous, [id]: null })); });
     return () => { live = false; };
-  }, [review?.id, review?.remote, review?.featureBranch, integrationRevision, jiraLinkRevision, settings.jiraBaseUrl]);
+  }, [review?.id, review?.remote, featureBranch, projectIntegration?.jiraConnectionId, integrationRevision, jiraLinkRevision, settings.jiraBaseUrl]);
   const currentDetached = Boolean(isCurrent && metadata?.inspection && !metadata.inspection.currentBranch);
   const currentNeedsTarget = Boolean(isCurrent && (metadata?.requiresTarget || !review.baseBranch));
   const snapshot = review ? snapshots[viewKey] : undefined;
@@ -796,7 +796,7 @@ export default function App() {
             <span className="working-tree-label" title={review.includeWorkingTree ? 'Includes eligible uncommitted changes and new files' : 'Reviewing committed changes only'}>{review.includeWorkingTree ? 'Local edits' : 'Commits only'}</span>
             <div className="toolbar-actions">
               {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} loadingRepositories={remoteLoading ? loadingRepositories : undefined} reviewLoading={remoteLoading} onRemote={state => { if (!deletedReviewIds.current.has(review.id)) setRemoteStates(previous => ({ ...previous, [review.id]: state })); }} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
-              {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraTicket} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
+              {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraLinks[review.id] === undefined ? jiraTicket : jiraLinks[review.id]?.key || null} ticketView={settings.jiraTicketView} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
               <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : review.remote ? 'Refresh the cached PR diff. Also refreshes when reopened or preparing feedback for publication.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
               <button className={`button button-feedback ${showFeedback ? 'active' : ''}`} aria-label={`Feedback${unresolvedComments.length ? ` (${unresolvedComments.length})` : ''}`} aria-pressed={showFeedback} onClick={() => setShowFeedback(!showFeedback)} title="Show review feedback"><MessageSquare size={15} />{unresolvedComments.length > 0 && <span className="soft-count">{unresolvedComments.length}</span>}</button>
               {!review.remote && copyButton}

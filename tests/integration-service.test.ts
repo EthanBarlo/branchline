@@ -309,6 +309,52 @@ test('Current Jira inference reinspects the branch while saved and explicitly li
   await assert.rejects(() => f.service.getJiraIssue(currentReviewId(f.project.id)), /ticket key/);
 });
 
+test('clearing a branch-derived Jira ticket persists and suppresses inference until explicitly reset', async t => {
+  const f = await fixture(t);
+  const id = currentReviewId(f.project.id);
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-999');
+  await f.service.setReviewTicket(id, null);
+  assert.equal(f.state.ticket(id), null);
+  assert.equal(JSON.parse(await readFile(f.statePath, 'utf8')).tickets[id], null);
+  const persisted = new IntegrationStore(f.statePath);
+  await persisted.load();
+  assert.equal(persisted.ticket(id), null);
+  await f.state.load();
+  f.currentBranch('APP-888-new');
+  const inspections = f.calls.localInspections;
+  assert.equal(await f.service.getJiraTicketLink(id), null);
+  await assert.rejects(() => f.service.getJiraIssue(id), /ticket key/);
+  await assert.rejects(() => f.service.getJiraBrowserTarget(id), /ticket key/);
+  assert.equal(f.calls.localInspections, inspections, 'An explicitly cleared link does not inspect the branch.');
+  assert.deepEqual(f.calls.jira, [], 'An explicitly cleared link does not fetch the branch-derived ticket.');
+  await f.service.setReviewTicket(id, '');
+  assert.equal(f.state.ticket(id), undefined);
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-888');
+  assert.equal((await f.service.getJiraIssue(id)).key, 'APP-888');
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(f.statePath, 'utf8')).tickets, id), false);
+});
+
+test('cleared manual Jira links do not revert to the saved review branch and can be selected again', async t => {
+  const f = await fixture(t); const review = await f.open();
+  await f.service.setReviewTicket(review.id, 'OPS-456');
+  assert.equal((await f.service.getJiraTicketLink(review.id))?.key, 'OPS-456');
+  await f.service.setReviewTicket(review.id, null);
+  await f.state.load();
+  assert.equal(await f.service.getJiraTicketLink(review.id), null);
+  await assert.rejects(() => f.service.getJiraIssue(review.id), /ticket key/);
+  await assert.rejects(() => f.service.getJiraBrowserTarget(review.id), /ticket key/);
+  assert.equal((await f.service.getJiraIssue(review.id, 'APP-789')).key, 'APP-789');
+  assert.equal(f.state.ticket(review.id), null, 'A one-off details lookup does not relink the review.');
+  await f.service.setReviewTicket(review.id, 'ops-987');
+  assert.equal((await f.service.getJiraTicketLink(review.id))?.key, 'OPS-987');
+  assert.equal((await f.service.getJiraIssue(review.id)).key, 'OPS-987');
+  assert.equal((await f.service.getJiraBrowserTarget(review.id)).key, 'OPS-987');
+  await f.state.load();
+  assert.equal(f.state.ticket(review.id), 'OPS-987');
+  await f.service.setReviewTicket(review.id, '');
+  assert.equal((await f.service.getJiraTicketLink(review.id))?.key, 'APP-123');
+});
+
 test('Jira browser links use the selected account and explicit ticket without requiring a usable API token', async t => {
   const f = await fixture(t); const review = await f.open();
   await f.reviews.updateSettings({ jiraBaseUrl: 'https://unrelated.atlassian.net' });
@@ -332,6 +378,33 @@ test('Jira browser links preserve legacy site paths and follow Current or an exp
   await f.service.setReviewTicket(id, 'APP-321');
   assert.deepEqual(await f.service.getJiraTicketLink(id), { key: 'APP-321', url: 'http://jira.internal/jira/browse/APP-321' });
   assert.equal(f.calls.localInspections, 2);
+});
+
+test('embedded Jira derives its session and ticket from the selected saved account without reading a token', async t => {
+  const f = await fixture(t); const review = await f.open();
+  await f.reviews.updateSettings({ jiraBaseUrl: 'https://unrelated.atlassian.net' });
+  await f.service.setReviewTicket(review.id, 'ops-789');
+  await f.service.disconnectConnection('jira');
+  const credentialReads = f.calls.credentialReads;
+  assert.deepEqual(await f.service.getJiraBrowserTarget(review.id), {
+    connectionId: 'jira', siteUrl: 'https://separate.atlassian.net/',
+    url: 'https://separate.atlassian.net/browse/OPS-789', key: 'OPS-789',
+    accountLabel: 'Jira User (jira@other.example)',
+  });
+  assert.equal(f.calls.credentialReads, credentialReads);
+  assert.deepEqual(f.calls.jira, []);
+  assert.equal(f.calls.localInspections, 0);
+  await assert.rejects(() => f.service.getJiraBrowserTarget('missing-review'), /review/i);
+  await f.service.configureProjectIntegration(f.project.id, { ...f.settings, jiraConnectionId: undefined });
+  await assert.rejects(() => f.service.getJiraBrowserTarget(review.id), /Choose a Jira connection/);
+});
+
+test('embedded Jira requires a detected or explicitly selected ticket', async t => {
+  const f = await fixture(t); f.currentBranch(null);
+  const id = currentReviewId(f.project.id);
+  await assert.rejects(() => f.service.getJiraBrowserTarget(id), /ticket key/);
+  await f.service.setReviewTicket(id, 'APP-321');
+  assert.equal((await f.service.getJiraBrowserTarget(id)).key, 'APP-321');
 });
 
 test('inline wrappers preserve edited bodies, anchors, resolution and deletion through publication', async t => {

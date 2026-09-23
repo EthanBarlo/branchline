@@ -195,6 +195,10 @@ try {
   assert.equal((await state(page)).reviews.find(review => review.id === currentId).featureBranch, firstBranch);
   await page.evaluate(id => window.reviewAPI.openJiraTicket(id), currentId);
   await waitForURLs([`${baseURL}/browse/OPS-456`]);
+  await page.evaluate(id => window.reviewAPI.setReviewTicket(id, null), currentId);
+  await assert.rejects(page.evaluate(id => window.reviewAPI.openJiraTicket(id), currentId), /Choose a Jira ticket/);
+  assert.deepEqual(await openedURLs(), [`${baseURL}/browse/OPS-456`], 'A cleared selection cannot reopen its detected branch ticket through the legacy browser action.');
+  await page.evaluate(id => window.reviewAPI.setReviewTicket(id, ''), currentId);
   await page.evaluate(() => { delete document.hidden; });
   await page.getByRole('button', { name: 'Refresh review', exact: true }).click();
   await ticket(page, 'OPS-456').waitFor();
@@ -214,7 +218,7 @@ try {
   await choose(page, 'Select review', 'Current');
   await page.locator('.feature-branch').filter({ hasText: noTicketBranch }).waitFor();
   assert.equal(await page.getByRole('button', { name: /^Open .+ in Jira$/ }).count(), 0, 'Branches without a key must not show a Jira action.');
-  await assert.rejects(page.evaluate(id => window.reviewAPI.openJiraTicket(id), currentId), /does not contain a Jira ticket key/);
+  await assert.rejects(page.evaluate(id => window.reviewAPI.openJiraTicket(id), currentId), /Choose a Jira ticket/);
   assert.deepEqual(await openedURLs(), [`${baseURL}/browse/OPS-456`, `${baseURL}/browse/APP-123`]);
 
   dialog = await settings(page);

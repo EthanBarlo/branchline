@@ -49,6 +49,7 @@ export function safeProviderEndpoint(origin: string, path: string): string {
   if (diagnosticProvider(origin) === 'jira') {
     if (pathname === '/_edge/tenant_info') return '/_edge/tenant_info';
     if (/^\/ex\/jira\/[^/]+\/rest\/api\/3\/myself\/?$/.test(pathname)) return '/ex/jira/:site/rest/api/3/myself';
+    if (/^\/ex\/jira\/[^/]+\/rest\/api\/3\/issue\/picker\/?$/.test(pathname)) return '/ex/jira/:site/rest/api/3/issue/picker';
     if (/^\/ex\/jira\/[^/]+\/rest\/api\/3\/issue\/[^/]+\/?$/.test(pathname)) return '/ex/jira/:site/rest/api/3/issue/:issue';
     return '/:unknown';
   }

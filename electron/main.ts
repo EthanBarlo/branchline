@@ -9,17 +9,17 @@ import { ConnectionManager } from './connection-manager';
 import { configureIntegrationDiagnostics, flushIntegrationDiagnostics, getIntegrationDiagnosticsPath } from './integration-diagnostics';
 import { PointerService } from './pointer-service';
 import { connectionScopes } from '../shared/connection-scopes';
-import type { ConnectionInput, ProjectIntegration, PullRequestFilter, PullRequestRef, ReanchorInput } from '../shared/integrations';
+import type { JiraBrowserBounds, ConnectionInput, ProjectIntegration, PullRequestFilter, PullRequestRef, ReanchorInput } from '../shared/integrations';
 import { ReviewStore } from './store';
 import { ProjectService } from './project-service';
 import { ReviewService } from './review-service';
-import { JiraService } from './jira-service';
+import { JiraBrowser } from './jira-browser';
 import { InstallGate } from './install-gate';
 import { createUpdateService } from './update-runtime';
 import { isTrustedReviewSender } from './ipc-trust';
 import type { UpdateService } from './update-service';
 import { updatesBusy } from '../shared/updates';
-import type { FileApproval, NewComment, NewProject, NewReview } from '../shared/types';
+import type { AppSettings, FileApproval, NewComment, NewProject, NewReview } from '../shared/types';
 
 // A separate location is used by the automated desktop smoke test.
 if (process.env.BRANCHLINE_DATA_DIR) app.setPath('userData', process.env.BRANCHLINE_DATA_DIR);
@@ -27,7 +27,13 @@ app.setName('Branchline');
 let store: ReviewStore;
 let projects: ProjectService;
 let reviews: ReviewService;
-let jira: JiraService;
+let jiraBrowser: JiraBrowser;
+let jiraBrowserChanges: Promise<unknown> = Promise.resolve();
+function changeJiraBrowser<T>(action: () => Promise<T>): Promise<T> {
+  const result = jiraBrowserChanges.then(action);
+  jiraBrowserChanges = result.catch(() => {});
+  return result;
+}
 let integrations: IntegrationService;
 let updates: UpdateService;
 const installGate = new InstallGate();
@@ -88,13 +94,14 @@ function installHandlers() {
   handle('update-download', () => updates.download());
   handle('update-install', () => {
     if (closeRequested) throw new Error('The window is preparing to close. Finish saving before installing an update.');
+    if (jiraBrowser.hasOpenWindows()) throw new Error('Close the Jira ticket before installing an update so any Jira edits can finish saving.');
     return updates.install();
   });
-  handle('settings-update', (changes: { jiraBaseUrl: string }) => store.updateSettings(changes));
+  handle('settings-update', (changes: Partial<AppSettings>) => store.updateSettings(changes));
   handle('jira-open', async (id: string) => {
     const link = await integrations.getJiraTicketLink(id);
-    if (link) return shell.openExternal(link.url);
-    return jira.openJiraTicket(id);
+    if (!link) throw new Error('Choose a Jira ticket and configure its Jira connection or browser link in Settings.');
+    return shell.openExternal(link.url);
   });
   handle('integrations-state', () => integrations.getIntegrations());
   handle('integration-diagnostics', async () => {
@@ -115,17 +122,32 @@ function installHandlers() {
     if (kind !== 'jira' && kind !== 'bitbucket') throw new Error('Choose Jira or Bitbucket permissions to copy.');
     clipboard.writeText(connectionScopes[kind].map(([scope]) => scope).join('\n'));
   });
-  handle('connection-save', (input: ConnectionInput) => integrations.saveConnection(input));
+  handle('connection-save', (input: ConnectionInput) => changeJiraBrowser(async () => {
+    if (input.id && integrations.getIntegrations().connections.some(connection => connection.id === input.id && connection.kind === 'jira')) await jiraBrowser.clearConnection(input.id);
+    return integrations.saveConnection(input);
+  }));
   handle('connection-test', (id: string) => integrations.testConnection(id));
-  handle('connection-disconnect', (id: string) => integrations.disconnectConnection(id));
+  handle('connection-disconnect', (id: string) => changeJiraBrowser(async () => {
+    if (integrations.getIntegrations().connections.some(connection => connection.id === id && connection.kind === 'jira')) await jiraBrowser.clearConnection(id);
+    return integrations.disconnectConnection(id);
+  }));
+  handle('jira-browser-open', (id: string, bounds: JiraBrowserBounds) => changeJiraBrowser(async () => {
+    const target = await integrations.getJiraBrowserTarget(id);
+    if (!window || window.isDestroyed()) throw new Error('The review window has closed.');
+    return jiraBrowser.open(target, window, bounds);
+  }));
+  handle('jira-browser-resize', (id: string, bounds: JiraBrowserBounds) => jiraBrowser.resizeEmbedded(id, bounds));
+  handle('jira-browser-focus', (id: string) => jiraBrowser.focusEmbedded(id));
+  handle('jira-browser-close', (id: string) => changeJiraBrowser(() => jiraBrowser.closeEmbedded(id)));
   handle('integrations-project', (id: string, input: ProjectIntegration) => integrations.configureProjectIntegration(id, input));
   handle('integrations-discover', (id: string) => integrations.discoverRepositories(id));
   handle('pullrequests-list', (id: string, filter: PullRequestFilter) => integrations.listPullRequests(id, filter));
   handle('pullrequests-open', (id: string, refs: PullRequestRef[]) => integrations.openPullRequestReview(id, refs));
   handle('pullrequests-state', (id: string) => integrations.getRemoteReview(id));
   handle('jira-issue', (id: string, key?: string) => integrations.getJiraIssue(id, key));
+  handle('jira-ticket-suggestions', (id: string, query: string) => integrations.getJiraTicketSuggestions(id, query));
   handle('jira-ticket-link', (id: string) => integrations.getJiraTicketLink(id));
-  handle('jira-ticket', (id: string, key: string) => integrations.setReviewTicket(id, key));
+  handle('jira-ticket', (id: string, key: string | null) => integrations.setReviewTicket(id, key));
   handle('feedback-preview', (id: string) => integrations.previewFeedback(id));
   handle('feedback-publish', (id: string) => integrations.publishFeedback(id));
   handle('feedback-reanchor', (id: string, commentId: string, input: ReanchorInput) => integrations.reanchorComment(id, commentId, input));
@@ -203,13 +225,19 @@ function createWindow() {
   });
   window.on('close', event => {
     if (!permitClose && updatesBusy(updates.getState())) { event.preventDefault(); return; }
-    if (permitClose || !closeListenerReady || window?.webContents.isDestroyed()) return;
+    if (permitClose || window?.webContents.isDestroyed()) return;
+    if (!closeListenerReady && !jiraBrowser.hasOpenWindows()) return;
     event.preventDefault();
     if (closeRequested) return;
     closeRequested = true;
     const closingWindow = window!;
-    void closeGate.prepare(() => flushWindow('close')).then(() => {
+    void closeGate.prepare(async () => {
+      await jiraBrowserChanges;
+      if (!await jiraBrowser.prepareClose()) throw new Error('Jira is still open. Save your edits before closing.');
+      if (closeListenerReady) await flushWindow('close');
+    }).then(async () => {
       if (window !== closingWindow || closingWindow.isDestroyed()) return;
+      if (!await jiraBrowser.prepareClose()) { closeGate.reset(); throw new Error('Jira is still open. Save your edits before closing.'); }
       permitClose = true;
       setImmediate(() => { if (quitting) app.quit(); else window?.close(); });
     }).catch(error => {
@@ -245,15 +273,16 @@ app.whenReady().then(async () => {
     integrations.onRemoteReviewLoadProgress(change => {
       if (window && !window.webContents.isDestroyed()) window.webContents.send('review:remote-review-load', change);
     });
-    jira = new JiraService(store, url => shell.openExternal(url));
+    jiraBrowser = new JiraBrowser();
     updates = createUpdateService(async () => {
       await installGate.prepare(() => flushWindow('install'));
+      if (jiraBrowser.hasOpenWindows()) throw new Error('Close the Jira ticket before installing an update so any Jira edits can finish saving.');
       permitClose = true;
     }, () => {
       cancelFlush(); installGate.reset(); permitClose = false; quitting = false;
       // Native relaunch can fail after it closes the review window. Restore
       // the saved workspace so authorization or installation can be retried.
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      if (!window || window.isDestroyed()) createWindow();
     });
     updates.subscribe(state => {
       if (window && !window.webContents.isDestroyed()) window.webContents.send('review:update-state-changed', state);
@@ -264,12 +293,12 @@ app.whenReady().then(async () => {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'Branchline', submenu: [{ role: 'about' }, { label: 'Check for Updates…', click: showUpdates }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
       { role: 'editMenu' },
-      { label: 'View', submenu: [{ id: 'reload', label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => { if (!updatesBusy(updates.getState()) && !closeRequested) window?.webContents.reload(); } }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
+      { label: 'View', submenu: [{ id: 'reload', label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => { if (!updatesBusy(updates.getState()) && !closeRequested && !jiraBrowser.reloadFocused()) window?.webContents.reload(); } }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
       { role: 'windowMenu' },
     ]));
     createWindow();
     updates.start();
-    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+    app.on('activate', () => { if (!window || window.isDestroyed()) createWindow(); });
   } catch (error) {
     dialog.showErrorBox('Branchline could not start', error instanceof Error ? error.message : String(error));
     app.quit();

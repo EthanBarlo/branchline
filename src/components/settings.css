@@ -34,6 +34,12 @@
 .settings-diagnostics-path > span { display: block; margin-bottom: 8px; font-size: 10px; color: #929292; }
 .settings-diagnostics-path code { font-size: 11px; line-height: 1.8; color: #c2c2c2; overflow-wrap: anywhere; user-select: text; }
 .settings-diagnostics-actions { display: flex; justify-content: flex-end; margin-top: 22px; }
+.settings-ticket-view { border-top: 1px solid #383838; margin-top: 34px; padding-top: 24px; }
+.settings-ticket-view h3 { margin: 0 0 18px; color: #dedede; font-size: 14px; font-weight: 500; }
+.settings-ticket-view label { display: block; margin-bottom: 8px; font-size: 12px; }
+.settings-ticket-view .text-input { width: 260px; max-width: 100%; height: 38px; font-size: 12px; }
+.settings-ticket-view p { margin: 10px 0 0; color: #a3a3a3; font-size: 11px; line-height: 1.8; }
+.settings-ticket-view-status { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: #b1c3ad; font-size: 11px; }
 .settings-browser-links { border-top: 1px solid #383838; margin-top: 34px; }
 .settings-browser-links > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 0; color: #bdbdbd; font-size: 12px; cursor: pointer; list-style: none; }
 .settings-browser-links > summary::-webkit-details-marker { display: none; }

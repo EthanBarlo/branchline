@@ -17,6 +17,11 @@ const savedText = (value: unknown): value is string => typeof value === 'string'
 const savedDate = (value: unknown): value is string => savedText(value) && Number.isFinite(Date.parse(value));
 const savedBranch = (value: unknown): value is string => typeof value === 'string' && value.length <= 1024 && !value.includes('\0');
 
+function jiraTicketView(value: unknown): NonNullable<AppSettings['jiraTicketView']> {
+  if (value !== 'website' && value !== 'summary') throw new Error('Choose the full Jira page or ticket summary.');
+  return value;
+}
+
 export function validateApprovalFiles(files: unknown, approved: unknown): FileApproval[] {
   if (typeof approved !== 'boolean') throw new Error('Choose whether to mark the selected files reviewed.');
   if (!Array.isArray(files) || files.length === 0) throw new Error('Select at least one file to update.');
@@ -85,14 +90,15 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
   let reviews = parsed.reviews;
   if (new Set(reviews.map(review => review.id)).size !== reviews.length) throw invalid();
   let projects: Project[];
-  let settings: AppSettings = { jiraBaseUrl: '' };
+  let settings: AppSettings = { jiraBaseUrl: '', jiraTicketView: 'website' };
   let migrated = !Object.hasOwn(parsed, 'settings');
   if (!migrated) {
     if (!record(parsed.settings) || !Object.hasOwn(parsed.settings, 'jiraBaseUrl')) throw invalid();
     try {
       const jiraBaseUrl = normalizeJiraBaseUrl(parsed.settings.jiraBaseUrl);
-      settings = { ...parsed.settings, jiraBaseUrl };
-      migrated = jiraBaseUrl !== parsed.settings.jiraBaseUrl;
+      const ticketView = Object.hasOwn(parsed.settings, 'jiraTicketView') ? jiraTicketView(parsed.settings.jiraTicketView) : 'website';
+      settings = { ...parsed.settings, jiraBaseUrl, jiraTicketView: ticketView };
+      migrated = jiraBaseUrl !== parsed.settings.jiraBaseUrl || ticketView !== parsed.settings.jiraTicketView;
     } catch { throw invalid(); }
   }
   if (Object.hasOwn(parsed, 'projects')) {
@@ -144,7 +150,7 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
 }
 
 export class ReviewStore {
-  private state: AppState = { projects: [], reviews: [], settings: { jiraBaseUrl: '' } };
+  private state: AppState = { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website' } };
   private pending: Promise<unknown> = Promise.resolve();
   private loadError: Error | null = null;
   constructor(private readonly filePath: string) {}
@@ -166,13 +172,14 @@ export class ReviewStore {
 
   getState(): AppState { return structuredClone(this.state); }
   getSettings(): AppSettings { return structuredClone(this.state.settings); }
-  updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings> {
+  updateSettings(changes: Partial<AppSettings>): Promise<AppSettings> {
     let changed = false;
     return this.mutate(() => {
-      if (!record(changes) || !Object.hasOwn(changes, 'jiraBaseUrl')) throw new Error('Provide a Jira base URL, or leave it blank to clear it.');
-      const jiraBaseUrl = normalizeJiraBaseUrl(changes.jiraBaseUrl);
-      changed = this.state.settings.jiraBaseUrl !== jiraBaseUrl;
-      if (changed) this.state.settings = { ...this.state.settings, jiraBaseUrl };
+      if (!record(changes) || !['jiraBaseUrl', 'jiraTicketView'].some(key => Object.hasOwn(changes, key))) throw new Error('Provide a Jira setting to update.');
+      const jiraBaseUrl = Object.hasOwn(changes, 'jiraBaseUrl') ? normalizeJiraBaseUrl(changes.jiraBaseUrl) : this.state.settings.jiraBaseUrl;
+      const ticketView = Object.hasOwn(changes, 'jiraTicketView') ? jiraTicketView(changes.jiraTicketView) : this.state.settings.jiraTicketView ?? 'website';
+      changed = this.state.settings.jiraBaseUrl !== jiraBaseUrl || this.state.settings.jiraTicketView !== ticketView;
+      if (changed) this.state.settings = { ...this.state.settings, jiraBaseUrl, jiraTicketView: ticketView };
       return this.state.settings;
     }, () => changed);
   }

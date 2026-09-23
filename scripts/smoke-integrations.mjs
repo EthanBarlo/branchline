@@ -35,7 +35,7 @@ function fixtureBridge() {
     ['closed-merged', 'Old merged review'], ['closed-declined', 'Old declined review'], ['closed-reopened', 'Reopened during cleanup'],
     ['closed-open', 'Still active review'], ['closed-unavailable', 'Unavailable review'], ['closed-blocked', 'Unfinished cleanup review'],
   ].map(([id, name]) => ({ ...local, id, name, kind: 'saved', remote: true, includeWorkingTree: false, comments: id === 'closed-merged' ? [comment(6, 'An unpublished local note.')] : [] }));
-  const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '' } };
+  const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '', jiraTicketView: 'summary' } };
   const integrations = { connections: [], projects: {} };
   const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
   Object.assign(calls, { cleanupChecks: [], cleanupRemovals: [], activeCleanupChecks: 0, maxCleanupChecks: 0 });

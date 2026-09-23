@@ -106,7 +106,10 @@ export interface ReviewRefresh {
   closedReview?: ClosedReviewCheck;
 }
 
-export interface AppSettings { jiraBaseUrl: string }
+export interface AppSettings {
+  jiraBaseUrl: string;
+  jiraTicketView?: 'website' | 'summary';
+}
 export interface AppState { projects: Project[]; reviews: Review[]; settings: AppSettings }
 export interface RepoInspection {
   rootPath: string;
@@ -134,7 +137,7 @@ export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
   onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
   onCloseCancelled(callback: (message: string) => void): () => void;
   getState(): Promise<AppState>;
-  updateSettings(changes: { jiraBaseUrl: string }): Promise<AppSettings>;
+  updateSettings(changes: Partial<AppSettings>): Promise<AppSettings>;
   openJiraTicket(reviewId: string): Promise<void>;
   chooseRepo(): Promise<string | null>;
   inspectRepo(path: string): Promise<RepoInspection>;

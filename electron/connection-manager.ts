@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { ConnectionInfo, ConnectionInput, JiraIssue } from '../shared/integrations';
+import type { ConnectionInfo, ConnectionInput, JiraIssue, JiraTicketOption, JiraTicketSuggestions } from '../shared/integrations';
 import { diagnosticMethod, diagnosticProvider, recordIntegrationDiagnostic, safeProviderEndpoint, type IntegrationDiagnosticEvent } from './integration-diagnostics';
 
 export interface SecureStorage {
@@ -121,6 +121,29 @@ function jiraSite(value: unknown): string {
   return url.origin;
 }
 
+function jiraSuggestions(value: unknown, includeMatches: boolean): JiraTicketSuggestions {
+  const invalid = () => new Error('Jira returned an incomplete ticket suggestion list. Refresh and try again.');
+  if (!object(value) || !Array.isArray(value.sections)) throw invalid();
+  const recent: JiraTicketOption[] = [], matches: JiraTicketOption[] = [];
+  for (const section of value.sections) {
+    if (!object(section) || typeof section.id !== 'string' || !Array.isArray(section.issues)) throw invalid();
+    const id = section.id.toLowerCase();
+    const options = id === 'hs' || id === 'historysearch' ? recent : id === 'cs' || id === 'currentsearch' ? matches : null;
+    if (!options) throw invalid();
+    for (const issue of section.issues) {
+      if (!object(issue) || typeof issue.key !== 'string' || issue.key.length > 128 || !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(issue.key)
+        || (issue.summaryText != null && typeof issue.summaryText !== 'string')) throw invalid();
+      const key = issue.key.toUpperCase();
+      // The summary and keyHtml fields contain Jira's highlighting markup.
+      const title = typeof issue.summaryText === 'string' && issue.summaryText.trim() ? issue.summaryText.slice(0, 1000) : key;
+      if (!options.some(option => option.key === key) && options.length < 40) options.push({ key, title });
+    }
+  }
+  const shownRecent = recent.slice(0, 20);
+  const recentKeys = new Set(shownRecent.map(issue => issue.key));
+  return { recent: shownRecent, matches: includeMatches ? matches.filter(issue => !recentKeys.has(issue.key)).slice(0, 20) : [] };
+}
+
 export class ConnectionManager {
   private entries = new Map<string, ConnectionEntry>();
   private clients = new Map<string, ProviderHttp>();
@@ -234,5 +257,15 @@ export class ConnectionManager {
     const issue = await this.client(id).json(`/ex/jira/${info.cloudId}/rest/api/3/issue/${encodeURIComponent(key.toUpperCase())}?fields=summary,description`);
     if (!object(issue) || typeof issue.key !== 'string' || !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/.test(issue.key) || !object(issue.fields) || typeof issue.fields.summary !== 'string') throw new Error('Jira returned an incomplete ticket.');
     return { key: issue.key, title: issue.fields.summary, description: issue.fields.description ?? null, url: `${info.siteUrl}/browse/${encodeURIComponent(issue.key)}` };
+  }
+  async getIssueSuggestions(id: string, query: string): Promise<JiraTicketSuggestions> {
+    if (typeof query !== 'string' || query.length > 200 || /[\u0000-\u001f\u007f-\u009f]/.test(query)) throw new Error('Search using up to 200 characters without control characters.');
+    const { info } = this.credentials(id);
+    if (info.kind !== 'jira') throw new Error('Choose a Jira connection.');
+    const text = query.trim();
+    const params = new URLSearchParams({ query: text, showSubTasks: 'true', showSubTaskParent: 'true' });
+    if (text) params.set('currentJQL', 'project is not EMPTY');
+    const response = await this.client(id).json(`/ex/jira/${info.cloudId}/rest/api/3/issue/picker?${params}`);
+    return jiraSuggestions(response, !!text);
   }
 }

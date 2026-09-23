@@ -41,6 +41,7 @@ jobs:
       - run: npm run test:desktop
       - run: npm run test:desktop:background-review
       - run: npm run test:desktop:jira
+      - run: npm run test:desktop:jira-browser
       - run: npm run test:desktop:updates
       - run: npm run test:desktop:integrations
       - run: npm run test:desktop:integration-backend
