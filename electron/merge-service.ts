@@ -54,6 +54,16 @@ export class MergeService {
   private async pause(id: string, reason: string) {
     return this.state.updateReview(id, r => { if (r.operation) { r.operation.state = 'paused'; r.operation.error = reason; r.operation.updatedAt = new Date().toISOString(); for (const item of r.operation.items) delete item.phase; } });
   }
+  private async checkMergeConflicts(pr: Pick<PullRequest, 'repository' | 'sourceHash' | 'targetHash'> & { id?: number }, client: BitbucketClient): Promise<void> {
+    const repository = `${pr.repository.relativePath}${pr.id ? ` #${pr.id}` : ''}`;
+    let conflicts: Awaited<ReturnType<BitbucketClient['getMergeConflicts']>>;
+    try { conflicts = await client.getMergeConflicts(pr.repository, pr.sourceHash, pr.targetHash); }
+    catch (error) { throw new Error(`${repository}: could not check merge conflicts. ${message(error)}`); }
+    if (conflicts.length) {
+      const files = [...new Set(conflicts.map(conflict => conflict.path))].join(', ');
+      throw new Error(`${repository}: merge conflicts in ${files}. Resolve conflicts in Bitbucket, then refresh and review before merging.`);
+    }
+  }
   private async confirmMerged(id: string, key: string, pr: PullRequest, client: BitbucketClient, skipped?: boolean, stop?: (reason: string) => void): Promise<void> {
     const previous = this.binding(id).operation?.items.find(item => item.prKey === key);
     // Publish the confirmed merge before checking cleanup: source branch lookup
@@ -218,6 +228,22 @@ export class MergeService {
     if (missingPrs.length && !this.branches) blockers.push('Automatic pull request creation is unavailable. Reopen this branch review before continuing.');
     for (const row of missingPrs) warnings.push(`${row.repository.relativePath}: a pull request will be created for the reviewed branch changes before ${action === 'merge' ? 'merging' : 'approval'}.`);
     if (missingPrs.length) warnings.push('You will own automatically created pull requests. Your approval does not count toward Bitbucket\'s required approval count; another reviewer may still be needed.');
+    if (action === 'merge') {
+      const missingConflictFailure = await concurrent(missingPrs, async row => {
+        try {
+          if (!row.sourceHash || !row.targetHash) throw new Error(`${row.repository.relativePath}: could not check merge conflicts because the reviewed commits are unavailable. Refresh the review.`);
+          await this.checkMergeConflicts({ repository: row.repository, sourceHash: row.sourceHash, targetHash: row.targetHash }, client);
+        } catch (error) {
+          const reason = message(error); blockers.push(reason);
+          await this.state.updateReview(id, review => {
+            const saved = review.repositories?.find(value => value.repository.relativePath === row.repository.relativePath);
+            if (saved) saved.check = { state: 'failed', error: reason };
+          });
+        }
+        return null;
+      });
+      if (missingConflictFailure) blockers.push(missingConflictFailure);
+    }
     const currentByKey = new Map<string, PullRequest>();
     await this.state.updateReview(id, review => {
       for (const row of review.repositories ?? []) {
@@ -244,6 +270,7 @@ export class MergeService {
         // A just-pushed pointer commit must be viewed before it can be approved.
         if (!sameRevision(reviewed, pr)) addBlocker(`${pr.repository.relativePath} #${pr.id} changed. Refresh and review the latest changes first.`);
         if (action === 'merge' && !pr.mergeStrategies.includes('merge_commit')) addBlocker(`${pr.repository.relativePath} does not permit standard merge commits.`);
+        if (action === 'merge' && pr.state === 'OPEN' && !pr.draft && sameRevision(reviewed, pr)) await this.checkMergeConflicts(pr, client);
         if (pr.checks?.some(check => check.state !== 'SUCCESSFUL')) warnings.push(`${pr.repository.relativePath} has pending or unsuccessful build checks. Bitbucket will enforce its configured merge rules.`);
         if (pr.taskCount) warnings.push(`${pr.repository.relativePath} has ${pr.taskCount} PR task(s). Bitbucket will enforce required task resolution.`);
       } catch (error) { addBlocker(`${reviewed.repository.relativePath}: ${message(error)}`); }
@@ -500,6 +527,7 @@ export class MergeService {
         latest = await client.getPullRequest(reviewed.repository, reviewed.id);
         if (!sameRevision(reviewed, latest)) throw new Error('The PR changed after approval. Refresh before merging.');
         if (latest.state !== 'OPEN' || latest.draft || !latest.mergeStrategies.includes('merge_commit')) throw new Error('The PR is no longer ready for a standard merge. Refresh its status before resuming.');
+        await this.checkMergeConflicts(latest, client);
         if (stopped()) return null;
         await this.progress(id, key, { merge: 'sending', phase: 'merging', skipped: undefined, sourceHash: latest.sourceHash, targetHash: latest.targetHash, taskId: undefined, error: undefined });
         if (stopped()) { await this.progress(id, key, { merge: 'pending', phase: undefined }); return null; }

@@ -20,6 +20,7 @@ export interface PullRequest {
   unsupportedReason?: string;
 }
 export interface PullRequestRef { repositoryPath: string; prId: number; }
+export interface MergeConflict { path: string; scenario?: string; message?: string; }
 /** Captured branch comparison, including repositories that do not yet have a PR. */
 export interface BranchReviewRepository {
   repository: RepositoryMapping; sourceBranch: string; targetBranch: string;

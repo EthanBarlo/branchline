@@ -2,7 +2,7 @@ import type { ConnectionCredentials, FetchImplementation } from './connection-ma
 import { ProviderError, ProviderHttp, readBoundedBody } from './connection-manager';
 import { validRelativePath, validateRepositoryMappings } from './repository-mapping';
 import { recordIntegrationDiagnostic, type PullRequestField, type PullRequestFieldIssue } from './integration-diagnostics';
-import type { InlinePayload, PullRequest, RemoteComment, RepositoryMapping } from '../shared/integrations';
+import type { InlinePayload, MergeConflict, PullRequest, RemoteComment, RepositoryMapping } from '../shared/integrations';
 
 const hashPattern = /^[a-f0-9]{40,64}$/i;
 export const validCommitHash = (value: unknown): value is string => typeof value === 'string' && hashPattern.test(value);
@@ -174,6 +174,15 @@ export class BitbucketClient {
     if (!validCommitHash(sourceHash) || !validCommitHash(targetHash)) throw new Error('Capture complete branch revisions before comparing them.');
     const base = await this.json(`${this.repositoryPath(mapping)}/merge-base/${sourceHash}..${targetHash}`);
     return this.capturedCommit(mapping, base?.hash);
+  }
+  async getMergeConflicts(mapping: RepositoryMapping, sourceHash: string, targetHash: string): Promise<MergeConflict[]> {
+    if (!validCommitHash(sourceHash) || !validCommitHash(targetHash)) throw new Error('Capture complete branch revisions before checking merge conflicts.');
+    // Checking captured commits avoids the moving branch pair behind the PR conflicts redirect.
+    const values = await this.pages(`${this.repositoryPath(mapping)}/file-conflicts/${sourceHash}..${targetHash}?pagelen=100`);
+    return values.map(value => {
+      if (!object(value) || !validRelativePath(value.path, false) || value.scenario !== undefined && typeof value.scenario !== 'string' || value.message !== undefined && typeof value.message !== 'string') throw new Error('Bitbucket returned incomplete merge conflict details. Refresh and check again before merging.');
+      return { path: value.path, ...(value.scenario !== undefined ? { scenario: value.scenario } : {}), ...(value.message !== undefined ? { message: value.message } : {}) };
+    });
   }
   async findPullRequests(mapping: RepositoryMapping, sourceBranch: string, states: string[] = ['OPEN']): Promise<PullRequest[]> {
     if (!validBranchName(sourceBranch) || !states.length || states.some(state => !['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(state))) throw new Error('Choose a valid source branch and pull request states.');

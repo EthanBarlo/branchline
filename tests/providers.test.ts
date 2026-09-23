@@ -587,3 +587,55 @@ test('repository discovery reads remotes without changing refs, index, or worktr
     assert.equal(git('rev-parse', 'HEAD'), before); assert.deepEqual(await readFile(join(dir, '.git/index')), index); assert.equal(git('status', '--porcelain'), '');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('merge conflict checks read captured commits and include every page of native conflict details', async () => {
+  const requests: string[] = [];
+  const first = { path: 'src/a.ts', scenario: 'content', message: 'File modified in both source and destination' };
+  const second = { path: 'modules/core', scenario: 'subrepo', message: 'Submodule conflict' };
+  const client = new BitbucketClient(credentials, async (input, init) => {
+    const url = new URL(String(input)); requests.push(url.href);
+    assert.equal(init?.method ?? 'GET', 'GET');
+    assert.equal(url.pathname, `/2.0/repositories/team/repo/file-conflicts/${S}..${D}`);
+    if (url.searchParams.get('page') === '2') return json({ values: [second], size: 2 });
+    assert.equal(url.searchParams.get('pagelen'), '100');
+    url.searchParams.set('page', '2');
+    return json({ values: [first], size: 2, next: url.href });
+  });
+  assert.deepEqual(await client.getMergeConflicts(mapping, S, D), [first, second]);
+  assert.equal(requests.length, 2);
+});
+
+
+test('merge conflict checks accept an explicitly empty list and preserve unfamiliar conflict scenarios', async () => {
+  const clean = new BitbucketClient(credentials, async () => json({ values: [], size: 0 }));
+  assert.deepEqual(await clean.getMergeConflicts(mapping, S, D), []);
+  const conflict = { path: 'src/a.ts', scenario: 'new-provider-scenario' };
+  const unknown = new BitbucketClient(credentials, async () => json({ values: [conflict] }));
+  assert.deepEqual(await unknown.getMergeConflicts(mapping, S, D), [conflict]);
+  let calls = 0;
+  const invalid = new BitbucketClient(credentials, async () => { calls++; return json({ values: [] }); });
+  for (const [source, target] of [[S.slice(0, 12), D], [S, 'feature/APP-123']]) await assert.rejects(() => invalid.getMergeConflicts(mapping, source, target), /complete branch revisions/);
+  assert.equal(calls, 0);
+});
+
+
+test('incomplete conflict lists and invalid entries never imply the branch is mergeable', async () => {
+  for (const response of [null, {}, { values: [] , truncated: true }, { values: [], size: 1 }, { values: [], next: '' }, { values: [null] }, { values: [{}] }, { values: [{ path: '../secret' }] }, { values: [{ path: 'a.ts', scenario: false }] }, { values: [{ path: 'a.ts', message: {} }] }]) {
+    const client = new BitbucketClient(credentials, async () => json(response));
+    await assert.rejects(() => client.getMergeConflicts(mapping, S, D), /incomplete|invalid next page|omitted part/);
+  }
+  const repeated = new BitbucketClient(credentials, async () => json({ values: [], next: `/2.0/repositories/team/repo/file-conflicts/${S}..${D}?pagelen=100` }));
+  await assert.rejects(() => repeated.getMergeConflicts(mapping, S, D), /incomplete or repeated/);
+});
+
+
+test('failed conflict requests preserve HTTP errors and never follow authenticated redirects', async () => {
+  for (const status of [401, 403, 404, 500]) {
+    const client = new BitbucketClient(credentials, async () => json({}, status));
+    await assert.rejects(() => client.getMergeConflicts(mapping, S, D), error => (error as { status?: number }).status === status);
+  }
+  let calls = 0;
+  const redirected = new BitbucketClient(credentials, async () => { calls++; return new Response(null, { status: 302, headers: { Location: 'https://attacker.example/conflicts' } }); });
+  await assert.rejects(() => redirected.getMergeConflicts(mapping, S, D), /redirected/);
+  assert.equal(calls, 1);
+});

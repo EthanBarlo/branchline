@@ -67,6 +67,7 @@ function installTransport() {
     const slug = route.split('/')[4];
     if (/^\/2\.0\/repositories\/smoke\/(repository|core|empty)$/.test(route)) return json({ ...repository(slug), mainbranch: { name: 'main' } });
     if (route.endsWith('/statuses')) return json({ values: [] });
+    if (route.includes('/file-conflicts/')) return json({ values: [] });
     const commit = /\/commit\/([abd]{12})$/.exec(route);
     if (commit) return json({ hash: hash(commit[1][0]) });
     if (route.endsWith('/pullrequests')) {

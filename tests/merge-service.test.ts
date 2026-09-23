@@ -63,6 +63,7 @@ async function fixture(prs = [pr(1), pr(2, 'packages/child', '.', 'packages/chil
     openPrs?: (mapping: RepositoryMapping) => Promise<PullRequest[]>;
     mergeBase?: (mapping: RepositoryMapping, source: string, target: string) => Promise<string>;
     deleteBranch?: (input: PointerRemoteInput) => Promise<void>;
+    conflicts?: (mapping: RepositoryMapping, source: string, target: string) => Promise<Array<{ path: string; scenario: string; message: string }>>;
   } = {};
   const current = (value: Pick<PullRequest, 'repository' | 'id'>): PullRequest => live.get(pullRequestKey(value))!;
   const markMerged = (value: PullRequest): PullRequest => {
@@ -107,6 +108,7 @@ async function fixture(prs = [pr(1), pr(2, 'packages/child', '.', 'packages/chil
     },
     async findPullRequests(mapping: RepositoryMapping) { return hooks.openPrs ? hooks.openPrs(mapping) : []; },
     async mergeBase(mapping: RepositoryMapping, source: string, target: string) { return hooks.mergeBase ? hooks.mergeBase(mapping, source, target) : source; },
+    async getMergeConflicts(mapping: RepositoryMapping, source: string, target: string) { return hooks.conflicts ? hooks.conflicts(mapping, source, target) : []; },
   } as unknown as BitbucketClient;
   const pointers = {
     async preflight() { return hooks.identity ? hooks.identity() : { name: 'Reviewer', email: 'reviewer@example.com' }; },
@@ -1220,4 +1222,66 @@ test('a failed post-approval check pauses the stable merge phase and resumes wit
   assert.deepEqual(phases, ['checking', 'merging', 'checking', 'merging']);
   assert.deepEqual(f.calls, ['approve:1', 'merge:1'], 'resuming keeps the existing account approval');
   assert.equal(f.item(1).error, undefined);
+});
+
+
+test('known merge conflicts and unavailable conflict checks block the preview and every mutation', async () => {
+  for (const unavailable of [false, true]) {
+    const value = pr(1);
+    const f = await fixture([value], false, [branchRow(value), branchRow(pr(2, 'empty'), 'no-changes')]);
+    f.hooks.conflicts = async (mapping, source, target) => {
+      assert.equal(mapping.relativePath, value.repository.relativePath);
+      assert.equal(source, value.sourceHash); assert.equal(target, value.targetHash);
+      if (unavailable) throw providerError(403, 'Conflict details require repository access');
+      return [{ path: 'src/example.ts', scenario: 'CONTENT', message: 'Both sides changed this file' }];
+    };
+    const preview = await f.service.preview('review', 'merge');
+    assert.match(preview.blockers.join('\n'), unavailable ? /could not check merge conflicts/ : /merge conflicts in src\/example.ts.*Resolve conflicts in Bitbucket/);
+    assert.equal(f.state.review('review')!.repositories![0].check?.state, 'failed');
+    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /src\/example.ts/);
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.deletions.length, 0);
+    assert.equal((await f.service.run('review', 'approve')).operation!.state, 'complete', 'approve-only does not require a conflict-free merge');
+    assert.deepEqual(f.calls, ['approve:1']);
+  }
+});
+
+
+test('changed branches without PRs are checked for conflicts before PR creation', async () => {
+  for (const unavailable of [false, true]) {
+    const value = pr(1);
+    const child = pr(2, 'child');
+    const f = await fixture([value], false, [branchRow(value), branchRow(child, 'changes')]);
+    f.hooks.ensurePrs = async () => { assert.fail('Conflict checks must finish before PR creation'); };
+    f.hooks.conflicts = async (mapping, source, target) => {
+      if (mapping.relativePath !== 'child') return [];
+      assert.equal(source, child.sourceHash); assert.equal(target, child.targetHash);
+      if (unavailable) throw new Error('Conflict response unavailable');
+      return [{ path: 'child.txt', scenario: 'CONTENT', message: 'Conflict' }];
+    };
+    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /child.txt/);
+    assert.equal(f.state.review('review')!.repositories![1].check?.state, 'failed');
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.deletions.length, 0);
+  }
+});
+
+
+test('newly reported conflicts after approval prevent the merge and all cleanup', async () => {
+  const value = pr(1);
+  const f = await fixture([value], false, [branchRow(value)]);
+  let reads = 0;
+  f.hooks.conflicts = async () => {
+    reads++;
+    return f.current(value).participants.some(participant => participant.approved)
+      ? [{ path: 'changed.ts', scenario: 'CONTENT', message: 'Conflict' }] : [];
+  };
+  const result = await f.service.run('review', 'merge');
+  assert.equal(result.operation!.state, 'paused');
+  assert.match(result.operation!.error!, /changed.ts/);
+  assert.equal(f.item(1).phase, undefined);
+  assert.equal(reads, 2, 'conflicts are checked during the preview and immediately before merging');
+  assert.deepEqual(f.calls, ['approve:1']);
+  assert.equal(f.deletions.length, 0);
+  assert.ok(result.repositories!.every(row => f.remoteBranches.has(`${row.repository.relativePath}:${row.sourceBranch}`)));
 });

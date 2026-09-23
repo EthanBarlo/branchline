@@ -43,6 +43,7 @@ async function fixture(t: TestContext) {
     getRepository: async (repo: RepositoryMapping) => { if (hooks.repositoryError === repo.relativePath) throw new ProviderError('Repository access denied', 403); return { defaultBranch: 'main' }; },
     getBranch: async (repo: RepositoryMapping, name: string) => { const value = refs.get(`${repo.relativePath}:${name === sourceBranch ? 'source' : 'target'}`); return value ? { name, hash: value } : null; },
     mergeBase: async (repo: RepositoryMapping, source: string, target: string) => source === target || target === hash('9') && [...prs.values()].some(pr => pr.repository.relativePath === repo.relativePath && pr.state === 'MERGED' && pr.sourceHash === source) ? source : hash('c'),
+    getMergeConflicts: async () => [],
     getPullRequest: async (repo: RepositoryMapping, id: number) => { const value = prs.get(`${repo.relativePath}#${id}`); if (!value) throw new Error('PR not found'); return structuredClone(value); },
     findPullRequests: async (repo: RepositoryMapping, source: string, states = ['OPEN']) => [...prs.values()].filter(value => value.repository.relativePath === repo.relativePath && value.sourceBranch === source && states.includes(value.state)).map(value => structuredClone(value)),
     createPullRequest: async (repo: RepositoryMapping) => {

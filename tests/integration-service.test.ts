@@ -49,6 +49,7 @@ async function fixture(t: TestContext, progressive = false) {
     async getRepository() { return { defaultBranch: 'main' }; },
     async getBranch(mapping: RepositoryMapping, name: string) { const value = [...live.values()].find(pr => pr.repository.relativePath === mapping.relativePath); return value ? { name, hash: name === value.sourceBranch ? value.sourceHash : value.targetHash } : null; },
     async mergeBase() { return hash('c'); },
+    async getMergeConflicts() { return []; },
     async findPullRequests(mapping: RepositoryMapping, source: string, states = ['OPEN']) { if (hooks.listError) throw hooks.listError; return [...live.values()].filter(value => value.repository.relativePath === mapping.relativePath && value.sourceBranch === source && states.includes(value.state)).map(value => structuredClone(value)); },
     async listPullRequests(mapping: RepositoryMapping) { if (hooks.listError) throw hooks.listError; return [...live.values()].filter(value => value.repository.relativePath === mapping.relativePath).map(value => structuredClone(value)); },
     async getPullRequest(repository: RepositoryMapping, id: number) { calls.prs.push({ repository: structuredClone(repository), id }); const value = live.get(`${repository.relativePath}#${id}`); if (!value) throw new Error('PR not found'); return structuredClone(hooks.pr?.(value) ?? value); },
