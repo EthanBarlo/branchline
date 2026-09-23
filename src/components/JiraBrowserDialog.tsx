@@ -8,8 +8,8 @@ type Destination = 'close' | 'details';
 const message = (error: unknown) => error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : String(error);
 
 /** The rectangle hosts isolated native views; no Jira markup enters this renderer. */
-export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTicketChanged }: {
-  reviewId: string; ticket: string | null; onClose: () => void; onDetails: () => void; onTicketChanged: () => void;
+export function JiraBrowserDialog({ reviewId, ticket, currentBranch, onClose, onDetails, onTicketChanged }: {
+  reviewId: string; ticket: string | null; currentBranch?: string | null; onClose: () => void; onDetails: () => void; onTicketChanged: () => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
@@ -27,6 +27,11 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
   const ticketEdited = useRef(false);
   const [ticketError, setTicketError] = useState('');
   const changing = useRef(false);
+  const checkingUnsavedEdits = useRef(false);
+  const openedBranch = useRef(currentBranch);
+  const lastBranch = useRef(currentBranch);
+  const branchChanged = useRef(false);
+  const closeForBranchChange = useRef(false);
   const ticketInputId = useId();
 
   function requestClose(destination: Destination) {
@@ -35,6 +40,7 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
 
   async function changeTicket(value: string | null) {
     if (changing.current) return;
+    if (branchChanged.current) { requestClose('close'); return; }
     const key = value === null ? null : value.trim().toUpperCase();
     if (key && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/.test(key)) {
       setTicketError('Enter a Jira issue key such as APP-123.');
@@ -43,9 +49,13 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
     changing.current = true; setSaving(true); setTicketError('');
     let detached = false;
     try {
-      if (!await lifecycle.current?.prepareChange()) return;
+      checkingUnsavedEdits.current = true;
+      const closed = await lifecycle.current?.prepareChange();
+      checkingUnsavedEdits.current = false;
+      if (!closed) return;
       detached = true;
-      await window.reviewAPI.setReviewTicket(reviewId, key);
+      if (branchChanged.current) return;
+      await window.reviewAPI.setReviewTicket(reviewId, key, openedBranch.current);
       ticketEdited.current = false;
       setCurrentTicket(key || null); setTicketKey(key || '');
       callbacks.current.onTicketChanged();
@@ -53,8 +63,12 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
       setCurrentTicket(link?.key || null); setTicketKey(link?.key || '');
     } catch (reason) { setTicketError(message(reason)); }
     finally {
+      checkingUnsavedEdits.current = false;
       changing.current = false; setSaving(false);
-      if (detached) setAttempt(value => value + 1);
+      if (detached) {
+        if (branchChanged.current) callbacks.current.onClose();
+        else setAttempt(value => value + 1);
+      }
     }
   }
 
@@ -178,6 +192,20 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
   }, [reviewId, attempt]);
 
   useEffect(() => {
+    const previous = lastBranch.current;
+    lastBranch.current = currentBranch;
+    if (previous !== currentBranch && previous !== undefined && currentBranch !== undefined) {
+      branchChanged.current = true;
+      closeForBranchChange.current = !checkingUnsavedEdits.current;
+    }
+    // A declined unsaved-edit prompt leaves this page open without prompting on every poll.
+    if (closeForBranchChange.current && !saving) {
+      closeForBranchChange.current = false;
+      requestClose('close');
+    }
+  }, [currentBranch, saving]);
+
+  useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const workspace = document.getElementById('root');
     const wasInert = workspace?.inert;
@@ -235,6 +263,7 @@ export function JiraBrowserDialog({ reviewId, ticket, onClose, onDetails, onTick
       </>}
       {currentTicket && <>
       <div className="jira-browser-footer">
+        {branchChanged.current && <span className="jira-browser-error" role="status"><TriangleAlert size={12} />The checked-out branch changed. Close this ticket when you’ve finished editing.</span>}
         {ticketError && <span className="jira-browser-error" role="alert"><TriangleAlert size={12} />{ticketError}</span>}
         {ready && error && <span className="jira-browser-error" role="alert"><TriangleAlert size={12} />{error}</span>}
         {saving && <span className="jira-picker-status" role="status"><LoaderCircle size={12} className="spin" />Clearing ticket…</span>}

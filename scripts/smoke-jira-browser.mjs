@@ -393,12 +393,16 @@ try {
   await page.evaluate(id => window.reviewAPI.saveConnection({ id, kind: 'jira', email: 'one@example.invalid', token: 'fake-token', siteUrl: 'https://smoke.atlassian.net' }), setup.first.id);
   await page.evaluate(() => window.reviewAPI.updateSettings({ jiraTicketView: 'website' }));
   await page.reload();
-  const fullTicket = page.locator('.jira-browser-modal:not(.jira-browser-picker)');
-  const picker = page.getByRole('dialog', { name: 'Choose a Jira ticket', exact: true });
-  const keyInput = picker.getByRole('combobox', { name: 'Review ticket key', exact: true });
-  const useTicket = picker.getByRole('button', { name: 'Use ticket', exact: true });
-  const suggestions = picker.getByRole('listbox');
-  const recentOption = suggestions.getByRole('option').filter({ hasText: 'REC-101' });
+  let fullTicket, picker, keyInput, useTicket, suggestions, recentOption;
+  const bindTicketControls = () => {
+    fullTicket = page.locator('.jira-browser-modal:not(.jira-browser-picker)');
+    picker = page.getByRole('dialog', { name: 'Choose a Jira ticket', exact: true });
+    keyInput = picker.getByRole('combobox', { name: 'Review ticket key', exact: true });
+    useTicket = picker.getByRole('button', { name: 'Use ticket', exact: true });
+    suggestions = picker.getByRole('listbox');
+    recentOption = suggestions.getByRole('option').filter({ hasText: 'REC-101' });
+  };
+  bindTicketControls();
   const savedTicket = async () => JSON.parse(await readFile(join(env.BRANCHLINE_DATA_DIR, 'integrations.json'), 'utf8')).tickets?.[setup.reviewId];
   const linkedTicket = () => page.evaluate(id => window.reviewAPI.getJiraTicketLink(id), setup.reviewId);
   const issueRequestCount = async () => (await desktop.evaluate(() => globalThis.jiraSmoke.apiRequests)).filter(url => url.includes('/issue/') && !url.includes('/issue/picker')).length;
@@ -461,9 +465,6 @@ try {
   assert.equal(await contents('document.querySelector("#issue").hidden'), false, 'Clearing and choosing another ticket retains the Jira login.');
   await fullTicket.getByRole('button', { name: 'Close', exact: true }).click();
   await waitForViewerClosed(page, 'OPS-789');
-  git('checkout', '-b', 'current-work');
-  assert.equal(git('branch', '--show-current').toString().trim(), 'current-work');
-
   await desktop.evaluate(({ ipcMain }, reviewId) => {
     const channel = 'review:jira-ticket-link';
     const original = ipcMain._invokeHandlers.get(channel);
@@ -624,7 +625,143 @@ try {
   await picker.getByRole('alert').filter({ hasText: 'Mock ticket lookup failed' }).waitFor({ state: 'hidden' });
   await assertPicker();
   await closePicker();
-  console.log('Jira browser desktop check passed: one-click embedded modal, native sizing and keyboard focus, isolated website and popup, editing fixture, persistent per-account login, reset/close races, summary preference persistence, early explicit-ticket restore, native clear with unsaved-edit protection, persistent cleared selection, compact centered chooser, stable floating suggestions, recent and searched selection, debounced and stale searches, exact-key Enter, picker error focus and recovery, disconnect cleanup and trusted IPC.');
+
+  const detectCheckout = async branch => {
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await until(async () => (await page.locator('.feature-branch').innerText()) === (branch || 'Detached HEAD'), 'Current to detect the actual checkout through its focus refresh');
+  };
+  await closeDesktop();
+  page = await launch(); bindTicketControls();
+  await page.getByRole('button', { name: 'View Jira ticket', exact: true }).click();
+  await assertPicker();
+  assert.equal(await savedTicket(), null, 'An explicit clear survives restart on the same checkout branch.');
+  await chooseManually('KEEP-900');
+  await fullTicket.getByRole('button', { name: 'Close', exact: true }).click();
+  await waitForViewerClosed(page, 'KEEP-900');
+  await closeDesktop();
+  page = await launch(); bindTicketControls();
+  assert.equal(git('branch', '--show-current').toString().trim(), 'feature/APP-123');
+  await openTicket(page, 'KEEP-900'); await assertSelected('KEEP-900');
+  assert.equal(await savedTicket(), 'KEEP-900', 'A manual Current ticket survives restart on the same checkout branch.');
+
+  git('checkout', '-b', 'feature/BRANCH-202');
+  await detectCheckout('feature/BRANCH-202');
+  await waitForViewerClosed(page, 'KEEP-900');
+  assert.equal((await linkedTicket()).key, 'BRANCH-202');
+  assert.equal(await savedTicket(), undefined, 'Changing the checkout expires the previous branch’s manual ticket.');
+  await openTicket(page, 'BRANCH-202'); await assertSelected('BRANCH-202');
+  git('checkout', '-b', 'bugfix/BRANCH-202-alternate');
+  await detectCheckout('bugfix/BRANCH-202-alternate');
+  await waitForViewerClosed(page, 'BRANCH-202');
+  assert.equal((await linkedTicket()).key, 'BRANCH-202', 'A distinct checkout closes the old modal even when both branch names identify the same Jira ticket.');
+  await openTicket(page, 'BRANCH-202');
+
+  await clearSelectedTicket();
+  git('checkout', '-b', 'feature/CLEAR-303');
+  await detectCheckout('feature/CLEAR-303');
+  await picker.waitFor({ state: 'hidden' });
+  assert.equal((await linkedTicket()).key, 'CLEAR-303');
+  assert.equal(await savedTicket(), undefined, 'A new checkout also expires an explicit cleared ticket.');
+  await openTicket(page, 'CLEAR-303');
+  await clearSelectedTicket(); await chooseManually('KEYLESS-404');
+  git('checkout', '-b', 'current-work');
+  await detectCheckout('current-work');
+  await waitForViewerClosed(page, 'KEYLESS-404');
+  assert.equal(await linkedTicket(), null, 'A keyless branch does not inherit the last branch’s manual ticket.');
+  await page.getByRole('button', { name: 'View Jira ticket', exact: true }).click();
+  await assertPicker(); await chooseManually('DET-707');
+  git('checkout', '--detach', 'HEAD');
+  await detectCheckout(null);
+  await waitForViewerClosed(page, 'DET-707');
+  assert.equal(await linkedTicket(), null, 'Detached HEAD does not inherit the previous branch’s manual ticket.');
+  assert.equal(await savedTicket(), undefined);
+
+  git('checkout', 'feature/CLEAR-303');
+  await detectCheckout('feature/CLEAR-303');
+  await openTicket(page, 'CLEAR-303');
+  await clearSelectedTicket(); await chooseManually('PIN-606');
+  await contents('document.querySelector("#login").requestSubmit(); document.querySelector("#comment").value = "Unsaved note before changing branch"; true;');
+  const pinnedViews = (await nativeViews()).views.map(view => view.id);
+  await desktop.evaluate(({ dialog }) => {
+    globalThis.jiraSmoke.branchOriginalDialog = dialog.showMessageBoxSync;
+    globalThis.jiraSmoke.branchPrompts = 0;
+    dialog.showMessageBoxSync = () => { globalThis.jiraSmoke.branchPrompts++; return 0; };
+  });
+  await contents(`window.onbeforeunload = event => { event.preventDefault(); event.returnValue = ''; return ''; }; true;`);
+  try {
+    git('checkout', '-b', 'feature/NEXT-808');
+    await detectCheckout('feature/NEXT-808');
+    await until(() => desktop.evaluate(() => globalThis.jiraSmoke.branchPrompts === 1), 'the branch-change unsaved-edit confirmation');
+    await until(() => fullTicket.getByRole('button', { name: 'Close', exact: true }).isEnabled(), 'the cancelled branch-change close');
+    assert.deepEqual((await nativeViews()).views.map(view => view.id), pinnedViews, 'Stay keeps the existing native Jira page after Current changes branch.');
+    assert.equal(await contents('location.href'), 'https://smoke.atlassian.net/browse/PIN-606');
+    assert.equal(await contents('document.querySelector("#comment").value'), 'Unsaved note before changing branch');
+    assert.equal((await linkedTicket()).key, 'NEXT-808', 'Current resolves the new branch while the old Jira page stays open for editing.');
+    await assertSelected('PIN-606');
+    assert.equal(await savedTicket(), undefined);
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await delay(4500);
+    assert.equal(await desktop.evaluate(() => globalThis.jiraSmoke.branchPrompts), 1, 'Focus refresh and the next background poll do not repeat a declined close prompt.');
+    assert.deepEqual((await nativeViews()).views.map(view => view.id), pinnedViews);
+    assert.equal(await contents('document.querySelector("#comment").value'), 'Unsaved note before changing branch');
+    await desktop.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => { globalThis.jiraSmoke.branchPrompts++; return 1; }; });
+    await clickToolbar('clear-ticket').catch(error => { if (!/destroyed|closed/.test(error.message)) throw error; });
+    await waitForViewerClosed(page, 'PIN-606');
+    assert.equal(await desktop.evaluate(() => globalThis.jiraSmoke.branchPrompts), 2, 'Clearing the pinned page asks before leaving its unsaved edits.');
+    assert.equal((await linkedTicket()).key, 'NEXT-808', 'Clearing an old pinned page cannot clear the new checkout’s ticket.');
+    assert.equal(await savedTicket(), undefined, 'A stale clear action creates no null override for the new branch.');
+  } finally {
+    if ((await nativeViews()).views.some(view => view.url.startsWith('https:'))) await contents('window.onbeforeunload = null; true;');
+    await desktop.evaluate(({ dialog }) => { dialog.showMessageBoxSync = globalThis.jiraSmoke.branchOriginalDialog; });
+  }
+  await openTicket(page, 'NEXT-808'); await assertSelected('NEXT-808');
+
+  await contents('document.querySelector("#comment").value = "Unsaved during pending clear"; true;');
+  await contents(`window.onbeforeunload = event => { event.preventDefault(); event.returnValue = ''; return ''; }; true;`);
+  const racingViews = (await nativeViews()).views.map(view => view.id);
+  await desktop.evaluate(({ ipcMain, dialog }) => {
+    const channel = 'review:jira-browser-close';
+    const original = ipcMain._invokeHandlers.get(channel);
+    const originalDialog = dialog.showMessageBoxSync;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let held = false;
+    globalThis.jiraSmoke.clearBranchRacePrompts = 0;
+    dialog.showMessageBoxSync = () => { globalThis.jiraSmoke.clearBranchRacePrompts++; return 0; };
+    ipcMain._invokeHandlers.set(channel, async (...args) => {
+      if (!held) { held = true; globalThis.jiraSmoke.pendingClearHeld = true; await gate; }
+      return original(...args);
+    });
+    globalThis.jiraSmoke.releasePendingClear = () => { ipcMain._invokeHandlers.set(channel, original); release(); };
+    globalThis.jiraSmoke.restorePendingClearDialog = () => { dialog.showMessageBoxSync = originalDialog; };
+  });
+  try {
+    await clickToolbar('clear-ticket');
+    await until(() => desktop.evaluate(() => globalThis.jiraSmoke.pendingClearHeld), 'the held native close requested by Clear');
+    git('checkout', '-b', 'feature/RACE-909');
+    await detectCheckout('feature/RACE-909');
+    await desktop.evaluate(() => globalThis.jiraSmoke.releasePendingClear());
+    await until(() => desktop.evaluate(() => globalThis.jiraSmoke.clearBranchRacePrompts >= 1), 'the pending Clear unsaved-edit confirmation');
+    await until(() => fullTicket.getByRole('button', { name: 'Close', exact: true }).isEnabled(), 'Stay to finish the pending Clear');
+    await assertSelected('NEXT-808');
+    assert.deepEqual((await nativeViews()).views.map(view => view.id), racingViews);
+    assert.equal(await contents('document.querySelector("#comment").value'), 'Unsaved during pending clear');
+    assert.equal((await linkedTicket()).key, 'RACE-909');
+    assert.equal(await savedTicket(), undefined, 'A cancelled Clear in flight during checkout cannot clear the new branch ticket.');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await delay(4500);
+    assert.equal(await desktop.evaluate(() => globalThis.jiraSmoke.clearBranchRacePrompts), 1, 'Branch detection during a pending Clear does not queue another prompt after Stay.');
+    assert.deepEqual((await nativeViews()).views.map(view => view.id), racingViews);
+    assert.equal(await contents('document.querySelector("#comment").value'), 'Unsaved during pending clear');
+  } finally {
+    await desktop.evaluate(() => globalThis.jiraSmoke.releasePendingClear());
+    if ((await nativeViews()).views.some(view => view.url.startsWith('https:'))) await contents('window.onbeforeunload = null; true;');
+    await desktop.evaluate(() => globalThis.jiraSmoke.restorePendingClearDialog());
+  }
+  await fullTicket.getByRole('button', { name: 'Close', exact: true }).click();
+  await waitForViewerClosed(page, 'NEXT-808');
+  await openTicket(page, 'RACE-909'); await assertSelected('RACE-909');
+  console.log('Jira browser desktop check passed: one-click embedded modal, native sizing and keyboard focus, isolated website and popup, editing fixture, persistent per-account login, reset/close races, summary preference persistence, early explicit-ticket restore, native clear with unsaved-edit protection, persistent cleared selection, compact centered chooser, stable floating suggestions, recent and searched selection, debounced and stale searches, exact-key Enter, picker error focus and recovery, branch-scoped Current tickets, branch-change modal closure and one-time unsaved-edit protection, pending-clear checkout race, disconnect cleanup and trusted IPC.');
 } catch (error) {
   if (desktop) {
     console.error('Jira modal geometry:', JSON.stringify(await nativeViews().catch(() => 'Unavailable')));

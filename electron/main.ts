@@ -147,7 +147,7 @@ function installHandlers() {
   handle('jira-issue', (id: string, key?: string) => integrations.getJiraIssue(id, key));
   handle('jira-ticket-suggestions', (id: string, query: string) => integrations.getJiraTicketSuggestions(id, query));
   handle('jira-ticket-link', (id: string) => integrations.getJiraTicketLink(id));
-  handle('jira-ticket', (id: string, key: string | null) => integrations.setReviewTicket(id, key));
+  handle('jira-ticket', (id: string, key: string | null, expectedBranch?: string | null) => integrations.setReviewTicket(id, key, expectedBranch));
   handle('feedback-preview', (id: string) => integrations.previewFeedback(id));
   handle('feedback-publish', (id: string) => integrations.publishFeedback(id));
   handle('feedback-reanchor', (id: string, commentId: string, input: ReanchorInput) => integrations.reanchorComment(id, commentId, input));

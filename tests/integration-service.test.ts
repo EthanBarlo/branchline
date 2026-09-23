@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -34,7 +34,7 @@ async function fixture(t: TestContext, progressive = false) {
     ['jira', { info: { id: 'jira', kind: 'jira', label: 'Jira', email: 'jira@other.example', accountId: 'jira-account', displayName: 'Jira User', storage: 'session', connected: true, cloudId: 'separate-cloud', siteUrl: 'https://separate.atlassian.net' }, email: 'jira@other.example', token: 'jira-private-token' }],
   ]);
   const calls = { clientTokens: [] as string[], clients: [] as string[], prs: [] as { repository: RepositoryMapping; id: number }[], jira: [] as [string, string][], localSnapshots: 0, localInspections: 0, remoteSnapshots: 0, credentialReads: 0, commentReads: 0, discoveries: [] as string[], saves: 0 };
-  const hooks: { beforeRepository?: (repository: RepositoryMapping) => Promise<void>; beforeComments?: () => Promise<void>; beforeSnapshot?: () => Promise<void>; beforeSave?: () => Promise<void>; snapshotError?: Error; snapshot?: (value: ReviewSnapshot) => ReviewSnapshot; localSnapshot?: (review: Review) => Promise<ReviewSnapshot>; pr?: (value: PullRequest) => PullRequest; listError?: Error; publishError?: Error } = {};
+  const hooks: { beforeRepository?: (repository: RepositoryMapping) => Promise<void>; beforeComments?: () => Promise<void>; beforeSnapshot?: () => Promise<void>; beforeSave?: () => Promise<void>; beforeInspect?: () => Promise<void>; snapshotError?: Error; snapshot?: (value: ReviewSnapshot) => ReviewSnapshot; localSnapshot?: (review: Review) => Promise<ReviewSnapshot>; pr?: (value: PullRequest) => PullRequest; listError?: Error; publishError?: Error } = {};
   const live = new Map([pr(), pr(child, 8)].map(value => [pullRequestKey(value), value]));
   const comments: RemoteComment[] = [], sent: InlinePayload[] = [];
   const credentials = (id: string) => { calls.credentialReads++; const value = accounts.get(id); if (!value?.token) throw new Error('Reconnect this account.'); return structuredClone(value); };
@@ -61,7 +61,7 @@ async function fixture(t: TestContext, progressive = false) {
   } as unknown as BitbucketClient;
   const remoteSnapshot = (id: string): ReviewSnapshot => ({ reviewId: id, files: [structuredClone(file)], repos: [root, child].map(repo => ({ relativePath: repo.relativePath, workingTreeIncluded: false, currentBranch: null })), warnings: [], fingerprint: 'snapshot-v1', refreshedAt: new Date().toISOString() });
   let currentBranch: string | null = 'APP-999-current';
-  const inspect = async () => { calls.localInspections++; return { rootPath: project.repoPath, name: project.name, branches: ['main', currentBranch ?? ''], currentBranch }; };
+  const inspect = async () => { calls.localInspections++; const branch = currentBranch; await hooks.beforeInspect?.(); return { rootPath: project.repoPath, name: project.name, branches: ['main', branch ?? ''], currentBranch: branch }; };
   let service: IntegrationService;
   const reviewService = new ReviewService(reviews, inspect, async config => {
     if (config.remote) return service.buildSnapshot(config as Review);
@@ -69,7 +69,7 @@ async function fixture(t: TestContext, progressive = false) {
     if (hooks.localSnapshot) return hooks.localSnapshot(config as Review);
     throw new Error('Local Git must not run for a remote review.');
   });
-  service = new IntegrationService(reviews, reviewService, state, connections, {} as PointerService, {
+  const createService = () => new IntegrationService(reviews, reviewService, state, connections, {} as PointerService, {
     createClient: value => { calls.clients.push(value.info.id); calls.clientTokens.push(value.token); return client; }, inspect,
     discover: async repoPath => { calls.discoveries.push(repoPath); return [structuredClone(root), structuredClone(child)]; },
     ...(progressive ? {
@@ -82,6 +82,7 @@ async function fixture(t: TestContext, progressive = false) {
       },
     } : { snapshot: async (_client: BitbucketClient, id: string, prs: PullRequest[]) => { calls.remoteSnapshots++; await hooks.beforeSnapshot?.(); if (hooks.snapshotError) throw hooks.snapshotError; const snapshot = remoteSnapshot(id); return { snapshot: hooks.snapshot?.(snapshot) ?? snapshot, pullRequests: structuredClone(prs) }; } }),
   });
+  service = createService();
   const settings: ProjectIntegration = { jiraConnectionId: 'jira', bitbucketConnectionId: 'bb', repositories: [root, child], updateSubmodulePointers: false };
   await service.configureProjectIntegration(project.id, settings);
   const open = () => service.openPullRequestReview(project.id, [{ repositoryPath: '.', prId: 7 }]);
@@ -90,7 +91,7 @@ async function fixture(t: TestContext, progressive = false) {
     const review = await service.addComment(id, { fileId: file.id, repoRelativePath: file.repoRelativePath, path: file.path, side: 'additions', lineStart: 1, lineEnd: 2, body: 'Initial comment', context: 'new\nline', fingerprint: file.fingerprint });
     return review.comments.at(-1)!;
   };
-  return { directory, reviewsPath, statePath, project, reviews, state, service, reviewService, settings, hooks, live, calls, accounts, comments, sent, client, open, add, currentBranch: (value: string | null) => { currentBranch = value; } };
+  return { directory, reviewsPath, statePath, project, reviews, state, service, reviewService, settings, hooks, live, calls, accounts, comments, sent, client, open, add, restartService: () => { service = createService(); return service; }, currentBranch: (value: string | null) => { currentBranch = value; } };
 }
 
 test('PR selection trusts fetched identities and mapped repositories, and reuses a group regardless of selection order', async t => {
@@ -296,20 +297,21 @@ test('Jira and Bitbucket remain separately bound per project, and UI/store state
   assert.equal(f.service.getRemoteReview(review.id)?.connectionId, 'bb');
 });
 
-test('Current Jira inference reinspects the branch while saved and explicitly linked tickets use their fixed context', async t => {
+test('Current Jira inference follows checkout changes and only keeps a manual ticket on its selected branch', async t => {
   const f = await fixture(t);
   assert.equal((await f.service.getJiraIssue(currentReviewId(f.project.id))).key, 'APP-999');
   f.currentBranch('APP-888-new');
   assert.equal((await f.service.getJiraIssue(currentReviewId(f.project.id))).key, 'APP-888');
   await f.service.setReviewTicket(currentReviewId(f.project.id), 'APP-321');
-  f.currentBranch(null);
   assert.equal((await f.service.getJiraIssue(currentReviewId(f.project.id))).key, 'APP-321');
-  assert.equal(f.calls.localInspections, 2);
+  f.currentBranch(null);
+  await assert.rejects(() => f.service.getJiraIssue(currentReviewId(f.project.id)), /ticket key/);
+  assert.equal(f.state.ticket(currentReviewId(f.project.id)), undefined);
   await f.service.setReviewTicket(currentReviewId(f.project.id), '');
   await assert.rejects(() => f.service.getJiraIssue(currentReviewId(f.project.id)), /ticket key/);
 });
 
-test('clearing a branch-derived Jira ticket persists and suppresses inference until explicitly reset', async t => {
+test('clearing a branch-derived Jira ticket persists on the same branch and resets on checkout change', async t => {
   const f = await fixture(t);
   const id = currentReviewId(f.project.id);
   assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-999');
@@ -320,16 +322,15 @@ test('clearing a branch-derived Jira ticket persists and suppresses inference un
   await persisted.load();
   assert.equal(persisted.ticket(id), null);
   await f.state.load();
-  f.currentBranch('APP-888-new');
   const inspections = f.calls.localInspections;
   assert.equal(await f.service.getJiraTicketLink(id), null);
   await assert.rejects(() => f.service.getJiraIssue(id), /ticket key/);
   await assert.rejects(() => f.service.getJiraBrowserTarget(id), /ticket key/);
-  assert.equal(f.calls.localInspections, inspections, 'An explicitly cleared link does not inspect the branch.');
+  assert.ok(f.calls.localInspections > inspections, 'A cleared Current link checks whether its branch changed.');
   assert.deepEqual(f.calls.jira, [], 'An explicitly cleared link does not fetch the branch-derived ticket.');
-  await f.service.setReviewTicket(id, '');
-  assert.equal(f.state.ticket(id), undefined);
+  f.currentBranch('APP-888-new');
   assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-888');
+  assert.equal(f.state.ticket(id), undefined);
   assert.equal((await f.service.getJiraIssue(id)).key, 'APP-888');
   assert.equal(Object.hasOwn(JSON.parse(await readFile(f.statePath, 'utf8')).tickets, id), false);
 });
@@ -355,6 +356,175 @@ test('cleared manual Jira links do not revert to the saved review branch and can
   assert.equal((await f.service.getJiraTicketLink(review.id))?.key, 'APP-123');
 });
 
+test('Current ticket overrides survive restart on their branch and expire after restart on a different checkout', async t => {
+  for (const selection of ['OPS-456', null]) {
+    const f = await fixture(t);
+    const id = currentReviewId(f.project.id);
+    await f.service.setReviewTicket(id, selection);
+    await f.state.load(); await f.reviews.load();
+    assert.equal(f.state.ticketBranch(id), 'APP-999-current');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key ?? null, selection);
+    const before = await stat(f.statePath);
+    await f.service.getJiraTicketLink(id);
+    assert.equal((await stat(f.statePath)).ino, before.ino, 'Same-branch reads do not rewrite the selection.');
+    f.currentBranch('APP-888-new');
+    await f.state.load(); await f.reviews.load();
+    assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-888');
+    assert.equal(f.state.ticket(id), undefined);
+    assert.equal(f.state.ticketBranch(id), undefined);
+    f.currentBranch('APP-999-current');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-999', 'Returning to the old branch does not revive its override.');
+  }
+});
+
+test('legacy Current ticket selections bind to the saved branch and expire if the checkout already changed', async t => {
+  for (const selection of ['OPS-456', null]) for (const switched of [false, true]) {
+    const f = await fixture(t);
+    const id = currentReviewId(f.project.id);
+    await f.reviews.switchCurrentContext(f.project.id, 'APP-999-current', 'main');
+    await f.state.setTicket(id, selection);
+    await f.state.load(); await f.reviews.load();
+    assert.equal(f.state.ticketBranch(id), undefined);
+    if (switched) f.currentBranch('APP-888-new');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key ?? null, switched ? 'APP-888' : selection);
+    assert.equal(f.state.ticketBranch(id), switched ? undefined : 'APP-999-current');
+    await f.state.load();
+    assert.equal(f.state.ticket(id), switched ? undefined : selection);
+  }
+});
+
+test('legacy selection migration retains the startup branch when another Current operation observes the new checkout first', async t => {
+  const f = await fixture(t);
+  const id = currentReviewId(f.project.id);
+  await f.reviews.switchCurrentContext(f.project.id, 'APP-999-current', 'main');
+  await f.state.setTicket(id, 'OPS-456');
+  await f.state.load(); await f.reviews.load();
+  const restarted = f.restartService();
+  f.currentBranch('APP-888-new');
+  await f.reviews.switchCurrentContext(f.project.id, 'APP-888-new');
+  assert.equal((await restarted.getJiraTicketLink(id))?.key, 'APP-888');
+  assert.equal(f.state.ticket(id), undefined);
+});
+
+test('keyless or detached Current checkouts clear manual and null overrides without opening the old ticket', async t => {
+  for (const selection of ['OPS-456', null]) for (const checkout of ['maintenance', null]) {
+    const f = await fixture(t);
+    const id = currentReviewId(f.project.id);
+    await f.service.setReviewTicket(id, selection);
+    f.currentBranch(checkout);
+    assert.equal(await f.service.getJiraTicketLink(id), null);
+    await assert.rejects(() => f.service.getJiraIssue(id), /ticket key/);
+    await assert.rejects(() => f.service.getJiraBrowserTarget(id), /ticket key/);
+    assert.equal(f.state.ticket(id), undefined);
+    assert.deepEqual(f.calls.jira, []);
+    await f.service.setReviewTicket(id, 'OPS-789');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key, 'OPS-789', 'A ticket can still be selected on a keyless or detached checkout.');
+    f.currentBranch('APP-222-next');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-222');
+  }
+});
+
+test('local refresh expires Current selections even without opening Jira and does not revive them after switching back', async t => {
+  const f = await fixture(t);
+  const id = currentReviewId(f.project.id);
+  f.hooks.localSnapshot = async review => ({ reviewId: review.id, files: [], repos: [], warnings: [], fingerprint: 'local', refreshedAt: new Date().toISOString() });
+  await f.service.setCurrentTarget(f.project.id, 'main');
+  for (const selection of ['OPS-456', null]) {
+    await f.service.setReviewTicket(id, selection);
+    const before = await stat(f.statePath);
+    await f.service.refreshReview(id);
+    assert.equal(f.state.ticket(id), selection);
+    assert.equal((await stat(f.statePath)).ino, before.ino);
+    f.currentBranch('APP-888-new');
+    await f.service.refreshReview(id);
+    assert.equal(f.state.ticket(id), undefined);
+    f.currentBranch('APP-999-current');
+    const inspections = f.calls.localInspections;
+    await f.service.refreshReview(id);
+    assert.equal(f.calls.localInspections - inspections, 2, 'Without an override, Jira adds no inspections to the normal scan.');
+    assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-999');
+  }
+});
+
+test('saved local and remote Jira selections remain fixed when the working checkout changes', async t => {
+  const f = await fixture(t);
+  const saved = await f.reviews.createReview({ projectId: f.project.id, baseBranch: 'main', featureBranch: 'APP-123-saved', includeWorkingTree: false });
+  const remote = await f.open();
+  for (const review of [saved, remote]) for (const selection of ['OPS-456', null]) {
+    await f.service.setReviewTicket(review.id, selection);
+    f.currentBranch('APP-888-new');
+    await f.state.load();
+    assert.equal((await f.service.getJiraTicketLink(review.id))?.key ?? null, selection);
+    assert.equal(f.state.ticketBranch(review.id), undefined);
+  }
+  assert.equal(f.calls.localInspections, 0);
+});
+
+test('a delayed Current ticket lookup cannot clear a later manual selection', async t => {
+  const f = await fixture(t);
+  const id = currentReviewId(f.project.id);
+  await f.service.setReviewTicket(id, 'OPS-111');
+  f.currentBranch('APP-888-new');
+  const blocked = barrier(), entered = barrier();
+  t.after(() => blocked.release());
+  let first = true;
+  f.hooks.beforeInspect = async () => { if (first) { first = false; entered.release(); await blocked.promise; } };
+  const stale = f.service.getJiraTicketLink(id);
+  await entered.promise;
+  f.currentBranch('APP-777-next');
+  const selecting = f.service.setReviewTicket(id, 'OPS-222');
+  blocked.release();
+  await stale; await selecting;
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'OPS-222');
+  assert.equal(f.state.ticketBranch(id), 'APP-777-next');
+});
+
+test('a Jira modal for a previous checkout cannot clear or replace the new branch ticket', async t => {
+  const f = await fixture(t);
+  const id = currentReviewId(f.project.id);
+  await f.service.setReviewTicket(id, 'OPS-111', 'APP-999-current');
+  f.currentBranch('APP-888-new');
+  for (const selection of [null, 'OPS-222', '']) {
+    await assert.rejects(() => f.service.setReviewTicket(id, selection, 'APP-999-current'), /checked-out branch changed/);
+  }
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'APP-888');
+  await f.service.setReviewTicket(id, 'OPS-222', 'APP-888-new');
+  assert.equal(f.state.ticketBranch(id), 'APP-888-new');
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'OPS-222');
+  f.currentBranch(null);
+  await assert.rejects(() => f.service.setReviewTicket(id, null, 'APP-888-new'), /checked-out branch changed/);
+  await f.service.setReviewTicket(id, 'OPS-333', null);
+  assert.equal(f.state.ticketBranch(id), '');
+  assert.equal((await f.service.getJiraTicketLink(id))?.key, 'OPS-333');
+  const inspections = f.calls.localInspections;
+  for (const context of [false, 123, {}, 'x'.repeat(1025), 'main\0']) {
+    await assert.rejects(() => f.service.setReviewTicket(id, null, context as string), /branch context is invalid/);
+  }
+  assert.equal(f.calls.localInspections, inspections);
+  const saved = await f.open();
+  await assert.rejects(() => f.service.setReviewTicket(saved.id, null, 'APP-888-new'), /only valid for the Current review/);
+});
+
+test('Current ticket inspection does not block local file markers', async t => {
+  const f = await fixture(t);
+  f.hooks.localSnapshot = async review => ({ reviewId: review.id, files: [structuredClone(file)], repos: [], warnings: [], fingerprint: 'local', refreshedAt: new Date().toISOString() });
+  const loaded = await f.service.setCurrentTarget(f.project.id, 'main');
+  await f.service.setReviewTicket(loaded.review.id, 'OPS-111');
+  const blocked = barrier(), entered = barrier();
+  t.after(() => blocked.release());
+  let first = true;
+  f.hooks.beforeInspect = async () => { if (first) { first = false; entered.release(); await blocked.promise; } };
+  const reading = f.service.getJiraTicketLink(loaded.review.id);
+  await entered.promise;
+  const marking = f.service.setApprovals(loaded.review.id, [{ fileId: file.id, fingerprint: file.fingerprint }], true, reviewContextKey(loaded.review));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const marked = await Promise.race([marking, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Jira inspection blocked marking a file.')), 1500); })]);
+    assert.equal(marked.approvals[file.id], file.fingerprint);
+  } finally { clearTimeout(timer); blocked.release(); }
+  await reading;
+});
+
 test('Jira browser links use the selected account and explicit ticket without requiring a usable API token', async t => {
   const f = await fixture(t); const review = await f.open();
   await f.reviews.updateSettings({ jiraBaseUrl: 'https://unrelated.atlassian.net' });
@@ -377,7 +547,7 @@ test('Jira browser links preserve legacy site paths and follow Current or an exp
   assert.equal(await f.service.getJiraTicketLink(id), null);
   await f.service.setReviewTicket(id, 'APP-321');
   assert.deepEqual(await f.service.getJiraTicketLink(id), { key: 'APP-321', url: 'http://jira.internal/jira/browse/APP-321' });
-  assert.equal(f.calls.localInspections, 2);
+  assert.equal(f.calls.localInspections, 4);
 });
 
 test('embedded Jira derives its session and ticket from the selected saved account without reading a token', async t => {
@@ -523,6 +693,10 @@ test('invalid nested persisted integration data is rejected without overwrite or
     (value: any) => { value.reviews[review.id].pullRequests[0].sourceHash = 'main'; },
     (value: any) => { value.projects[f.project.id].repositories[0].relativePath = '/absolute'; },
     (value: any) => { value.tickets[review.id] = { key: 'APP-123' }; },
+    (value: any) => { value.ticketBranches = []; },
+    (value: any) => { value.ticketBranches = { missing: 'main' }; },
+    (value: any) => { value.tickets[review.id] = null; value.ticketBranches = { [review.id]: null }; },
+    (value: any) => { value.tickets[review.id] = 'APP-123'; value.ticketBranches = { [review.id]: 'main\0' }; },
   ];
   for (const corrupt of corruptions) {
     const value = structuredClone(valid); corrupt(value); const content = JSON.stringify(value); await writeFile(f.statePath, content);

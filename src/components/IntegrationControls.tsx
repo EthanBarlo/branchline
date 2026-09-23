@@ -184,13 +184,19 @@ export function JiraDescription({ value }: { value: unknown }) {
   return <div className="jira-description">{typeof value === 'string' ? <p>{value}</p> : value ? render(value) : <p className="integration-note">No description provided.</p>}</div>;
 }
 
-export function JiraIssuePanel({ review, ticket, ticketView = 'website', refreshKey = '', onTicketChanged }: { review: Review; ticket: string | null; ticketView?: AppSettings['jiraTicketView']; refreshKey?: string; onTicketChanged?: () => void }) {
+export function JiraIssuePanel({ review, ticket, currentBranch, ticketView = 'website', refreshKey = '', onTicketChanged }: { review: Review; ticket: string | null; currentBranch?: string | null; ticketView?: AppSettings['jiraTicketView']; refreshKey?: string; onTicketChanged?: () => void }) {
   const [view, setView] = useState<'summary' | 'website' | null>(null);
   const [issue, setIssue] = useState<JiraIssue | null>(null);
   const [key, setKey] = useState(ticket || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const request = useRef(0);
+  const lastBranch = useRef(currentBranch);
+  useEffect(() => {
+    const previous = lastBranch.current;
+    lastBranch.current = currentBranch;
+    if (previous !== currentBranch && previous !== undefined && currentBranch !== undefined && view === 'summary') setView(null);
+  }, [currentBranch, view]);
   const load = useCallback(async () => {
     const generation = ++request.current;
     setLoading(true); setError('');
@@ -206,7 +212,7 @@ export function JiraIssuePanel({ review, ticket, ticketView = 'website', refresh
   }, [load, ticket, refreshKey, view]);
   async function changeTicket(event: React.FormEvent) {
     event.preventDefault(); setLoading(true); setError('');
-    try { await window.reviewAPI.setReviewTicket(review.id, key.trim()); onTicketChanged?.(); await load(); }
+    try { await window.reviewAPI.setReviewTicket(review.id, key.trim(), currentBranch); onTicketChanged?.(); await load(); }
     catch (reason) { setError(message(reason)); setLoading(false); }
   }
   const linkedTicket = issue?.key || ticket;
@@ -214,7 +220,7 @@ export function JiraIssuePanel({ review, ticket, ticketView = 'website', refresh
     <button className="button button-secondary integration-context-button jira-ticket-button" type="button" aria-label={`View Jira ticket${linkedTicket ? ` ${linkedTicket}` : ''}`} aria-haspopup="dialog" title={error ? `Jira ticket: ${error}` : issue?.title || 'View Jira ticket'} onClick={() => setView(ticketView === 'website' ? 'website' : 'summary')}>
       {loading ? <LoaderCircle size={12} className="spin" aria-hidden="true" /> : <Ticket size={13} aria-hidden="true" />}<span>{issue?.key || ticket || 'Jira ticket'}</span>{error && <TriangleAlert size={12} className="integration-context-warning" aria-label="Ticket unavailable" />}
     </button>
-    {view === 'website' && <JiraBrowserDialog reviewId={review.id} ticket={linkedTicket} onClose={() => setView(null)} onDetails={() => setView('summary')} onTicketChanged={() => { setIssue(null); onTicketChanged?.(); }} />}
+    {view === 'website' && <JiraBrowserDialog reviewId={review.id} ticket={linkedTicket} currentBranch={currentBranch} onClose={() => setView(null)} onDetails={() => setView('summary')} onTicketChanged={() => { setIssue(null); onTicketChanged?.(); }} />}
     {view === 'summary' && <IntegrationDialog title="Jira ticket" onClose={() => setView(null)}>
       <div className="integration-body jira-ticket-body">
         <form className="jira-ticket-form" onSubmit={event => void changeTicket(event)}><label htmlFor={`review-ticket-key-${review.id}`}>Ticket</label><input id={`review-ticket-key-${review.id}`} aria-label="Review ticket key" className="text-input" placeholder="APP-123" value={key} onChange={event => setKey(event.target.value)} disabled={loading} /><button type="submit" className="button button-secondary" disabled={loading}>Use ticket</button><button className="icon-button" type="button" aria-label="Refresh Jira ticket" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? 'spin' : ''} size={13} /></button></form>

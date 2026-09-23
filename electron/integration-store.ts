@@ -4,7 +4,7 @@ import type { ProjectIntegration, RemoteReviewChanged, RemoteReviewState } from 
 import { branchReviewKey, pullRequestKey } from '../shared/integrations';
 import { validRelativePath, validateRepositoryMappings } from './repository-mapping';
 
-interface StoredIntegrations { version: 1; projects: Record<string, ProjectIntegration>; reviews: Record<string, RemoteReviewState>; tickets: Record<string, string | null>; }
+interface StoredIntegrations { version: 1; projects: Record<string, ProjectIntegration>; reviews: Record<string, RemoteReviewState>; tickets: Record<string, string | null>; ticketBranches?: Record<string, string>; }
 const record = (x: unknown): x is Record<string, any> => !!x && typeof x === 'object' && !Array.isArray(x);
 const identifier = (id: string) => { if (typeof id !== 'string' || !id || ['__proto__', 'prototype', 'constructor'].includes(id)) throw new Error('Invalid integration identifier.'); };
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -115,6 +115,13 @@ function validateState(value: unknown): asserts value is StoredIntegrations {
     }
   }
   require(Object.values(data.tickets).every(value => value === null || ticket(value)));
+  if (data.ticketBranches !== undefined) {
+    require(record(data.ticketBranches));
+    for (const [id, branch] of Object.entries(data.ticketBranches)) {
+      identifier(id);
+      require(Object.hasOwn(data.tickets, id) && string(branch) && branch.length <= 1024 && !branch.includes('\0'));
+    }
+  }
 }
 
 /** Credentials live in a separate encrypted store. Writes become visible only after rename. */
@@ -161,6 +168,7 @@ export class IntegrationStore {
   project(id: string): ProjectIntegration { identifier(id); return structuredClone(this.state.projects[id] ?? { repositories: [], updateSubmodulePointers: false }); }
   review(id: string): RemoteReviewState | null { identifier(id); return structuredClone(this.state.reviews[id] ?? null); }
   ticket(id: string): string | null | undefined { identifier(id); return this.state.tickets[id]; }
+  ticketBranch(id: string): string | undefined { identifier(id); return this.state.ticketBranches?.[id]; }
   onReviewChanged(callback: (event: RemoteReviewChanged) => void): () => void {
     this.reviewListeners.add(callback);
     return () => { this.reviewListeners.delete(callback); };
@@ -192,15 +200,23 @@ export class IntegrationStore {
   updateReview(id: string, fn: (value: RemoteReviewState) => void): Promise<RemoteReviewState> {
     identifier(id); return this.write(next => { const review = next.reviews[id]; if (!review) throw new Error('This remote review is unavailable.'); fn(review); return review; }, id);
   }
-  setTicket(id: string, key: string | null): Promise<void> { identifier(id); return this.write(next => { if (key === '') delete next.tickets[id]; else next.tickets[id] = key; }); }
-  removeReview(id: string): Promise<void> { identifier(id); return this.write(next => { delete next.reviews[id]; delete next.tickets[id]; }); }
+  setTicket(id: string, key: string | null, branch?: string): Promise<void> {
+    identifier(id);
+    return this.write(next => {
+      if (key === '') delete next.tickets[id]; else next.tickets[id] = key;
+      if (key !== '' && branch !== undefined) (next.ticketBranches ??= {})[id] = branch;
+      else delete next.ticketBranches?.[id];
+    });
+  }
+  removeReview(id: string): Promise<void> { identifier(id); return this.write(next => { delete next.reviews[id]; delete next.tickets[id]; delete next.ticketBranches?.[id]; }); }
   async removeOrphanedReviews(reviewIds: string[]): Promise<void> {
     const active = new Set(reviewIds);
     if (![...Object.keys(this.state.reviews), ...Object.keys(this.state.tickets)].some(id => !active.has(id))) return;
     await this.write(next => {
       for (const id of Object.keys(next.reviews)) if (!active.has(id)) delete next.reviews[id];
       for (const id of Object.keys(next.tickets)) if (!active.has(id)) delete next.tickets[id];
+      for (const id of Object.keys(next.ticketBranches ?? {})) if (!active.has(id)) delete next.ticketBranches?.[id];
     });
   }
-  removeProject(id: string, reviewIds: string[]): Promise<void> { identifier(id); reviewIds.forEach(identifier); return this.write(next => { delete next.projects[id]; for (const reviewId of reviewIds) { delete next.reviews[reviewId]; delete next.tickets[reviewId]; } }); }
+  removeProject(id: string, reviewIds: string[]): Promise<void> { identifier(id); reviewIds.forEach(identifier); return this.write(next => { delete next.projects[id]; for (const reviewId of reviewIds) { delete next.reviews[reviewId]; delete next.tickets[reviewId]; delete next.ticketBranches?.[reviewId]; } }); }
 }

@@ -124,7 +124,7 @@ export interface IntegrationAPI {
   closeJiraBrowser(id: string): Promise<boolean>;
   onJiraBrowserClosed(callback: (id: string) => void): () => void;
   onJiraBrowserClearTicket(callback: (id: string) => void): () => void;
-  setReviewTicket(reviewId: string, key: string | null): Promise<void>;
+  setReviewTicket(reviewId: string, key: string | null, expectedBranch?: string | null): Promise<void>;
   previewFeedback(reviewId: string): Promise<FeedbackPreview>;
   publishFeedback(reviewId: string): Promise<RemoteReviewState>;
   reanchorComment(reviewId: string, commentId: string, input: ReanchorInput): Promise<Review>;

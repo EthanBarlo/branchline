@@ -29,6 +29,8 @@ export interface IntegrationDependencies {
 
 export class IntegrationService {
   private pending = new Map<string, Promise<unknown>>();
+  private ticketChanges = new Map<string, Promise<unknown>>();
+  private legacyTicketBranches = new Map<string, string>();
   private localRefreshes = new Map<string, Set<Promise<unknown>>>();
   private connectionChange: Promise<unknown> | null = null;
   private snapshots = new Map<string, ReviewSnapshot>();
@@ -47,6 +49,9 @@ export class IntegrationService {
   constructor(private readonly reviews: ReviewStore, private readonly reviewService: ReviewService,
     private readonly state: IntegrationStore, private readonly connections: ConnectionManager,
     pointers: PointerService, private readonly dependencies: IntegrationDependencies = {}) {
+    for (const review of reviews.getState().reviews) {
+      if (review.kind === 'current' && state.ticket(review.id) !== undefined && state.ticketBranch(review.id) === undefined) this.legacyTicketBranches.set(review.id, review.featureBranch);
+    }
     this.client = dependencies.client ?? (id => {
       const credentials = this.connections.credentials(id);
       if (credentials.info.kind !== 'bitbucket') throw new Error('Select a Bitbucket connection.');
@@ -86,6 +91,15 @@ export class IntegrationService {
     };
     void operation.then(cleanup, cleanup);
     return operation;
+  }
+  private serialTicket<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    return this.trackLocalRefresh(id, () => {
+      const operation = (this.ticketChanges.get(id) ?? Promise.resolve()).catch(() => undefined).then(fn);
+      this.ticketChanges.set(id, operation);
+      const cleanup = () => { if (this.ticketChanges.get(id) === operation) this.ticketChanges.delete(id); };
+      void operation.then(cleanup, cleanup);
+      return operation;
+    });
   }
   get busy(): boolean { return this.pending.size > 0 || this.localRefreshes.size > 0 || this.connectionChange !== null; }
   async idle(): Promise<void> {
@@ -294,10 +308,21 @@ export class IntegrationService {
     }
   }
   setCurrentTarget(projectId: string, target: string) {
-    return this.trackLocalRefresh(currentReviewId(projectId), () => this.reviewService.setCurrentTarget(projectId, target));
+    const id = currentReviewId(projectId);
+    return this.trackLocalRefresh(id, async () => {
+      await this.reconcileCurrentTicket(id);
+      const result = await this.reviewService.setCurrentTarget(projectId, target);
+      await this.reconcileCurrentTicket(id);
+      return result;
+    });
   }
   async refreshReview(id: string) {
-    if (!this.reviews.getReview(id).remote) return this.trackLocalRefresh(id, () => this.reviewService.refreshReview(id));
+    if (!this.reviews.getReview(id).remote) return this.trackLocalRefresh(id, async () => {
+      await this.reconcileCurrentTicket(id);
+      const result = await this.reviewService.refreshReview(id);
+      await this.reconcileCurrentTicket(id);
+      return result;
+    });
     const existing = this.remoteRefreshes.get(id);
     if (existing) {
       const progress = this.loadProgress.get(id), snapshot = this.snapshots.get(id);
@@ -558,11 +583,44 @@ export class IntegrationService {
     if (this.state.project(review.projectId).jiraConnectionId !== connectionId) throw new Error('The Jira connection changed. Search again.');
     return result;
   }
-  async setReviewTicket(id: string, key: string | null) {
-    this.reviews.getReview(id);
-    if (key === null) { await this.state.setTicket(id, null); return; }
-    if (typeof key !== 'string' || (key.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key.trim()))) throw new Error('Enter a Jira issue key such as APP-123.');
-    await this.state.setTicket(id, key.trim().toUpperCase());
+  private currentTicket(id: string) {
+    return this.serialTicket(id, async () => {
+      const review = this.reviews.getReview(id);
+      const branch = (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch ?? '';
+      let key = this.state.ticket(id);
+      if (key !== undefined) {
+        // Older selections belong to the last checkout saved with Current.
+        const selectedBranch = this.state.ticketBranch(id) ?? this.legacyTicketBranches.get(id) ?? review.featureBranch;
+        if (selectedBranch !== branch) { await this.state.setTicket(id, ''); key = undefined; }
+        else if (this.state.ticketBranch(id) === undefined) await this.state.setTicket(id, key, branch);
+        this.legacyTicketBranches.delete(id);
+      }
+      return { key, branch };
+    });
+  }
+  private async reconcileCurrentTicket(id: string): Promise<void> {
+    if (this.reviews.getReview(id).kind === 'current' && this.state.ticket(id) !== undefined) await this.currentTicket(id);
+  }
+  private async jiraTicketKey(review: Review): Promise<string | null> {
+    const { key, branch } = review.kind === 'current' ? await this.currentTicket(review.id) : { key: this.state.ticket(review.id), branch: review.featureBranch };
+    return key === undefined ? extractJiraTicketKey(branch) : key;
+  }
+  async setReviewTicket(id: string, key: string | null, expectedBranch?: string | null) {
+    const review = this.reviews.getReview(id);
+    if (key !== null && (typeof key !== 'string' || (key.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key.trim())))) throw new Error('Enter a Jira issue key such as APP-123.');
+    if (expectedBranch !== undefined && expectedBranch !== null && (typeof expectedBranch !== 'string' || expectedBranch.length > 1024 || expectedBranch.includes('\0'))) throw new Error('The Jira ticket branch context is invalid.');
+    const value = key === null ? null : key.trim().toUpperCase();
+    if (review.kind !== 'current') {
+      if (expectedBranch !== undefined) throw new Error('A Jira ticket branch context is only valid for the Current review.');
+      await this.state.setTicket(id, value); return;
+    }
+    await this.serialTicket(id, async () => {
+      const current = this.reviews.getReview(id);
+      const branch = (await (this.dependencies.inspect ?? inspectRepo)(current.repoPath)).currentBranch ?? '';
+      if (expectedBranch !== undefined && (expectedBranch ?? '') !== branch) throw new Error('The checked-out branch changed. Reopen Jira before changing its ticket.');
+      await this.state.setTicket(id, value, branch);
+      this.legacyTicketBranches.delete(id);
+    });
   }
   /** Browser navigation uses saved site metadata, so it remains available during a merge or after token expiry. */
   async getJiraTicketLink(id: string): Promise<{ key: string; url: string } | null> {
@@ -572,11 +630,7 @@ export class IntegrationService {
     if (project.jiraConnectionId && !connection?.siteUrl) throw new Error('The project’s Jira account is unavailable. Choose its Jira connection in Project integrations.');
     const baseUrl = connection?.siteUrl || this.reviews.getSettings().jiraBaseUrl;
     if (!baseUrl) return null;
-    let key = this.state.ticket(id);
-    if (key === undefined) {
-      const branch = review.kind === 'current' ? (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch : review.featureBranch;
-      key = extractJiraTicketKey(branch ?? '') ?? undefined;
-    }
+    const key = await this.jiraTicketKey(review);
     return key ? { key: key.toUpperCase(), url: jiraTicketUrl(baseUrl, key) } : null;
   }
   async getJiraBrowserTarget(id: string): Promise<JiraBrowserTarget> {
@@ -596,11 +650,8 @@ export class IntegrationService {
     const review = this.reviews.getReview(id);
     const settings = this.state.project(review.projectId);
     if (!settings.jiraConnectionId) throw new Error('Choose a Jira connection in project integrations.');
-    let key = override || this.state.ticket(id);
-    if (key === undefined) {
-      const branch = review.kind === 'current' ? (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch : review.featureBranch;
-      key = extractJiraTicketKey(branch ?? '') ?? undefined;
-    }
+    const detected = await this.jiraTicketKey(review);
+    const key = override || detected;
     if (!key || !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key)) throw new Error('Enter a Jira ticket key to show its details.');
     return this.connections.getIssue(settings.jiraConnectionId, key.toUpperCase());
   }); }
@@ -625,12 +676,12 @@ export class IntegrationService {
     return result;
   }
   private forgetReview(id: string) {
-    this.snapshots.delete(id); this.loadProgress.delete(id); this.failedLoads.delete(id);
+    this.snapshots.delete(id); this.loadProgress.delete(id); this.failedLoads.delete(id); this.legacyTicketBranches.delete(id);
   }
   async deleteProject(id: string) {
     if (this.busy) throw new Error('Wait for current integration work before removing a project.');
     const reviewIds = this.reviews.getState().reviews.filter(r => r.projectId === id).map(r => r.id);
     if (reviewIds.some(reviewId => { const op = this.state.review(reviewId)?.operation; return op && op.state !== 'complete'; })) throw new Error('Complete the project’s pending PR operations before removing it.');
-    const result = await this.reviewService.deleteProject(id); await this.state.removeProject(id, reviewIds); reviewIds.forEach(id => { this.snapshots.delete(id); this.loadProgress.delete(id); this.failedLoads.delete(id); }); return result;
+    const result = await this.reviewService.deleteProject(id); await this.state.removeProject(id, reviewIds); reviewIds.forEach(id => this.forgetReview(id)); return result;
   }
 }

@@ -90,8 +90,9 @@
 .jira-description td, .jira-description th { padding: 7px 11px; border: 1px solid #414141; text-align: left; }
 .jira-description .integration-link { color: #dfdfdf; text-decoration: underline; }
 .modal-backdrop.jira-browser-backdrop { padding: 24px; animation: none; }
-.modal.jira-browser-modal { display: flex; flex-direction: column; width: min(1600px, 100%); height: calc(100dvh - 48px); max-height: none; overflow: hidden; border-radius: 7px; }
-.modal.jira-browser-picker { width: 520px; height: auto; max-height: calc(100dvh - 48px); overflow: visible; border-radius: 11px; }
+/* Leave room above the full Jira view for the native window controls. */
+.modal.jira-browser-modal { display: flex; flex-direction: column; width: min(1600px, 100%); height: calc(100dvh - 72px); margin-top: 24px; max-height: none; overflow: hidden; border-radius: 7px; }
+.modal.jira-browser-picker { width: 520px; height: auto; margin-top: 0; max-height: calc(100dvh - 48px); overflow: visible; border-radius: 11px; }
 .jira-browser-picker .jira-browser-surface { display: none; }
 .jira-browser-picker .modal-footer { border-radius: 0 0 11px 11px; }
 .jira-browser-picker .modal-header h2 { font-size: 24px; }
