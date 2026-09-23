@@ -1,5 +1,5 @@
 import type { UpdateAPI } from './updates';
-import type { IntegrationAPI } from './integrations';
+import type { ClosedReviewCheck, IntegrationAPI } from './integrations';
 
 export type DiffSide = 'additions' | 'deletions';
 export type FileStatus = 'A' | 'M' | 'D' | 'R' | 'T';
@@ -103,6 +103,7 @@ export interface ReviewRefresh {
   snapshot: ReviewSnapshot;
   inspection?: RepoInspection;
   requiresTarget?: boolean;
+  closedReview?: ClosedReviewCheck;
 }
 
 export interface AppSettings { jiraBaseUrl: string }

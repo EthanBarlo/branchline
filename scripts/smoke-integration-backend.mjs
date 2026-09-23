@@ -229,7 +229,7 @@ try {
   await page.reload();
   const reviewPicker = page.getByRole('combobox', { name: 'Select review', exact: true });
   const openCheck = await page.evaluate(id => window.reviewAPI.checkClosedReview(id), setup.review.id);
-  assert.equal(openCheck.status, 'blocked', 'Branch-only work without a PR must remain available for review.');
+  assert.equal(openCheck.status, 'open', 'A group with an open PR must remain available for review.');
   const counters = () => desktop.evaluate(() => ({ requests: globalThis.providerSmoke.requests.length, git: globalThis.providerSmoke.git.length }));
   await reviewPicker.waitFor();
   const beforeOpen = await counters();
@@ -370,16 +370,18 @@ try {
   await desktop.evaluate(() => { globalThis.providerSmoke.invalidPullRequest = false; });
   const cleanupStart = await desktop.evaluate(() => ({ requests: globalThis.providerSmoke.requests.length, git: globalThis.providerSmoke.git.length }));
   const removed = await page.evaluate(async ({ id, projectId }) => {
+    const refreshed = await window.reviewAPI.refreshReview(id);
     const check = await window.reviewAPI.checkClosedReview(id);
-    const cleanup = await window.reviewAPI.removeClosedReviews(projectId, [id]);
-    const retry = await window.reviewAPI.removeClosedReviews(projectId, [id]);
+    const cleanup = await window.reviewAPI.removeClosedReviews(projectId, [id], { automatic: true });
+    const retry = await window.reviewAPI.removeClosedReviews(projectId, [id], { automatic: true });
     const first = cleanup.state;
     const again = await window.reviewAPI.completeMergedReview(id);
     let missingReviewError;
     try { await window.reviewAPI.getRemoteReview(id); } catch (error) { missingReviewError = error.message; }
-    return { first, again, check, cleanup, retry, missingReviewError };
+    return { first, again, check, cleanup, retry, missingReviewError, candidate: refreshed.closedReview };
   }, { id: result.review.id, projectId: result.project.id });
   assert.equal(removed.check.status, 'closed');
+  assert.equal(removed.candidate.status, 'closed', 'A final remote refresh proposes automatic retirement after every repository is verified complete.');
   assert.deepEqual(removed.cleanup.removedIds, [result.review.id]);
   assert.deepEqual(removed.cleanup.retained, []);
   assert.deepEqual(removed.retry, removed.cleanup, 'Closed-review removal IPC is safe to retry.');

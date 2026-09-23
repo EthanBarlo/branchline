@@ -12,6 +12,7 @@ const sameRepository = (a: RepositoryMapping, b: RepositoryMapping) => a.relativ
   && a.workspace.toLowerCase() === b.workspace.toLowerCase() && a.repoSlug.toLowerCase() === b.repoSlug.toLowerCase()
   && (!a.uuid || !b.uuid || a.uuid === b.uuid);
 const rejected = (error: unknown) => { const status = (error as { status?: number })?.status; return !!status && status >= 400 && status < 500 && status !== 408; };
+const closedStates = ['MERGED', 'DECLINED', 'SUPERSEDED'];
 
 export interface BranchDiscoveryOptions {
   onStart?: (repositories: RepositoryMapping[]) => Promise<void>;
@@ -38,15 +39,15 @@ export class BranchReviewService {
     return [...configured, ...previous.filter(repo => !configured.some(value => value.relativePath === repo.relativePath))];
   }
 
-  private async mergedComparison(client: BitbucketClient, row: BranchReviewRepository, pr: PullRequest): Promise<{ row: BranchReviewRepository; pr: PullRequest }> {
+  private async closedComparison(client: BitbucketClient, row: BranchReviewRepository, pr: PullRequest): Promise<{ row: BranchReviewRepository; pr: PullRequest }> {
     if (!sameRepository(row.repository, pr.repository) || pr.sourceBranch !== row.sourceBranch || pr.targetBranch !== row.targetBranch || pr.unsupportedReason) {
-      throw new Error('The merged PR no longer matches this repository and branch comparison.');
+      throw new Error('The closed PR no longer matches this repository and branch comparison.');
     }
     // Keep the reviewed diff available after the source branch is deleted.
     const targetHash = row.targetHash ?? pr.targetHash;
     const captured = { ...pr, targetHash,
       mergeBaseHash: pr.sourceHash === row.sourceHash && row.mergeBaseHash ? row.mergeBaseHash : await client.mergeBase(row.repository, pr.sourceHash, targetHash) };
-    return { row: { ...row, status: 'pull-request', prId: pr.id, sourceHash: captured.sourceHash, targetHash, mergeBaseHash: captured.mergeBaseHash }, pr: captured };
+    return { row: { ...row, status: 'pull-request', prId: pr.id, sourceHash: captured.sourceHash, targetHash, mergeBaseHash: captured.mergeBaseHash, creation: undefined }, pr: captured };
   }
 
   private async inspect(client: BitbucketClient, initial: BranchReviewRepository, linked?: PullRequest): Promise<{ row: BranchReviewRepository; pr?: PullRequest }> {
@@ -58,23 +59,33 @@ export class BranchReviewService {
     if (pr && (!sameRepository(repository, pr.repository) || pr.sourceBranch !== sourceBranch || pr.targetBranch !== targetBranch || pr.unsupportedReason)) {
       throw new Error('The linked PR no longer matches this repository and branch comparison.');
     }
-    if (pr?.state === 'MERGED') return this.mergedComparison(client, row, pr);
+    if (pr && closedStates.includes(pr.state)) return this.closedComparison(client, row, pr);
     if (pr && pr.state !== 'OPEN') throw new Error(`PR #${pr.id} is ${pr.state.toLowerCase()}. Resolve it in Bitbucket before continuing.`);
     const candidates = await client.findPullRequests(repository, sourceBranch);
     if (candidates.some(value => value.unsupportedReason || value.targetBranch !== targetBranch)) throw new Error('An open PR for this source branch has a different target or source repository. Resolve that PR in Bitbucket before continuing.');
     if (candidates.length > 1 || pr && candidates.some(value => value.id !== pr.id)) throw new Error('Multiple open PRs use this branch. Resolve the duplicate PRs in Bitbucket before continuing.');
     const found = pr ?? candidates[0];
     const [source, target] = await Promise.all([client.getBranch(repository, sourceBranch), client.getBranch(repository, targetBranch)]);
-    if (!target) throw new Error(`Target branch “${targetBranch}” is missing. Configure or restore it before continuing.`);
+    if (!found) {
+      const expectedSource = source?.hash ?? row.sourceHash ?? row.creation?.sourceHash;
+      const closed = (expectedSource ? await client.findPullRequests(repository, sourceBranch, closedStates) : [])
+        .filter(value => sameRepository(repository, value.repository) && !value.unsupportedReason && value.sourceBranch === sourceBranch
+          && value.targetBranch === targetBranch && value.sourceHash === expectedSource);
+      if (closed.length > 1) throw new Error('Multiple closed PRs match the captured branch changes. Open the correct PR in Bitbucket and reopen its review to resolve the ambiguous history.');
+      if (closed[0]) return this.closedComparison(client, row, closed[0]);
+    }
     if (!source) {
       if (found) {
         // Another reviewer may have merged and deleted it during these reads.
         const latest = await client.getPullRequest(repository, found.id);
-        if (latest.state === 'MERGED') return this.mergedComparison(client, row, latest);
+        if (closedStates.includes(latest.state)) return this.closedComparison(client, row, latest);
         throw new Error(`Source branch “${sourceBranch}” is missing for PR #${found.id}, which is still ${latest.state.toLowerCase()}. Restore the branch or resolve the PR in Bitbucket, then refresh this review. Branchline will not skip unmerged changes.`);
       }
-      return { row: { ...row, status: 'missing-branch', sourceHash: undefined, mergeBaseHash: undefined, targetHash: target.hash, prId: undefined } };
+      if (['sending', 'unknown'].includes(row.creation?.state ?? '')) throw new Error('PR creation is still unconfirmed. Check its result in Bitbucket before continuing, even if the source branch is now missing.');
+      if (row.sourceHash && row.sourceHash !== row.mergeBaseHash) throw new Error(`Source branch “${sourceBranch}” is missing, but this review contains changes without a matching closed PR. Restore the branch or confirm its PR in Bitbucket before continuing.`);
+      return { row: { ...row, status: 'missing-branch', targetHash: target?.hash, prId: undefined } };
     }
+    if (!target) throw new Error(`Target branch “${targetBranch}” is missing. Configure or restore it before continuing.`);
     const mergeBaseHash = await client.mergeBase(repository, source.hash, target.hash);
     if (found && (found.sourceHash !== source.hash || found.targetHash !== target.hash)) throw new Error('The branch changed while checking its PR. Refresh to load a consistent revision.');
     return { row: { ...row, sourceHash: source.hash, targetHash: target.hash, mergeBaseHash,
@@ -165,6 +176,7 @@ export class BranchReviewService {
           if (source && source.hash !== row.sourceHash) throw new Error('The source branch changed after its PR was merged. Reopen the branch from Pull requests to review that new work. The completed PR will not merge or delete it.');
           return;
         }
+        if (result.pr && closedStates.includes(result.pr.state)) throw new Error(`PR #${result.pr.id} is ${result.pr.state.toLowerCase()} and cannot be merged. Refresh to reconcile this closed review.`);
         const actual = result.row;
         if (actual.sourceHash !== row.sourceHash || actual.targetHash !== row.targetHash || actual.mergeBaseHash !== row.mergeBaseHash
           || (actual.status === 'missing-branch') !== (row.status === 'missing-branch')) {

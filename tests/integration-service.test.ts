@@ -855,7 +855,7 @@ test('closed-review cleanup preserves incomplete merge, approval, pointer and br
     assert.equal(check.status, 'blocked'); assert.match(check.reason!, /unfinished.*resume or reconcile/);
     assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id])).removedIds, []);
   }
-  assert.equal(f.calls.prs.length, reads);
+  assert.ok(f.calls.prs.length > reads, 'Paused operations are reconciled against remote state before retaining them.');
   await f.state.setReview(review.id, clean);
   assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
 });
@@ -953,4 +953,110 @@ test('closed-review checking locks account and project settings and rejects over
   await assert.rejects(() => f.service.configureProjectIntegration(f.project.id, f.settings), /current review operation/);
   release(); assert.equal((await checking).status, 'closed');
   assert.equal(f.reviews.getReview(review.id).id, review.id);
+});
+
+test('closed-review cleanup reconciles missing targets and externally merged branch-only work using exact closed PRs', async t => {
+  const f = await fixture(t), review = await f.open();
+  for (const value of f.live.values()) value.state = 'MERGED';
+  const empty: RepositoryMapping = { relativePath: 'empty', workspace: 'team', repoSlug: 'empty' };
+  await f.state.updateReview(review.id, binding => {
+    binding.repositories = [root, child, empty].map(repository => ({ repository, sourceBranch: review.featureBranch, targetBranch: review.baseBranch,
+      sourceHash: hash('a'), targetHash: hash('b'), mergeBaseHash: repository === empty ? hash('a') : hash('c'),
+      status: 'unavailable', error: 'Target branch missing', ...(repository === root ? { prId: 7 } : {}) }));
+  });
+  f.client.getBranch = async () => null;
+  const checked = await f.service.checkClosedReview(review.id);
+  assert.equal(checked.status, 'closed');
+  assert.deepEqual(checked.pullRequests.map(value => value.id), [7, 8]);
+  const removed = await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true });
+  assert.deepEqual(removed.removedIds, [review.id]);
+  assert.equal(f.calls.localSnapshots, 0); assert.equal(f.calls.localInspections, 0);
+  assert.equal(f.sent.length, 0); assert.deepEqual(f.comments, []);
+});
+
+test('automatic cleanup keeps deleted branch-only work until a matching closure or remote ancestry proves completion', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  await f.state.updateReview(review.id, binding => {
+    binding.repositories = [{ repository: child, sourceBranch: review.featureBranch, targetBranch: review.baseBranch,
+      sourceHash: hash('a'), targetHash: hash('b'), mergeBaseHash: hash('c'), status: 'unavailable', error: 'Branch missing' }];
+  });
+  f.client.getBranch = async () => null;
+  // An open PR remains unfinished even if its source branch was deleted.
+  assert.equal((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).retained[0].status, 'blocked');
+  f.live.get(`${child.relativePath}#8`)!.state = 'MERGED';
+  f.live.get(`${child.relativePath}#8`)!.sourceHash = hash('d');
+  assert.match((await f.service.checkClosedReview(review.id)).reason!, /captured changes have not been confirmed merged/);
+  f.hooks.listError = new ProviderError('Permission denied', 403);
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'unavailable');
+  f.hooks.listError = undefined;
+  f.client.getBranch = async (_repo, name) => name === review.baseBranch ? { name, hash: hash('e') } : null;
+  f.client.mergeBase = async (_repo, source, target) => { assert.equal(source, hash('a')); assert.equal(target, hash('e')); return source; };
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).removedIds, [review.id]);
+});
+
+test('a recreated source branch keeps a closed PR review even when cleanup previously recorded deletion', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  await f.state.updateReview(review.id, binding => {
+    binding.repositories = [{ repository: root, sourceBranch: review.featureBranch, targetBranch: review.baseBranch,
+      sourceHash: hash('a'), targetHash: hash('b'), mergeBaseHash: hash('c'), status: 'pull-request', prId: 7, cleanup: { state: 'deleted' } }];
+  });
+  f.client.getBranch = async (_repo, name) => ({ name, hash: hash('e') });
+  const result = await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true });
+  assert.deepEqual(result.removedIds, []); assert.match(result.retained[0].reason!, /different revision/);
+});
+
+test('refresh proposes automatic retirement without deleting drafts accepted before final removal', async t => {
+  const f = await fixture(t);
+  await f.service.configureProjectIntegration(f.project.id, { ...f.settings, repositories: [root] });
+  const review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  f.client.getBranch = async () => null;
+  const refreshed = await f.service.refreshReview(review.id);
+  assert.equal(refreshed.closedReview?.status, 'closed');
+  assert.equal(f.reviews.getReview(review.id).id, review.id, 'Refresh only proposes retirement so the renderer can flush pending feedback.');
+  const withDraft = await f.service.addComment(review.id, { fileId: file.id, repoRelativePath: '.', path: file.path, side: 'additions',
+    lineStart: 1, lineEnd: 1, body: 'Do not discard this pending draft', context: 'new', fingerprint: file.fingerprint });
+  const retained = await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true });
+  assert.deepEqual(retained.removedIds, []); assert.match(retained.retained[0].reason!, /unpublished feedback/);
+  assert.equal((await f.service.refreshReview(review.id)).closedReview?.status, 'blocked');
+  await f.service.deleteComment(review.id, withDraft.comments[0].id);
+  const removed = await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true });
+  assert.deepEqual(removed.removedIds, [review.id]);
+  assert.equal(f.state.review(review.id), null);
+});
+
+test('automatic retirement rechecks reopened PRs and can reconcile paused cleanup after every branch disappears', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  const remote = await completedMerge(f, review.id);
+  remote.operation!.state = 'paused'; remote.operation!.items[0].cleanup = 'unknown';
+  remote.repositories = [{ repository: root, sourceBranch: review.featureBranch, targetBranch: review.baseBranch,
+    sourceHash: hash('a'), targetHash: hash('b'), mergeBaseHash: hash('c'), status: 'pull-request', prId: 7, cleanup: { state: 'unknown' } }];
+  await f.state.setReview(review.id, remote);
+  f.client.getBranch = async () => null;
+  assert.equal((await f.service.checkClosedReview(review.id)).status, 'closed');
+  f.live.get('.#7')!.state = 'OPEN';
+  assert.equal((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).retained[0].status, 'open');
+  f.live.get('.#7')!.state = 'MERGED';
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).removedIds, [review.id]);
+});
+
+test('automatic retirement keeps a replacement open PR even when its source hash matches the closed PR', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'DECLINED';
+  f.live.set('.#9', pr(root, 9));
+  const result = await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true });
+  assert.deepEqual(result.removedIds, []);
+  assert.match(result.retained[0].reason!, /PR for this branch is still open/);
+  assert.equal(f.reviews.getReview(review.id).id, review.id);
+});
+
+test('stale open-list entries cannot keep a freshly confirmed closed PR active forever', async t => {
+  const f = await fixture(t), review = await f.open();
+  f.live.get('.#7')!.state = 'MERGED';
+  f.client.findPullRequests = async () => [pr()];
+  f.client.getBranch = async () => null;
+  assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).removedIds, [review.id]);
 });

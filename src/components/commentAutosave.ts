@@ -56,6 +56,14 @@ export async function flushPendingComments(): Promise<void> {
   if (failure) throw failure.reason;
 }
 
+export function hasReviewCommentBackups(reviewId: string): boolean {
+  const prefix = `${PREFIX}${encodeURIComponent(`${reviewId}:`)}`;
+  for (let index = 0; index < localStorage.length; index++) {
+    if (localStorage.key(index)?.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
 export function loadCommentBackups(scope: string, fileId: string): CommentBackup[] {
   const prefix = storagePrefix(scope, fileId);
   const result: CommentBackup[] = [];

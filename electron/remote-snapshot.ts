@@ -84,9 +84,10 @@ async function buildRemoteSnapshotPart(client: BitbucketClient, reviewId: string
     try {
       if (row.status === 'unavailable') throw new Error(row.error || 'This repository could not be compared. Refresh to retry.');
       if (row.status === 'missing-branch') {
+        await client.getRepository(row.repository);
         const [source, target] = await Promise.all([client.getBranch(row.repository, row.sourceBranch), client.getBranch(row.repository, row.targetBranch)]);
         if (source) throw new Error('The source branch appeared while loading. Refresh to review its changes.');
-        if (!target || row.targetHash && target.hash !== row.targetHash) throw new Error('The target branch is unavailable or changed while loading. Refresh to retry.');
+        if (target?.hash !== row.targetHash) throw new Error('The target branch is unavailable or changed while loading. Refresh to retry.');
         warnings.push(`${relativePath}: Source branch ${row.sourceBranch} does not exist in this repository.`);
         continue;
       }
@@ -94,7 +95,8 @@ async function buildRemoteSnapshotPart(client: BitbucketClient, reviewId: string
         // Discovery just captured this PR. Reuse those immutable identities and check live
         // revisions once after downloading instead of fetching the same detail twice.
         const latest = repositories ? initial : await client.getPullRequest(initial.repository, initial.id);
-        if (repositories && latest.state !== 'MERGED' && (latest.sourceHash !== row.sourceHash || latest.targetHash !== row.targetHash || latest.sourceBranch !== row.sourceBranch || latest.targetBranch !== row.targetBranch)) throw new Error('The pull request changed while loading. Refresh to review its latest revision.');
+        if (repositories && (latest.sourceHash !== row.sourceHash || latest.sourceBranch !== row.sourceBranch || latest.targetBranch !== row.targetBranch
+          || !['MERGED', 'DECLINED', 'SUPERSEDED'].includes(latest.state) && latest.targetHash !== row.targetHash)) throw new Error('The pull request changed while loading. Refresh to review its latest revision.');
         pr = repositories ? { ...latest, sourceBranch: row.sourceBranch, targetBranch: row.targetBranch, sourceHash: row.sourceHash!, targetHash: row.targetHash! } : latest;
         row.sourceHash = pr.sourceHash; row.targetHash = pr.targetHash;
       } else if (row.prId !== undefined) throw new Error('The captured pull request is missing from this review.');
@@ -139,12 +141,14 @@ async function buildRemoteSnapshotPart(client: BitbucketClient, reviewId: string
       });
       if (pr) {
         const after = await client.getPullRequest(pr.repository, pr.id);
-        if (!(repositories && pr.state === 'MERGED' && after.state === 'MERGED') && (after.sourceHash !== sourceHash || after.targetHash !== targetHash || after.sourceBranch !== pr.sourceBranch || after.targetBranch !== pr.targetBranch)) throw new Error('The pull request changed while loading. Refresh to review its latest revision.');
+        const historical = repositories && ['MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state) && after.state === pr.state;
+        if (after.id !== pr.id || after.sourceHash !== sourceHash || after.sourceBranch !== pr.sourceBranch || after.targetBranch !== pr.targetBranch
+          || !historical && after.targetHash !== targetHash) throw new Error('The pull request changed while loading. Refresh to review its latest revision.');
         pr = { ...pr, state: after.state, draft: after.draft, participants: after.participants, mergeCommit: after.mergeCommit };
       }
       // Even repositories without changes participate in the final revision check.
-      // Historical merged PRs remain readable after their source branch is deleted.
-      if (repositories && pr?.state !== 'MERGED') {
+      // Closed PRs remain readable after their source and target branches are deleted.
+      if (repositories && (!pr || !['MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state))) {
         const [source, target] = await Promise.all([client.getBranch(row.repository, row.sourceBranch), client.getBranch(row.repository, row.targetBranch)]);
         if (!source || !target || source.hash !== sourceHash || target.hash !== targetHash) throw new Error('The branch changed or disappeared while loading. Refresh to review its latest revision.');
       }

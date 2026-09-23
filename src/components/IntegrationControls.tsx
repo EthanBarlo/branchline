@@ -251,7 +251,10 @@ function repositoryRows(pullRequests: PullRequest[], repositories?: BranchReview
   });
 }
 
-function branchStatus(row: BranchReviewRepository) {
+function branchStatus(row: BranchReviewRepository, pr?: PullRequest) {
+  if (pr?.state === 'MERGED') return { label: 'Merged', tone: 'complete', icon: Check };
+  if (pr?.state === 'DECLINED') return { label: 'Declined', tone: 'waiting', icon: SkipForward };
+  if (pr?.state === 'SUPERSEDED') return { label: 'Closed', tone: 'waiting', icon: SkipForward };
   if (row.creation?.state === 'sending') return { label: 'Creating PR…', tone: 'active', icon: LoaderCircle };
   if (row.creation?.state === 'unknown') return { label: 'PR creation unconfirmed', tone: 'warning', icon: CirclePause };
   if (row.creation?.state === 'failed') return { label: 'PR creation failed', tone: 'warning', icon: TriangleAlert };
@@ -305,7 +308,7 @@ function BranchReviewRepositories({ remote, loadingRepositories }: { remote: Rem
         <div className="branch-review-repositories"><ul aria-label="Branch review repositories">{rows.map(row => {
           const pr = remote.pullRequests.find(pr => pr.repository.relativePath === row.repository.relativePath && pr.id === row.prId);
           const load = loadingRepositories?.find(load => load.repository.relativePath === row.repository.relativePath);
-          const status = load ? loadStatus(load) : branchStatus(row);
+          const status = load && load.phase !== 'ready' ? loadStatus(load) : branchStatus(row, pr);
           const Icon = status.icon;
           return <li key={row.repository.relativePath} aria-label={`${row.repository.repoSlug} branch review`}>
             <Icon className={status.tone === 'active' ? 'spin' : ''} size={13} aria-hidden="true" />
@@ -350,7 +353,7 @@ export function MergeProgressView({ pullRequests, repositories, operation, actio
   </section>;
 }
 
-export function RemoteReviewControls({ review, remote, onRemote, onChanged, onReanchor, onMergeComplete, jiraLink, loadingRepositories, reviewLoading = false }: { review: Review; remote: RemoteReviewState | null; onRemote: (state: RemoteReviewState) => void; onChanged: () => Promise<void>; onReanchor: (commentId: string) => void; onMergeComplete: (state: RemoteReviewState) => Promise<void>; jiraLink: { key: string; url: string } | null; loadingRepositories?: RemoteRepositoryLoad[]; reviewLoading?: boolean }) {
+export function RemoteReviewControls({ review, remote, onRemote, onChanged, onReanchor, onMergeComplete, jiraLink, loadingRepositories, reviewLoading = false }: { review: Review; remote: RemoteReviewState | null; onRemote: (state: RemoteReviewState) => void; onChanged: () => Promise<boolean>; onReanchor: (commentId: string) => void; onMergeComplete: (state: RemoteReviewState) => Promise<void>; jiraLink: { key: string; url: string } | null; loadingRepositories?: RemoteRepositoryLoad[]; reviewLoading?: boolean }) {
   const [dialog, setDialog] = useState<'publish' | 'approve' | 'merge' | null>(null);
   const [feedback, setFeedback] = useState<FeedbackPreview | null>(null);
   const [merge, setMerge] = useState<MergePreview | null>(null);
@@ -380,7 +383,7 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
         return;
       }
       if (action === 'publish') {
-        await onChanged();
+        if (!await onChanged()) { setDialog(null); return; }
         setFeedback(await window.reviewAPI.previewFeedback(review.id));
       } else setMerge(await window.reviewAPI.previewMerge(review.id, action));
       const state = await window.reviewAPI.getRemoteReview(review.id);
@@ -406,7 +409,7 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
         setDialog(null);
         return;
       }
-      await onChanged();
+      if (!await onChanged()) { setDialog(null); return; }
       if (dialog === 'publish') { const next = await window.reviewAPI.previewFeedback(review.id); setFeedback(next); setResult(next.items.length ? 'Completed items are saved. Review the remaining items below.' : 'Feedback published to Bitbucket.'); }
       else { setMerge(await window.reviewAPI.previewMerge(review.id, dialog)); }
     } catch (reason) { setError(message(reason)); const state = await window.reviewAPI.getRemoteReview(review.id).catch(() => null); if (state) onRemote(state); }
@@ -414,7 +417,7 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
   }
   async function conflict(commentId: string, choice: 'local' | 'remote') {
     setBusy(true); setError('');
-    try { await flushPendingComments(); await window.reviewAPI.resolveCommentConflict(review.id, commentId, choice); await onChanged(); setFeedback(await window.reviewAPI.previewFeedback(review.id)); const state = await window.reviewAPI.getRemoteReview(review.id); if (state) onRemote(state); }
+    try { await flushPendingComments(); await window.reviewAPI.resolveCommentConflict(review.id, commentId, choice); if (!await onChanged()) { setDialog(null); return; } setFeedback(await window.reviewAPI.previewFeedback(review.id)); const state = await window.reviewAPI.getRemoteReview(review.id); if (state) onRemote(state); }
     catch (reason) { setError(message(reason)); }
     finally { setBusy(false); }
   }
@@ -422,7 +425,7 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
     setBusy(true); setError('');
     try {
       onRemote(await window.reviewAPI.resolveUnknownPublication(review.id, commentId, remoteId));
-      await onChanged(); setFeedback(await window.reviewAPI.previewFeedback(review.id));
+      if (!await onChanged()) { setDialog(null); return; } setFeedback(await window.reviewAPI.previewFeedback(review.id));
       setCheckedDelivery(previous => ({ ...previous, [commentId]: false }));
     } catch (reason) { setError(message(reason)); }
     finally { setBusy(false); }

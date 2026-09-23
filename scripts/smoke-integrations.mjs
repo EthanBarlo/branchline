@@ -44,6 +44,10 @@ function fixtureBridge() {
   let reopenedDuringCleanup = false;
   let recoveredCleanupAccess = false;
   let cleanupMetadataFailed = false;
+  const automaticScenarios = new Map();
+  let releaseAutomaticRemoval;
+  Object.assign(calls, { automaticRemovals: [], remoteReads: [] });
+  const automaticResult = id => ({ ...cleanupResult(id), status: 'closed', unpublishedComments: 0, reason: undefined });
   const cleanupResult = id => {
     const saved = cleanupReviews.find(item => item.id === id);
     if (!saved) throw new Error('Unknown cleanup fixture review');
@@ -98,6 +102,13 @@ function fixtureBridge() {
     getState: async () => clone(state),
     updateSettings: async changes => { state.settings = changes; return clone(changes); },
     refreshReview: async id => { calls.refreshes.push(id);
+      const automatic = automaticScenarios.get(id);
+      if (automatic) {
+        const result = { review: getReview(id), snapshot: snapshot(id) };
+        if (automatic === 'partial') return clone(result);
+        if (automatic === 'failed') return clone({ ...result, closedReview: { ...automaticResult(id), status: 'unavailable', reason: 'Core could not be checked. This review was kept.' } });
+        return clone({ ...result, closedReview: automaticResult(id) });
+      }
       if (id === review.id && firstRemoteLoad) {
         firstRemoteLoad = false;
         const originalReview = clone(review);
@@ -124,15 +135,35 @@ function fixtureBridge() {
     discoverRepositories: async () => clone(mappings),
     listPullRequests: async (_, filter) => { calls.filters.push(filter); return clone(filter === 'author' ? [prs[2]] : filter === 'reviewer' ? prs.slice(0, 2) : prs); },
     openPullRequestReview: async (_, refs) => { calls.opens.push(refs); state.reviews = [local, review, ...cleanupReviews]; return clone(review); },
-    getRemoteReview: async id => id === review.id && state.reviews.some(item => item.id === id) ? clone(remote) : cleanupReviews.some(item => item.id === id) ? { connectionId: 'bb', pullRequests: [pr(31, mappings[0], local.featureBranch, { state: 'MERGED' })], publications: {} } : null,
+    getRemoteReview: async id => {
+      calls.remoteReads.push(id);
+      if (automaticScenarios.has(id)) {
+        if (!state.reviews.some(item => item.id === id)) throw new Error('Read after automatic deletion');
+        const pullRequests = [pr(31, mappings[0], local.featureBranch, { state: 'MERGED' })];
+        if (automaticScenarios.get(id) === 'partial') pullRequests.push(pr(32, mappings[1]));
+        return clone({ connectionId: 'bb', pullRequests, publications: {}, repositories: [
+          { repository: mappings[0], sourceBranch: local.featureBranch, targetBranch: 'main', status: 'pull-request', prId: 31 },
+          { repository: mappings[2], sourceBranch: local.featureBranch, targetBranch: 'main', status: 'changes' },
+        ] });
+      }
+      return id === review.id && state.reviews.some(item => item.id === id) ? clone(remote) : cleanupReviews.some(item => item.id === id) ? { connectionId: 'bb', pullRequests: [pr(31, mappings[0], local.featureBranch, { state: 'MERGED' })], publications: {} } : null;
+    },
     checkClosedReview: async id => {
       calls.cleanupChecks.push(id); calls.activeCleanupChecks++;
       calls.maxCleanupChecks = Math.max(calls.maxCleanupChecks, calls.activeCleanupChecks);
       try { if (holdCleanupChecks) await new Promise(resolve => cleanupWaiters.push(resolve)); return clone(cleanupResult(id)); }
       finally { calls.activeCleanupChecks--; }
     },
-    removeClosedReviews: async (projectId, reviewIds) => {
+    removeClosedReviews: async (projectId, reviewIds, options) => {
       if (projectId !== project.id) throw new Error('Wrong cleanup project');
+      if (options?.automatic) {
+        calls.automaticRemovals.push(clone(reviewIds));
+        await new Promise(resolve => { releaseAutomaticRemoval = resolve; });
+        const retained = reviewIds.filter(id => automaticScenarios.get(id) === 'drafts').map(id => ({ ...automaticResult(id), status: 'blocked', unpublishedComments: 1, reason: 'This completed review has unpublished feedback and was kept.' }));
+        const removedIds = reviewIds.filter(id => !retained.some(item => item.reviewId === id));
+        state.reviews = state.reviews.filter(item => !removedIds.includes(item.id));
+        return clone({ state, removedIds, retained });
+      }
       calls.cleanupRemovals.push(clone(reviewIds)); reopenedDuringCleanup = true;
       const results = reviewIds.map(cleanupResult);
       const removedIds = results.filter(item => item.status === 'closed').map(item => item.reviewId);
@@ -261,6 +292,8 @@ function fixtureBridge() {
     inspect: () => clone({ calls, integrations, state, review, remote }),
     releaseCleanupChecks: () => { holdCleanupChecks = false; for (const resolve of cleanupWaiters.splice(0)) resolve(); },
     recoverCleanupAccess: () => { recoveredCleanupAccess = true; },
+    setAutomaticScenario: (id, scenario) => { automaticScenarios.set(id, scenario); if (scenario === 'drafts') getReview(id).comments = [comment(7, 'Keep my unfinished feedback.')]; },
+    finishAutomaticRemoval: () => { if (!releaseAutomaticRemoval) throw new Error('No automatic removal is waiting.'); releaseAutomaticRemoval(); releaseAutomaticRemoval = undefined; },
     advanceLoad: () => { if (!advanceLoad) throw new Error('No repository load is waiting.'); advanceLoad(); },
     advancePreview: () => { if (!advancePreview) throw new Error('No merge preview is waiting.'); advancePreview(); },
     emitOldLoad: () => { for (const listener of loadListeners) listener(clone({ ...lastLoadEvent, sequence: loadSequence - 1, complete: false, result: { review, snapshot: { ...snapshot(review.id), files: [], loading: true } } })); },
@@ -705,11 +738,9 @@ try {
   assert.equal(await panel.getByRole('button', { name: 'Resume operation', exact: true }).isEnabled(), true, 'A paused asynchronous merge can reconcile after every PR has finished remotely.');
   await panel.getByRole('button', { name: 'Return to review', exact: true }).click();
   const refreshesBeforeReviewed = await refreshCount('remote-review');
-  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
-  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
-  await page.getByText('You’re all caught up.', { exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().review.approvals['.:review.ts']), 'current-file');
-  assert.equal(await refreshCount('remote-review'), refreshesBeforeReviewed, 'Mark reviewed saves the displayed fingerprint and advances without refreshing the remote snapshot.');
+  assert.equal(await page.getByRole('button', { name: 'Mark reviewed', exact: true }).isEnabled(), false, 'A remotely merged file is no longer pending review.');
+  await page.getByText('This PR was merged. These are its historical changes; no further review is needed for this repository.', { exact: true }).waitFor();
+  assert.equal(await refreshCount('remote-review'), refreshesBeforeReviewed, 'Displaying historical changes does not refresh the snapshot.');
   await page.evaluate(() => window.integrationSmoke.restorePausedOperation());
   await page.evaluate(() => window.integrationSmoke.markLegacyCoreDeleted());
   await page.getByRole('button', { name: 'Resume operation', exact: true }).click();
@@ -859,6 +890,81 @@ try {
   await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
   assert.equal(await page.getByRole('option', { name: 'Unavailable review', exact: true }).count(), 0);
   await page.keyboard.press('Escape');
+  await page.evaluate(() => window.integrationSmoke.setAutomaticScenario('closed-open', 'partial'));
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  await page.getByRole('option', { name: 'Still active review', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'closed-open');
+  await page.locator('[data-item-path="review.ts"]').click();
+  await page.getByText('This PR was merged. These are its historical changes; no further review is needed for this repository.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Mark reviewed', exact: true }).isEnabled(), false, 'Merged files are identified as historical rather than new work.');
+  assert.match(await page.locator('[data-item-path="review.ts"]').innerText(), /Merged/);
+  await page.locator('.compact-progress').getByText('0 / 1 reviewed', { exact: true }).waitFor();
+  await page.locator('[data-item-path="review.ts"]').click({ button: 'right' });
+  const historicalMenu = page.getByRole('menu', { name: 'File review actions', exact: true });
+  await historicalMenu.waitFor();
+  assert.equal(await historicalMenu.getByRole('menuitem', { name: 'Mark reviewed', exact: true }).isEnabled(), false, 'Historical selections cannot be bulk marked reviewed.');
+  assert.equal(await historicalMenu.getByRole('menuitem', { name: 'Mark unreviewed', exact: true }).isEnabled(), false);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Next unreviewed file', exact: true }).click();
+  await page.locator('.diff-file-name').filter({ hasText: 'guide.ts' }).waitFor();
+  await page.getByRole('button', { name: 'Next unreviewed file', exact: true }).click();
+  assert.equal(await page.locator('.diff-file-name').filter({ hasText: 'review.ts' }).count(), 0, 'Next wraps only through actionable files.');
+  await page.getByRole('combobox', { name: 'Filter changed files', exact: true }).click();
+  await page.getByRole('option', { name: 'Unreviewed', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('[data-item-path="review.ts"]'));
+  assert.equal(await page.locator('[data-item-path="modules/docs/guide.ts"]').count(), 1);
+  await page.getByRole('combobox', { name: 'Filter changed files', exact: true }).click();
+  await page.getByRole('option', { name: 'All files', exact: true }).click();
+  await page.locator('[data-item-path="review.ts"]').click();
+  await page.getByText('This PR was merged. These are its historical changes; no further review is needed for this repository.', { exact: true }).waitFor();
+  await page.getByRole('button', { name: /^Repositories:/ }).click();
+  const historyDialog = await dialog(page, 'Repositories in this review');
+  await historyDialog.getByRole('listitem', { name: 'platform branch review', exact: true }).getByText('Merged', { exact: true }).waitFor();
+  await historyDialog.getByRole('listitem', { name: 'docs branch review', exact: true }).getByText('Changes without a PR', { exact: true }).waitFor();
+  await historyDialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.screenshot({ path: 'artifacts/integration-historical-diff.png', animations: 'disabled' });
+  await page.locator('[data-item-path="modules/docs/guide.ts"]').click();
+  await page.locator('.diff-file-name').filter({ hasText: 'guide.ts' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Mark reviewed', exact: true }).isEnabled(), true, 'Branch-only work remains actionable in a partially completed group.');
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.automaticRemovals)).length, 0);
+  await page.evaluate(() => window.integrationSmoke.setAutomaticScenario('closed-open', 'closed'));
+  const readsBeforeRetiring = (await page.evaluate(() => window.integrationSmoke.inspect().calls.remoteReads)).filter(id => id === 'closed-open').length;
+  await page.getByRole('button', { name: 'Refresh review', exact: true }).click();
+  await page.getByRole('heading', { name: 'Closing completed review…', exact: true }).waitFor();
+  assert.equal(await page.locator('.app-shell').getAttribute('inert'), '', 'Editing is blocked while autosave and closure checks finish.');
+  await page.evaluate(() => window.integrationSmoke.finishAutomaticRemoval());
+  await page.getByText('Still active review is complete and was removed from Branchline.', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'current:project-1');
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.remoteReads)).filter(id => id === 'closed-open').length, readsBeforeRetiring, 'Retirement does not read an already deleted remote review.');
+  await page.getByRole('button', { name: 'Dismiss completed review notice', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  assert.equal(await page.getByRole('option', { name: 'Still active review', exact: true }).count(), 0);
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => window.integrationSmoke.setAutomaticScenario('closed-blocked', 'drafts'));
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  await page.getByRole('option', { name: 'Unfinished cleanup review', exact: true }).click();
+  await page.getByRole('heading', { name: 'Closing completed review…', exact: true }).waitFor();
+  await page.evaluate(() => window.integrationSmoke.finishAutomaticRemoval());
+  await page.getByText('This completed review has unpublished feedback and was kept.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'closed-blocked');
+  assert.ok((await page.evaluate(() => window.integrationSmoke.inspect().state.reviews)).find(item => item.id === 'closed-blocked').comments.some(item => item.body === 'Keep my unfinished feedback.'));
+  await page.evaluate(() => window.integrationSmoke.setAutomaticScenario('closed-reopened', 'failed'));
+  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
+  await page.getByRole('option', { name: 'Reopened during cleanup', exact: true }).click();
+  await page.getByText('Core could not be checked. This review was kept.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'closed-reopened');
+  assert.deepEqual(await page.evaluate(() => window.integrationSmoke.inspect().calls.automaticRemovals), [['closed-open'], ['closed-blocked']], 'Unverified groups are never sent for automatic retirement.');
+  await page.evaluate(() => {
+    const scope = `closed-reopened:${JSON.stringify(['main', 'feature/APP-123-review', false])}`;
+    localStorage.setItem(`branchline.commentDraft:${encodeURIComponent(scope)}:${encodeURIComponent('missing:unavailable.ts')}:recovered-comment`, JSON.stringify({ id: 'recovered-comment', scope, fileId: 'missing:unavailable.ts', body: 'Do not lose this recovered draft.', anchor: { side: 'additions', lineStart: 4, lineEnd: 4, context: '' }, persisted: false, savedBody: '', resolved: false }));
+    window.integrationSmoke.setAutomaticScenario('closed-reopened', 'closed');
+  });
+  await page.getByRole('button', { name: 'Refresh review', exact: true }).click();
+  await page.getByText('This completed review has recovered comment drafts. Open the affected files to save or discard them, or use closed-review cleanup to remove the review explicitly.', { exact: true }).waitFor();
+  const recovered = await page.evaluate(() => window.integrationSmoke.inspect());
+  assert.equal(recovered.state.reviews.find(item => item.id === 'closed-reopened').comments.length, 0, 'This draft has not reached the backend.');
+  assert.deepEqual(recovered.calls.automaticRemovals, [['closed-open'], ['closed-blocked']], 'Recovered drafts for non-selected, unavailable files prevent automatic deletion before calling the backend.');
+  await page.screenshot({ path: 'artifacts/integration-automatic-retirement.png', animations: 'disabled' });
   assert.deepEqual(errors, []);
   console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, whole-branch entry with fixed membership, missing PR draft/publication creation links, empty and missing branch visibility and live deletion, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, progressive parallel repository loading with early review and preserved feedback/selection, stable per-repository preview/merge/cleanup stages across repeated safety checks with unchanged completion counts and deletion receipts, conflict-blocked merging with direct PR links, no branch cleanup after partial merge failure, parallel cleanup after every required merge, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic removal of completed reviews, compact repository and Jira dialogs, modal completion with captured Jira link and lost-response retry without more provider calls, and minimum-width layout. Atlassian calls were stubbed.');
 } catch (error) {

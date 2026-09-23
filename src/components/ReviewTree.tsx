@@ -14,6 +14,7 @@ interface ReviewTreeProps {
   selectedFileId: string | null;
   approvals: Record<string, string>;
   reviewedVersions: Record<string, string>;
+  historicalFiles?: Record<string, string>;
   comments: ReviewComment[];
   onSelect: (id: string) => void;
   onReviewFiles: (files: ReviewFile[], approved: boolean) => Promise<void>;
@@ -76,10 +77,10 @@ export function ReviewTree(props: ReviewTreeProps) {
   }, [props.comments]);
   const query = props.query.trim().toLowerCase();
   const visibleFiles = useMemo(() => props.files.filter(file => {
-    if (props.filter === 'unreviewed' && props.approvals[file.id] === file.fingerprint) return false;
+    if (props.filter === 'unreviewed' && (props.historicalFiles?.[file.id] || props.approvals[file.id] === file.fingerprint)) return false;
     if (props.filter === 'commented' && !commentCounts.has(file.id)) return false;
     return !query || reviewFilePath(file).toLowerCase().includes(query);
-  }), [props.files, props.filter, props.approvals, commentCounts, query]);
+  }), [props.files, props.filter, props.approvals, props.historicalFiles, commentCounts, query]);
   const byPath = useMemo(() => new Map(visibleFiles.map(file => [reviewFilePath(file), file])), [visibleFiles]);
   const pathsKey = JSON.stringify([...byPath.keys()]);
   const paths = useMemo(() => [...byPath.keys()], [pathsKey]);
@@ -161,14 +162,15 @@ export function ReviewTree(props: ReviewTreeProps) {
       const reviewed = latest.current.props.approvals[file.id] === file.fingerprint;
       const changed = !reviewed && Boolean(latest.current.props.reviewedVersions[file.id]);
       const count = latest.current.commentCounts.get(file.id) ?? 0;
-      const state = reviewed ? 'Reviewed' : changed ? 'Changed' : 'Unreviewed';
+      const historical = latest.current.props.historicalFiles?.[file.id];
+      const state = historical || (reviewed ? 'Reviewed' : changed ? 'Changed' : 'Unreviewed');
       return {
         text: `${state}${count ? ` · ${count}` : ''}`,
         parts: [
-          { text: `${reviewed ? '✓ ' : changed ? '↻ ' : ''}${state}`, color: reviewed ? '#d0d0d0' : changed ? '#efc17b' : '#969696' },
+          { text: `${historical ? '' : reviewed ? '✓ ' : changed ? '↻ ' : ''}${state}`, color: historical ? '#b8d0bb' : reviewed ? '#d0d0d0' : changed ? '#efc17b' : '#969696' },
           ...(count ? [{ text: ` · ${count}`, color: '#b7b7b7' }] : []),
         ],
-        title: [changed ? 'Needs re-review' : state, count ? `${count} open comment${count === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · '),
+        title: [historical || (changed ? 'Needs re-review' : state), count ? `${count} open comment${count === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · '),
       };
     },
   });
@@ -199,7 +201,7 @@ export function ReviewTree(props: ReviewTreeProps) {
     const host = model.getFileTreeContainer();
     if (host) model.render({ fileTreeContainer: host });
     syncProjection();
-  }, [model, visibleFiles, props.approvals, props.reviewedVersions, commentCounts]);
+  }, [model, visibleFiles, props.approvals, props.reviewedVersions, props.historicalFiles, commentCounts]);
 
   useEffect(() => {
     if (!activePath) return;
@@ -219,13 +221,14 @@ export function ReviewTree(props: ReviewTreeProps) {
     syncProjection();
   }, [model, activePath]);
 
-  const selectedFiles = selectedReviewFiles(selection, byPath);
+  const selectedFiles = selectedReviewFiles(selection, byPath).filter(file => !props.historicalFiles?.[file.id]);
   const selectedDirectory = selection.some(path => path.endsWith('/'));
   const busy = operationBusy || props.reviewBusy;
   const allReviewed = selectedFiles.length > 0 && selectedFiles.every(file => props.approvals[file.id] === file.fingerprint);
   const noneReviewed = selectedFiles.every(file => props.approvals[file.id] !== file.fingerprint);
 
   async function reviewFiles(files: ReviewFile[], approved: boolean) {
+    files = files.filter(file => !latest.current.props.historicalFiles?.[file.id]);
     if (busy || files.length === 0) return;
     setOperationBusy(true);
     setError('');
@@ -273,11 +276,11 @@ export function ReviewTree(props: ReviewTreeProps) {
     {visibleFiles.length === 0 ? <div className="review-tree-empty">
       {props.loading && !query ? <LoaderCircle size={24} className="spin" /> : props.filter === 'unreviewed' && !query ? <CheckCheck size={24} /> : <Search size={24} />}
       <strong>{props.loading && !query ? 'Loading files…' : props.filter === 'unreviewed' && !query ? 'All caught up' : 'No matching files'}</strong>
-      <p>{props.loading && !query ? 'More repositories are still being checked.' : props.filter === 'unreviewed' && !query ? 'Every changed file has been reviewed.' : props.filter === 'commented' && !query ? 'Files with open comments will appear here.' : 'Try a different search or filter.'}</p>
+      <p>{props.loading && !query ? 'More repositories are still being checked.' : props.filter === 'unreviewed' && !query ? Object.keys(props.historicalFiles || {}).length ? 'No files need further review. Completed PR files remain under All files.' : 'Every changed file has been reviewed.' : props.filter === 'commented' && !query ? 'Files with open comments will appear here.' : 'Try a different search or filter.'}</p>
     </div> : <FileTree model={model} className="review-tree-host" style={treeTheme} aria-label="Changed files" renderContextMenu={(item, context) => {
       const paths = model.getSelectedPaths();
       const targetPaths = paths.includes(item.path) ? paths : [item.path];
-      const targets = selectedReviewFiles(targetPaths, byPath);
+      const targets = selectedReviewFiles(targetPaths, byPath).filter(file => !props.historicalFiles?.[file.id]);
       return <TreeReviewMenu context={context} files={targets} includesDirectory={targetPaths.some(path => path.endsWith('/'))} approvals={props.approvals} busy={busy} onReview={reviewFiles} />;
     }} />}
   </div>;

@@ -262,6 +262,36 @@ test('branch PR discovery escapes the source filter, paginates and preserves div
   await assert.rejects(() => wrongBranch.findPullRequests(mapping, sourceBranch), /outside the requested branch/);
 });
 
+test('PR state filter mismatches recheck the exact PR and omit confirmed transitions', async () => {
+  for (const requested of [['OPEN'], ['MERGED', 'DECLINED', 'SUPERSEDED']]) {
+    const requests: string[] = [];
+    const changed = rawPR(); changed.state = requested.includes('OPEN') ? 'MERGED' : 'OPEN';
+    const client = new BitbucketClient(credentials, async input => {
+      const path = new URL(String(input)).pathname; requests.push(path);
+      return json(path.endsWith('/pullrequests/3') ? changed : { values: [changed] });
+    });
+    assert.deepEqual(await client.findPullRequests(mapping, changed.source.branch.name, requested), []);
+    assert.deepEqual(requests.filter(path => path.includes('/pullrequests')), ['/2.0/repositories/team/repo/pullrequests', '/2.0/repositories/team/repo/pullrequests/3']);
+  }
+  const changed = rawPR(); changed.state = 'MERGED';
+  const client = new BitbucketClient(credentials, async input => json(new URL(String(input)).pathname.endsWith('/3') ? rawPR() : { values: [changed] }));
+  assert.equal((await client.findPullRequests(mapping, changed.source.branch.name))[0].state, 'OPEN');
+});
+
+test('PR state reconciliation rejects changed identities, unknown states and failed detail reads', async () => {
+  for (const kind of ['source', 'target', 'id', 'state', 'repository', 'permission']) {
+    const changed = rawPR(); changed.state = 'MERGED';
+    const detail = rawPR(); detail.state = 'MERGED';
+    if (kind === 'source') detail.source.branch.name = 'other';
+    if (kind === 'target') detail.destination.branch.name = 'other';
+    if (kind === 'id') detail.id = 99;
+    if (kind === 'state') detail.state = 'UNKNOWN';
+    if (kind === 'repository') detail.destination.repository.full_name = 'team/other';
+    const client = new BitbucketClient(credentials, async input => new URL(String(input)).pathname.endsWith('/3') ? json(detail, kind === 'permission' ? 403 : 200) : json({ values: [changed] }));
+    await assert.rejects(() => client.findPullRequests(mapping, changed.source.branch.name), kind === 'permission' ? /403|permission|scope/i : kind === 'repository' ? /different repository/ : /team\/repo PR #\d+.*requested source.*OPEN.*received/);
+  }
+});
+
 test('explicit PR creation retains source branches and validates the returned identity', async () => {
   const sent: any[] = [];
   const client = new BitbucketClient(credentials, async (input, init) => { sent.push({ path: new URL(String(input)).pathname, method: init?.method, body: JSON.parse(String(init?.body)) }); return json(rawPR(), 201); });
@@ -497,7 +527,7 @@ test('large files stay metadata-only and gitlinks avoid combined-tree file/direc
   assert.deepEqual(snapshot.repos[0].pointers, [{ path: 'new name.txt', oldHash: D, newHash: CHILD }]);
 });
 
-function branchSnapshotClient(options: { move?: string; missing?: string; failed?: string; empty?: boolean; historical?: boolean } = {}) {
+function branchSnapshotClient(options: { move?: string; missing?: string; missingTarget?: string; failed?: string; empty?: boolean; historical?: boolean; terminal?: string; changedClosedSource?: boolean } = {}) {
   const child: RepositoryMapping = { relativePath: 'packages/core', workspace: 'team', repoSlug: 'core' };
   const empty: RepositoryMapping = { relativePath: 'packages/empty', workspace: 'team', repoSlug: 'empty' };
   const missing: RepositoryMapping = { relativePath: 'packages/missing', workspace: 'team', repoSlug: 'missing' };
@@ -507,15 +537,18 @@ function branchSnapshotClient(options: { move?: string; missing?: string; failed
     assert.ok(!init?.method || init.method === 'GET', 'opening a review cannot create PRs, comments or branches');
     const url = new URL(String(input)); requests.push(url.href);
     const slug = url.pathname.split('/')[4];
+    if (url.pathname === `/2.0/repositories/team/${slug}`) return json({ full_name: `team/${slug}`, mainbranch: { name: 'main' } }, slug === options.failed ? 403 : 200);
     if (url.pathname.endsWith('/pullrequests/3')) {
       const pr = rawPR();
-      if (options.historical) { pr.state = 'MERGED'; pr.destination.commit.hash = 'f'.repeat(40); }
+      if (options.historical || options.terminal) { pr.state = options.terminal ?? 'MERGED'; pr.destination.commit.hash = 'f'.repeat(40); }
+      if (options.changedClosedSource) pr.source.commit.hash = CHILD;
       return json(pr);
     }
     if (url.pathname.includes('/statuses')) return json({ values: [] });
     if (url.pathname.includes('/refs/branches/')) {
       const name = decodeURIComponent(url.pathname.split('/').at(-1)!);
       if (slug === options.failed) return json({}, 403);
+      if (name === 'main' && slug === options.missingTarget) return json({}, 404);
       if (name === branch && (slug === 'missing' && options.move !== 'missing' || slug === options.missing || slug === 'repo' && options.historical)) return json({}, 404);
       return json({ name, target: { hash: name === 'main' ? D : slug === options.move ? CHILD : slug === 'empty' ? D : S } });
     }
@@ -529,7 +562,7 @@ function branchSnapshotClient(options: { move?: string; missing?: string; failed
     return new Response(url.pathname.includes(M) ? 'original\n' : 'changed\n');
   });
   const pr = client.normalizePullRequest(mapping, rawPR());
-  if (options.historical) pr.state = 'MERGED';
+  if (options.historical || options.terminal) pr.state = options.terminal ?? 'MERGED';
   const rows: BranchReviewRepository[] = [
     { repository: mapping, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, prId: 3, status: 'pull-request' },
     { repository: child, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, status: 'changes' },
@@ -565,6 +598,37 @@ test('a single captured repository without a PR becomes reviewable independently
   assert.ok(!requests.some(url => url.includes('/repo/') || url.includes('/pullrequests/')));
   assert.equal(result.snapshot.files[0].oldContent, 'original\n');
   assert.equal(result.snapshot.files[0].newContent, 'changed\n');
+});
+
+test('missing branch snapshots allow both refs absent only after repository access and captured target checks', async () => {
+  const allowed = branchSnapshotClient({ missingTarget: 'missing' });
+  allowed.rows[3].targetHash = undefined;
+  const result = await buildRemoteRepositorySnapshot(allowed.client, 'branch-review', allowed.rows[3]);
+  assert.equal(result.repositories![0].status, 'missing-branch');
+  assert.equal(result.snapshot.repos[0].error, undefined);
+  assert.ok(allowed.requests.some(url => url.endsWith('/repositories/team/missing')));
+  for (const options of [{ failed: 'missing' }, { move: 'missing', missingTarget: 'missing' }, {}]) {
+    const f = branchSnapshotClient(options); f.rows[3].targetHash = undefined;
+    const blocked = await buildRemoteRepositorySnapshot(f.client, 'branch-review', f.rows[3]);
+    assert.equal(blocked.repositories![0].status, 'unavailable');
+    assert.ok(blocked.snapshot.repos[0].error);
+  }
+});
+
+test('terminal snapshots retain exact historical revisions after refs disappear and reject changed closed sources', async () => {
+  for (const terminal of ['MERGED', 'DECLINED', 'SUPERSEDED']) {
+    const f = branchSnapshotClient({ terminal, missing: 'repo', missingTarget: 'repo' });
+    const result = await buildRemoteRepositorySnapshot(f.client, 'branch-review', f.rows[0], f.pr);
+    assert.equal(result.snapshot.files.length, 1);
+    assert.equal(result.snapshot.repos[0].error, undefined);
+    assert.equal(result.pullRequests[0].state, terminal);
+    assert.equal(result.snapshot.files[0].baseCommit, M);
+    assert.ok(!f.requests.some(url => url.includes('/refs/branches/')));
+  }
+  const changed = branchSnapshotClient({ historical: true, changedClosedSource: true });
+  const result = await buildRemoteRepositorySnapshot(changed.client, 'branch-review', changed.rows[0], changed.pr);
+  assert.equal(result.snapshot.files.length, 0);
+  assert.match(result.snapshot.repos[0].error!, /pull request changed/);
 });
 
 test('whole-group snapshot downloads run concurrently with four repository pipelines and stable output order', { timeout: 10000 }, async () => {

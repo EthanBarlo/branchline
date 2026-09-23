@@ -124,6 +124,6 @@ export interface IntegrationAPI {
   runPullRequestAction(reviewId: string, action: 'approve' | 'merge'): Promise<RemoteReviewState>;
   completeMergedReview(reviewId: string): Promise<AppState>;
   checkClosedReview(reviewId: string): Promise<ClosedReviewCheck>;
-  removeClosedReviews(projectId: string, reviewIds: string[]): Promise<ClosedReviewCleanupResult>;
+  removeClosedReviews(projectId: string, reviewIds: string[], options?: { automatic?: boolean }): Promise<ClosedReviewCleanupResult>;
   openIntegrationLink(url: string): Promise<void>;
 }

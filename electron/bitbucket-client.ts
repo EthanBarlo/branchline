@@ -192,8 +192,19 @@ export class BitbucketClient {
     const resolutions: CommitResolutions = new Map();
     const result: PullRequest[] = [];
     for (const value of values) {
-      const pr = await this.responsePullRequest(mapping, value, 'list', true, resolutions);
-      if (pr.sourceBranch !== sourceBranch || !states.includes(pr.state)) throw new Error('Bitbucket returned a pull request outside the requested branch or state. Refresh to retry.');
+      let pr = await this.responsePullRequest(mapping, value, 'list', true, resolutions);
+      const mismatch = (actual: PullRequest) => new Error(`Bitbucket returned a pull request outside the requested branch or state for ${mapping.workspace}/${mapping.repoSlug} PR #${actual.id}: requested source “${sourceBranch}” in ${states.join(', ')}; received “${actual.sourceBranch}” → “${actual.targetBranch}” in ${actual.state}. Refresh to retry.`);
+      if (pr.sourceBranch !== sourceBranch) throw mismatch(pr);
+      if (!states.includes(pr.state)) {
+        // A filtered list can lag a merge. Confirm the exact PR before ignoring it.
+        const latest = await this.getPullRequest(mapping, pr.id);
+        if (latest.id !== pr.id || latest.sourceBranch !== sourceBranch || latest.targetBranch !== pr.targetBranch) throw mismatch(latest);
+        if (!states.includes(latest.state)) {
+          if (['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(latest.state)) continue;
+          throw mismatch(latest);
+        }
+        pr = latest;
+      }
       result.push(pr);
     }
     return result;

@@ -23,7 +23,7 @@ import { DiffViewer } from './components/DiffViewer';
 import { ReviewTree } from './components/ReviewTree';
 import { orderReviewFiles } from './components/reviewFileOrder';
 import { Select } from './components/Select';
-import { flushPendingComments } from './components/commentAutosave';
+import { flushPendingComments, hasReviewCommentBackups } from './components/commentAutosave';
 
 type FileFilter = 'all' | 'unreviewed' | 'commented';
 type CommentSelection = { side: DiffSide; lineStart: number; lineEnd: number; context: string; contextBefore?: string; contextAfter?: string; fingerprint?: string; path?: string };
@@ -97,6 +97,11 @@ export default function App() {
   const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
   const [showPullRequests, setShowPullRequests] = useState(false);
   const [cleanupProject, setCleanupProject] = useState<Project | null>(null);
+  const [closingReviewId, setClosingReviewId] = useState<string | null>(null);
+  const closingReviewIds = useRef(new Set<string>());
+  const closingDialogs = useRef(new Map<HTMLElement, boolean>());
+  const [closedReviewNotice, setClosedReviewNotice] = useState<{ projectId: string; reviewId?: string; message: string; warning?: boolean } | null>(null);
+  const retireClosedReview = useRef<(result: ReviewRefresh) => Promise<boolean>>(async () => false);
   const [remoteStates, setRemoteStates] = useState<Record<string, RemoteReviewState>>({});
   const [remoteLoads, setRemoteLoads] = useState<Record<string, RemoteReviewLoadProgress>>({});
   const remoteLoadSequences = useRef<Record<string, number>>({});
@@ -281,6 +286,7 @@ export default function App() {
       const result = await window.reviewAPI.refreshReview(id);
       if (targetVersion !== (targetVersions.current[id] || 0)) return;
       applyRefresh(id, result, version);
+      if (await retireClosedReview.current(result)) return;
       if (result.review.remote) {
         const remote = await window.reviewAPI.getRemoteReview(id);
         if (remote && mounted.current && !deletedReviewIds.current.has(id)) setRemoteStates(previous => ({ ...previous, [id]: remote }));
@@ -336,16 +342,30 @@ export default function App() {
   const files = snapshot?.files || [];
   const incompleteSnapshot = Boolean(snapshot?.repos.some(repo => repo.error) || files.some(file => file.unavailable));
   const pointerChanges = snapshot?.repos.flatMap(repo => (repo.pointers || []).map(pointer => ({ ...pointer, repositoryPath: repo.relativePath }))) || [];
+  const historicalFiles = useMemo<Record<string, string>>(() => Object.fromEntries(files.flatMap(file => {
+    const state = remote?.pullRequests.find(pr => pr.repository.relativePath === file.repoRelativePath)?.state;
+    const label = state === 'MERGED' ? 'Merged' : state === 'DECLINED' ? 'Declined' : state === 'SUPERSEDED' ? 'Closed' : undefined;
+    return label ? [[file.id, label]] : [];
+  })), [files, remote]);
+  const pendingReviewFiles = useMemo(() => files.filter(file => !historicalFiles[file.id]), [files, historicalFiles]);
   const selectedFile = files.find(file => file.id === selectedFiles[viewKey]);
+  const historicalFile = Boolean(selectedFile && historicalFiles[selectedFile.id]);
+  const historicalState = selectedFile ? historicalFiles[selectedFile.id]?.toLowerCase() : undefined;
   const fileComments = useMemo(() => review?.comments.filter(comment => comment.fileId === selectedFile?.id) || [], [review?.comments, selectedFile?.id]);
   const unresolvedComments = review?.comments.filter(comment => !comment.resolved) || [];
-  const approvedCount = review ? files.filter(file => isApproved(review, file)).length : 0;
-  const progress = files.length ? Math.round(approvedCount / files.length * 100) : 0;
+  const approvedCount = review ? pendingReviewFiles.filter(file => isApproved(review, file)).length : 0;
+  const progress = pendingReviewFiles.length ? Math.round(approvedCount / pendingReviewFiles.length * 100) : 0;
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
   const approved = Boolean(review && selectedFile && isApproved(review, selectedFile));
   const priorApproval = review && selectedFile ? knownApprovals.current[viewKey]?.[selectedFile.id] : undefined;
   const staleApproval = Boolean(priorApproval && selectedFile && !approved);
+
+  useEffect(() => {
+    if (!review || filter !== 'unreviewed' || !selectedFile || !historicalFiles[selectedFile.id]) return;
+    const nextId = nextPendingFile(pendingReviewFiles, review)?.id || '';
+    setSelectedFiles(previous => ({ ...previous, [viewKey]: nextId }));
+  }, [review, filter, selectedFile, historicalFiles, pendingReviewFiles, viewKey]);
 
   function changeFilter(value: FileFilter) {
     setFilter(value);
@@ -415,7 +435,7 @@ export default function App() {
       if (contexts.current[id] === context && reviewContextKey(updated) === context) setReviews(previous => mergeReview(previous, updated));
       if (updated.remote) {
         const remote = await window.reviewAPI.getRemoteReview(id);
-        if (remote && mounted.current) setRemoteStates(previous => ({ ...previous, [id]: remote }));
+        if (remote && mounted.current && !deletedReviewIds.current.has(id)) setRemoteStates(previous => ({ ...previous, [id]: remote }));
       }
     }
     return updated;
@@ -487,9 +507,10 @@ export default function App() {
   }
 
   async function remoteChanged() {
-    if (!review) return;
+    if (!review || deletedReviewIds.current.has(review.id)) return false;
     mutationVersions.current[review.id] = (mutationVersions.current[review.id] || 0) + 1;
     await refresh(review.id, true);
+    return !deletedReviewIds.current.has(review.id);
   }
 
   async function mergeFinished(mergedReview: Review, state: RemoteReviewState) {
@@ -547,6 +568,53 @@ export default function App() {
     }
   }
 
+  retireClosedReview.current = async result => {
+    const { review: checkedReview, closedReview } = result;
+    if (!mounted.current || !checkedReview.remote || deletedReviewIds.current.has(checkedReview.id)) return deletedReviewIds.current.has(checkedReview.id);
+    if (!closedReview) {
+      setClosedReviewNotice(previous => previous?.reviewId === checkedReview.id ? null : previous);
+      return false;
+    }
+    if (closedReview.status !== 'closed') {
+      if (closedReview.reason) setClosedReviewNotice({ projectId: checkedReview.projectId, reviewId: checkedReview.id, message: closedReview.reason, warning: true });
+      return false;
+    }
+    if (closingReviewIds.current.has(checkedReview.id)) return false;
+    closingReviewIds.current.add(checkedReview.id);
+    flushSync(() => setClosingReviewId(checkedReview.id));
+    // Integration dialogs render outside the workspace through portals.
+    for (const element of document.querySelectorAll<HTMLElement>('.integration-backdrop')) {
+      if (!closingDialogs.current.has(element)) closingDialogs.current.set(element, element.inert);
+      element.inert = true;
+    }
+    try {
+      await flushPendingComments();
+      if (hasReviewCommentBackups(checkedReview.id)) {
+        setClosedReviewNotice({ projectId: checkedReview.projectId, reviewId: checkedReview.id, message: 'This completed review has recovered comment drafts. Open the affected files to save or discard them, or use closed-review cleanup to remove the review explicitly.', warning: true });
+        return false;
+      }
+      const removal = await window.reviewAPI.removeClosedReviews(checkedReview.projectId, [checkedReview.id], { automatic: true });
+      closedReviewsRemoved(removal);
+      const retained = removal.retained.find(item => item.reviewId === checkedReview.id);
+      const removed = deletedReviewIds.current.has(checkedReview.id);
+      if (mounted.current) setClosedReviewNotice({
+        projectId: checkedReview.projectId, ...(removed ? {} : { reviewId: checkedReview.id }), warning: !!retained || !removed,
+        message: retained?.reason || (removed ? `${checkedReview.name} is complete and was removed from Branchline.` : 'This review was kept because its status changed. Refresh to check again.'),
+      });
+      return removed;
+    } catch (reason) {
+      if (mounted.current) setClosedReviewNotice({ projectId: checkedReview.projectId, reviewId: checkedReview.id, message: `Could not close this completed review: ${errorMessage(reason)}`, warning: true });
+      return false;
+    } finally {
+      closingReviewIds.current.delete(checkedReview.id);
+      if (!closingReviewIds.current.size) {
+        for (const [element, inert] of closingDialogs.current) element.inert = inert;
+        closingDialogs.current.clear();
+      }
+      if (mounted.current) setClosingReviewId([...closingReviewIds.current][0] || null);
+    }
+  };
+
   function remoteOpened(created: Review) {
     contexts.current[created.id] = reviewContextKey(created);
     setReviews(previous => mergeReview(previous, created));
@@ -555,6 +623,8 @@ export default function App() {
 
   async function reviewFiles(chosenFiles: ReviewFile[], markReviewed: boolean) {
     if (!review || !chosenFiles.length || approvalBusy) return;
+    chosenFiles = chosenFiles.filter(file => !historicalFiles[file.id]);
+    if (!chosenFiles.length) return;
     if (markReviewed && chosenFiles.some(file => file.unavailable)) { setError('Some selected files could not be loaded. Refresh them before marking them reviewed.'); return; }
     const chosenIds = new Set(chosenFiles.map(file => file.id));
     const activeId = selectedFile?.id;
@@ -571,7 +641,8 @@ export default function App() {
         localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current));
       }
       if (markReviewed && activeId && chosenIds.has(activeId) && mounted.current && selectedIdRef.current === review.id && contexts.current[review.id] === reviewContextKey(review)) {
-        const nextId = nextPendingFile(latestFiles.current[viewKey] || files, updated, activeId, order)?.id || '';
+        const availableFiles = (latestFiles.current[viewKey] || files).filter(file => !historicalFiles[file.id]);
+        const nextId = nextPendingFile(availableFiles, updated, activeId, order)?.id || '';
         // Keep any file the user chose while the approval was saving.
         setSelectedFiles(previous => previous[viewKey] === activeId ? { ...previous, [viewKey]: nextId } : previous);
       }
@@ -649,7 +720,7 @@ export default function App() {
 
   function nextUnreviewed() {
     if (!review) return;
-    const next = nextPendingFile(files, review, selectedFile?.id, explorerOrder.current[viewKey]);
+    const next = nextPendingFile(pendingReviewFiles, review, selectedFile?.id, explorerOrder.current[viewKey]);
     if (next) selectFile(next.id);
   }
 
@@ -686,7 +757,7 @@ export default function App() {
     } catch (reason) { setUpdateBridgeError(errorMessage(reason)); }
   }
 
-  return <><div className="app-shell compact-workspace" inert={updatePreparing || closePreparing}>
+  return <><div className="app-shell compact-workspace" inert={updatePreparing || closePreparing || !!closingReviewId}>
     <div className="project-tab-strip window-chrome">
       {showSettings ? <div className="settings-chrome-label"><Settings2 size={13} />Settings</div> : <div className="project-tabs" role="tablist" aria-label="Projects">
         {projects.map((item, index) => <button key={item.id} id={`project-tab-${item.id}`} className={`project-tab ${selectedProjectId === item.id ? 'active' : ''}`} role="tab" aria-label={item.name} aria-selected={selectedProjectId === item.id} aria-controls="project-workspace" tabIndex={selectedProjectId === item.id ? 0 : -1} title={item.repoPath} onClick={() => selectProject(item.id)} onKeyDown={event => {
@@ -703,6 +774,7 @@ export default function App() {
     {showSettings && <SettingsView initialSection={settingsSection} showLegacyLinks={showLegacyLinks} settings={settings} ticket={jiraTicket} onSaved={setSettings} onConnectionsChanged={loadIntegrations} onClose={closeSettings} updateState={updateState} updateBridgeError={updateBridgeError} onUpdateAction={action => void updateAction(action)} />}
     <div className="application-body" hidden={showSettings} id="project-workspace" role={project ? 'tabpanel' : undefined} aria-labelledby={project && !showSettings ? `project-tab-${project.id}` : undefined}>
       <main className="main-workspace">
+        {closedReviewNotice?.projectId === selectedProjectId && (!closedReviewNotice.reviewId || closedReviewNotice.reviewId === selectedReviewId) && <div className={`closed-review-notice ${closedReviewNotice.warning ? 'closed-review-warning' : ''}`} role="status">{closedReviewNotice.warning ? <TriangleAlert size={14} /> : <CircleCheck size={14} />}<span>{closedReviewNotice.message}</span><button className="icon-button" aria-label="Dismiss completed review notice" onClick={() => setClosedReviewNotice(null)}><X size={14} /></button></div>}
         {error && <div className="error-banner" role="alert"><TriangleAlert size={16} /><span>{error}</span>{review && <button onClick={() => void refresh(review.id, true)}>Retry</button>}<button className="icon-button" aria-label="Dismiss error" onClick={() => setError(null)}><X size={15} /></button></div>}
         {mergeCompletion?.projectId === selectedProjectId && <MergeCompletion reviewId={mergeCompletion.reviewId} remote={mergeCompletion.remote} jiraLink={mergeCompletion.jiraLink} onDismiss={() => setMergeCompletion(null)} />}
         {initializing ? <div className="central-empty"><LoaderCircle size={28} className="spin" /><p>Opening your workspace…</p></div> : !review ? project ? <div className="central-empty"><LoaderCircle size={24} className="spin" /><h2>Opening Current</h2><p>Reading the branch checked out in {project.name}.</p></div> : <Welcome onCreate={() => setShowAddProject(true)} /> : <>
@@ -737,10 +809,10 @@ export default function App() {
           {!!snapshot?.warnings.length && <details className="warning-banner"><summary><TriangleAlert size={14} /><span>{snapshot.warnings.length} {snapshot.warnings.length === 1 ? 'repository notice' : 'repository notices'}</span><span className="warning-detail-label">View details</span><ChevronDown size={12} /></summary><ul>{snapshot.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
           {isCurrent && (currentNeedsTarget || currentDetached) ? <CurrentSetup detached={currentDetached} onReviewBranch={() => setShowNewReview(true)} /> : <div className={`review-workbench ${resizingFiles ? 'resizing-files' : ''}`}>
             {showFiles && <><aside className="files-sidebar" id="review-files" aria-label="Changed files" style={{ width: filePaneWidth, minWidth: filePaneWidth }}>
-              <div className="files-heading"><h2>Files <span>{filter === 'unreviewed' ? files.length - approvedCount : files.length}</span></h2><Select className="file-filter-select" variant="quiet" searchable={false} label="Filter changed files" value={filter} onChange={value => changeFilter(value as FileFilter)} options={[{ value: 'all', label: 'All files' }, { value: 'unreviewed', label: 'Unreviewed' }, { value: 'commented', label: 'Commented' }]} /></div>
+              <div className="files-heading"><h2>Files <span>{filter === 'unreviewed' ? pendingReviewFiles.length - approvedCount : files.length}</span></h2><Select className="file-filter-select" variant="quiet" searchable={false} label="Filter changed files" value={filter} onChange={value => changeFilter(value as FileFilter)} options={[{ value: 'all', label: 'All files' }, { value: 'unreviewed', label: 'Unreviewed' }, { value: 'commented', label: 'Commented' }]} /></div>
               <label className="file-search"><Search size={13} /><input aria-label="Filter files by path" placeholder="Find a file…" value={query} onChange={event => setQuery(event.target.value)} />{query && <button className="icon-button" aria-label="Clear file search" onClick={() => setQuery('')}><X size={12} /></button>}</label>
-              <div className="tree-container"><ReviewTree key={viewKey} files={files} selectedFileId={selectedFile?.id ?? null} approvals={review.approvals} reviewedVersions={knownApprovals.current[viewKey] || {}} comments={review.comments} onSelect={selectFile} onReviewFiles={reviewFiles} reviewBusy={approvalBusy} loading={remoteLoading} onOrderChange={ids => { explorerOrder.current[viewKey] = ids; }} filter={filter} query={query} /></div>
-              <div className="compact-progress" title={`${approvedCount} of ${files.length} files reviewed · +${additions} −${deletions}`}><span><CircleCheck size={12} />{approvedCount} / {files.length} reviewed</span><button className="icon-button" onClick={nextUnreviewed} disabled={approvedCount === files.length} aria-label="Next unreviewed file" title="Next unreviewed file"><ArrowRight size={13} /></button><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
+              <div className="tree-container"><ReviewTree key={viewKey} files={files} selectedFileId={selectedFile?.id ?? null} approvals={review.approvals} historicalFiles={historicalFiles} reviewedVersions={knownApprovals.current[viewKey] || {}} comments={review.comments} onSelect={selectFile} onReviewFiles={reviewFiles} reviewBusy={approvalBusy} loading={remoteLoading} onOrderChange={ids => { explorerOrder.current[viewKey] = ids; }} filter={filter} query={query} /></div>
+              <div className="compact-progress" title={`${approvedCount} of ${pendingReviewFiles.length} files reviewed · +${additions} −${deletions}`}><span><CircleCheck size={12} />{approvedCount} / {pendingReviewFiles.length} reviewed</span><button className="icon-button" onClick={nextUnreviewed} disabled={approvedCount === pendingReviewFiles.length} aria-label="Next unreviewed file" title="Next unreviewed file"><ArrowRight size={13} /></button><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
             </aside><div className="file-pane-resizer" role="separator" aria-label="Resize file pane" aria-orientation="vertical" aria-valuemin={180} aria-valuemax={Math.min(520, window.innerWidth - 500)} aria-valuenow={Math.round(filePaneWidth)} tabIndex={0} title="Drag to resize · Arrow keys to adjust · Double-click to reset" onPointerDown={event => {
               if (event.button !== 0) return;
               event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
@@ -753,10 +825,11 @@ export default function App() {
               if (next === null) return; event.preventDefault(); const width = clampFileWidth(next); setFilePaneWidth(width); localStorage.setItem('branchline.filePaneWidth', String(width));
             }} /></>}
             <section className="diff-workspace" aria-label="File diff">
-              {remoteLoading && !selectedFile ? <div className="central-empty remote-loading-state"><h2>{files.length && approvedCount === files.length ? 'Loaded files reviewed.' : 'Loading your repositories'}</h2><p>{files.length && approvedCount === files.length ? 'The remaining changes will appear as each repository finishes.' : 'Start reviewing as soon as the first files arrive.'}</p><RemoteLoadRepositories repositories={loadingRepositories || []} />{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : !snapshot ? <div className="central-empty"><LoaderCircle size={26} className="spin" /><h2>Gathering your changes</h2><p>Comparing branches across your repositories.</p></div> : !selectedFile ? <div className="central-empty clean-state"><div className="empty-icon"><CheckCheck size={28} /></div><h2>{incompleteSnapshot ? 'This review is incomplete.' : approvedCount < files.length ? 'Choose a file to review' : pointerChanges.length ? 'Review the submodule pointers above.' : 'You’re all caught up.'}</h2><p>{incompleteSnapshot ? 'Some repository changes could not be loaded. Check the notices and refresh to retry.' : approvedCount < files.length ? 'Select a changed file from the file tree.' : pointerChanges.length ? 'This comparison changes repository pointers without changing regular files.' : 'New changes will appear here automatically.'}</p>{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : <>
-                <div className="diff-toolbar"><div className="diff-file-name" title={`${fileLocation(selectedFile)} · ${selectedFile.source === 'working-tree' ? 'Working tree' : 'Committed'} · +${selectedFile.additions} −${selectedFile.deletions}`}><FileCode2 size={14} /><span title={fileLocation(selectedFile)}>{fileLocation(selectedFile)}</span><span className={`file-status file-status-${selectedFile.status.toLowerCase()}`}>{({ A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', T: 'Type changed' })[selectedFile.status]}</span></div><div className="diff-toolbar-actions"><div className="diff-style-switch" role="group" aria-label="Diff layout"><button className={diffStyle === 'split' ? 'active' : ''} aria-pressed={diffStyle === 'split'} onClick={() => setDiffStyle('split')}>Split</button><button className={diffStyle === 'unified' ? 'active' : ''} aria-pressed={diffStyle === 'unified'} onClick={() => setDiffStyle('unified')}>Unified</button></div><span className="toolbar-separator" /><button className={`reviewed-button ${approved ? 'approved' : ''}`} disabled={approvalBusy || !!selectedFile.unavailable} onClick={() => void toggleApproval()} aria-pressed={approved} title={approved ? 'Mark this file as unreviewed' : 'Mark this version of the file as reviewed'}>{approvalBusy ? <LoaderCircle className="spin" size={14} /> : approved ? <CircleCheck size={15} /> : <Circle size={15} />}<span>{approved ? 'Reviewed' : 'Mark reviewed'}</span></button></div></div>
-                {staleApproval && <div className="changed-since-review"><RefreshCw size={13} />This file changed since you reviewed it. Take another look.</div>}
-                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}:${anchorRevision}`} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} isRemote={!!review.remote} publications={remote?.publications} onBeginReanchor={beginReanchor} reanchorCommentId={reanchorId} onReanchorSelection={reanchorSelection} /></div>
+              {remoteLoading && !selectedFile ? <div className="central-empty remote-loading-state"><h2>{files.length && approvedCount === pendingReviewFiles.length ? 'Loaded files reviewed.' : 'Loading your repositories'}</h2><p>{files.length && approvedCount === pendingReviewFiles.length ? 'The remaining changes will appear as each repository finishes.' : 'Start reviewing as soon as the first files arrive.'}</p><RemoteLoadRepositories repositories={loadingRepositories || []} />{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : !snapshot ? <div className="central-empty"><LoaderCircle size={26} className="spin" /><h2>Gathering your changes</h2><p>Comparing branches across your repositories.</p></div> : !selectedFile ? <div className="central-empty clean-state"><div className="empty-icon"><CheckCheck size={28} /></div><h2>{incompleteSnapshot ? 'This review is incomplete.' : approvedCount < pendingReviewFiles.length ? 'Choose a file to review' : pointerChanges.length ? 'Review the submodule pointers above.' : 'You’re all caught up.'}</h2><p>{incompleteSnapshot ? 'Some repository changes could not be loaded. Check the notices and refresh to retry.' : approvedCount < pendingReviewFiles.length ? 'Select a changed file from the file tree.' : pointerChanges.length ? 'This comparison changes repository pointers without changing regular files.' : 'New changes will appear here automatically.'}</p>{!showFiles && files.length > 0 && <button className="button button-secondary" onClick={toggleFiles}>Show files</button>}</div> : <>
+                <div className="diff-toolbar"><div className="diff-file-name" title={`${fileLocation(selectedFile)} · ${selectedFile.source === 'working-tree' ? 'Working tree' : 'Committed'} · +${selectedFile.additions} −${selectedFile.deletions}`}><FileCode2 size={14} /><span title={fileLocation(selectedFile)}>{fileLocation(selectedFile)}</span><span className={`file-status file-status-${selectedFile.status.toLowerCase()}`}>{({ A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', T: 'Type changed' })[selectedFile.status]}</span></div><div className="diff-toolbar-actions"><div className="diff-style-switch" role="group" aria-label="Diff layout"><button className={diffStyle === 'split' ? 'active' : ''} aria-pressed={diffStyle === 'split'} onClick={() => setDiffStyle('split')}>Split</button><button className={diffStyle === 'unified' ? 'active' : ''} aria-pressed={diffStyle === 'unified'} onClick={() => setDiffStyle('unified')}>Unified</button></div><span className="toolbar-separator" /><button className={`reviewed-button ${approved ? 'approved' : ''}`} disabled={approvalBusy || historicalFile || !!selectedFile.unavailable} onClick={() => void toggleApproval()} aria-pressed={approved} title={approved ? 'Mark this file as unreviewed' : 'Mark this version of the file as reviewed'}>{approvalBusy ? <LoaderCircle className="spin" size={14} /> : approved ? <CircleCheck size={15} /> : <Circle size={15} />}<span>{approved ? 'Reviewed' : 'Mark reviewed'}</span></button></div></div>
+                {historicalFile && <div className="closed-review-notice historical-diff-note" role="status"><CircleCheck size={13} /><span>This PR was {historicalState}. These are its historical changes; no further review is needed for this repository.</span></div>}
+                {!historicalFile && staleApproval && <div className="changed-since-review"><RefreshCw size={13} />This file changed since you reviewed it. Take another look.</div>}
+                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}:${anchorRevision}`} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} isRemote={!!review.remote} allowNewComments={!historicalFile} publications={remote?.publications} onBeginReanchor={beginReanchor} reanchorCommentId={reanchorId} onReanchorSelection={reanchorSelection} /></div>
               </>}
             </section>
             {showFeedback && <FeedbackPanel key={viewKey} review={review} files={files} onClose={() => setShowFeedback(false)} onSelect={selectFile} onUpdate={updateComment} onDelete={removeComment} onError={setError} copyButton={copyButton} remote={remote} onReanchor={beginReanchor} />}
@@ -776,7 +849,7 @@ export default function App() {
     {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
     {deleteReview && <Modal title="Delete this review?" onClose={() => !removing && setDeleteReview(null)} small><div className="confirm-copy"><p><strong>{deleteReview.name}</strong> and its saved comments and review progress will be removed.</p><p>The repository and your code remain on disk.</p></div><div className="modal-footer"><button className="button button-secondary" disabled={removing} onClick={() => setDeleteReview(null)}>Cancel</button><button className="button button-danger" disabled={removing} onClick={() => void confirmDelete()}>{removing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}Delete review</button></div></Modal>}
     </div>
-  </div>{(updatePreparing || closePreparing) && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>{closePreparing ? 'Closing your workspace…' : updateState?.phase === 'installing' ? 'Installing your update…' : 'Saving your workspace…'}</h2><p>{closePreparing ? 'Saving your comments and completing active operations.' : updateState?.phase === 'installing' ? 'Your review work is saved. If macOS asks for an administrator password, use the system prompt to continue.' : 'Saving your comments and completing active operations before installing.'}</p></div>}</>;
+  </div>{closingReviewId && !updatePreparing && !closePreparing && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>Closing completed review…</h2><p>Saving your feedback and confirming every repository is finished.</p></div>}{(updatePreparing || closePreparing) && <div className="update-lock" role="status" aria-live="polite"><LoaderCircle className="spin" size={26} /><h2>{closePreparing ? 'Closing your workspace…' : updateState?.phase === 'installing' ? 'Installing your update…' : 'Saving your workspace…'}</h2><p>{closePreparing ? 'Saving your comments and completing active operations.' : updateState?.phase === 'installing' ? 'Your review work is saved. If macOS asks for an administrator password, use the system prompt to continue.' : 'Saving your comments and completing active operations before installing.'}</p></div>}</>;
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {

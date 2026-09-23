@@ -18,6 +18,7 @@ interface DiffViewerProps {
   onUpdateComment: (id: string, changes: { body?: string; resolved?: boolean }) => Promise<void>;
   onDeleteComment: (id: string) => Promise<void>;
   isRemote?: boolean;
+  allowNewComments?: boolean;
   publications?: Record<string, CommentPublication>;
   onBeginReanchor?: (id: string) => void;
   reanchorCommentId?: string | null;
@@ -68,7 +69,7 @@ function CommentEditor({ session, outdated, placement, isRemote, publication, on
   </article>;
 }
 
-export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment, onUpdateComment, onDeleteComment, isRemote, publications, onBeginReanchor, reanchorCommentId, onReanchorSelection }: DiffViewerProps) {
+export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment, onUpdateComment, onDeleteComment, isRemote, allowNewComments = true, publications, onBeginReanchor, reanchorCommentId, onReanchorSelection }: DiffViewerProps) {
   const alive = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
   const selectionVersion = useRef(0);
@@ -160,6 +161,7 @@ export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment
   }, [file.id, file.path, file.oldPath, file.oldContent, file.newContent, file.fingerprint]);
 
   async function beginComment(anchor: CommentAnchor) {
+    if (!allowNewComments) return;
     if (file.unavailable) { setError('This file could not be loaded. Refresh it before commenting.'); return; }
     const version = ++selectionVersion.current;
     if (reanchorCommentId && onReanchorSelection) {
@@ -184,7 +186,7 @@ export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment
   }
 
   const startComment = useCallback((range: SelectedLineRange | null) => {
-    if (!range) return;
+    if (!range || !allowNewComments) return;
     const side = range.side ?? 'additions';
     if (range.endSide && range.endSide !== side) { setError('Select lines from one version of the file to add a comment.'); return; }
     const lineStart = Math.min(range.start, range.end);
@@ -192,16 +194,16 @@ export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment
     const content = side === 'deletions' ? file.oldContent : file.newContent;
     if (content === null || lineStart < 1) return;
     void beginComment({ side, lineStart, lineEnd, ...captureCommentContext(content, lineStart, lineEnd), fingerprint: file.fingerprint, path: side === 'deletions' ? file.oldPath ?? file.path : file.path });
-  }, [file.oldContent, file.newContent, file.fingerprint, file.path, file.oldPath, reanchorCommentId, onReanchorSelection]);
+  }, [file.oldContent, file.newContent, file.fingerprint, file.path, file.oldPath, reanchorCommentId, onReanchorSelection, allowNewComments]);
   const options = useMemo<FileDiffOptions<Annotation, undefined>>(() => ({
     theme: 'pierre-dark', themeType: 'dark', diffStyle,
     diffIndicators: 'classic', disableFileHeader: true,
-    hunkSeparators: 'line-info-basic', enableLineSelection: true,
+    hunkSeparators: 'line-info-basic', enableLineSelection: allowNewComments,
     expandUnchanged: false, onPostRender: trackVisibleComments,
-    enableGutterUtility: true, lineHoverHighlight: 'both',
+    enableGutterUtility: allowNewComments, lineHoverHighlight: 'both',
     onLineSelected: startComment, onGutterUtilityClick: startComment, overflow: 'scroll',
     unsafeCSS: ':host { --diffs-font-family: Menlo, Consolas, monospace; --diffs-font-size: 12px; --diffs-line-height: 23px; --diffs-bg: #181818; --diffs-fg: #dcdcdc; --diffs-bg-addition-override: #213b2a; --diffs-bg-deletion-override: #3d2827; --diffs-modified-color-override: #b8b8b8; --diffs-selection-base: #b8b8b8; --diffs-selection-number-fg: #eeeeee; --diffs-bg-selection-override: #929292; --diffs-bg-selection-number-override: #777777; --diffs-bg-hover-override: #b8b8b8; }',
-  }), [diffStyle, startComment, trackVisibleComments]);
+  }), [diffStyle, startComment, trackVisibleComments, allowNewComments]);
 
   return <div className="review-diff-viewer" ref={scroller}>
     {error && <div className="review-component-error review-diff-error" role="alert">{error}<button type="button" aria-label="Dismiss error" onClick={() => setError('')}><X size={14} /></button></div>}
@@ -225,7 +227,7 @@ export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment
       <FileCode2 size={30} strokeWidth={1.25} />
       <h3>{file.unavailable ? 'This file could not be loaded' : file.tooLarge ? 'This file is too large to preview' : file.binary ? 'Binary file changed' : file.status === 'R' ? 'File renamed' : file.oldMode !== file.newMode ? 'File permissions changed' : file.status === 'A' ? 'Empty file added' : file.status === 'D' ? 'Empty file deleted' : 'No text changes'}</h3>
       <p>{file.unavailable ? file.unavailable : file.tooLarge ? 'You can still review the file in your editor and leave a file comment here.' : file.binary ? 'Review this file in its native application, then mark it reviewed or leave a file comment.' : file.status === 'R' ? `${file.oldPath ?? file.path} → ${file.path}` : file.oldMode && file.newMode && file.oldMode !== file.newMode ? `${file.oldMode} → ${file.newMode}` : 'There are no changed lines to display.'}</p>
-      <button type="button" disabled={!!file.unavailable} className="review-text-button" onClick={() => void beginComment({ side: file.status === 'D' ? 'deletions' : 'additions', lineStart: 0, lineEnd: 0, context: '', fingerprint: file.fingerprint, path: file.status === 'D' ? file.oldPath ?? file.path : file.path })}><MessageSquare size={14} />Add file comment</button>
+      <button type="button" disabled={!allowNewComments || !!file.unavailable} className="review-text-button" onClick={() => void beginComment({ side: file.status === 'D' ? 'deletions' : 'additions', lineStart: 0, lineEnd: 0, context: '', fingerprint: file.fingerprint, path: file.status === 'D' ? file.oldPath ?? file.path : file.path })}><MessageSquare size={14} />Add file comment</button>
     </div>}
   </div>;
 }

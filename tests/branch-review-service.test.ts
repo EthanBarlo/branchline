@@ -126,6 +126,53 @@ test('one starter PR includes every repository; drafts create no PR and publicat
   assert.equal(reopened.id, f.review.id);
 });
 
+test('refreshing or reopening an open PR replaces its captured target and merge base with remote revisions', async t => {
+  for (const reopen of [false, true]) {
+    const f = await fixture(t);
+    const captured = f.state.review(f.review.id)!.repositories!.find(row => row.repository.relativePath === '.')!;
+    assert.equal(captured.targetHash, hash('b'));
+    assert.equal(captured.mergeBaseHash, hash('c'));
+    f.refs.set('.:target', hash('e'));
+    f.prs.get('.#7')!.targetHash = hash('e');
+    const comparisons: { source: string; target: string }[] = [];
+    const mergeBase = f.client.mergeBase.bind(f.client);
+    f.client.mergeBase = async (repository, source, target) => {
+      if (repository.relativePath !== '.') return mergeBase(repository, source, target);
+      comparisons.push({ source, target });
+      return hash('f');
+    };
+    const active = reopen ? await f.restart() : f;
+    if (reopen) {
+      const review = await active.service.openPullRequestReview(f.project.id, [{ repositoryPath: '.', prId: 7 }]);
+      assert.equal(review.id, f.review.id);
+    }
+    const refreshed = await active.service.refreshReview(f.review.id);
+    const row = active.state.review(f.review.id)!.repositories!.find(row => row.repository.relativePath === '.')!;
+    assert.equal(row.status, 'pull-request');
+    assert.equal(row.targetHash, hash('e'));
+    assert.equal(row.mergeBaseHash, hash('f'));
+    assert.deepEqual(comparisons, [{ source: hash('a'), target: hash('e') }]);
+    assert.equal(refreshed.snapshot.files.find(file => file.repoRelativePath === '.')?.baseCommit, hash('f'));
+    assert.equal(f.calls.git, 0, 'The target revision is read from Bitbucket without inspecting local refs.');
+  }
+});
+
+test('disagreement between an open PR and its remote target leaves the comparison unavailable and blocks merging', async t => {
+  const f = await fixture(t);
+  f.refs.set('.:target', hash('e'));
+  const refreshed = await f.service.refreshReview(f.review.id);
+  const row = f.state.review(f.review.id)!.repositories!.find(row => row.repository.relativePath === '.')!;
+  assert.equal(row.status, 'unavailable');
+  assert.match(row.error ?? '', /branch changed.*consistent revision/i);
+  assert.equal(refreshed.snapshot.files.some(file => file.repoRelativePath === '.'), false);
+  assert.match(refreshed.snapshot.repos.find(repo => repo.relativePath === '.')?.error ?? '', /consistent revision/);
+  assert.ok((await f.service.previewMerge(f.review.id)).blockers.some(message => /consistent revision/.test(message)));
+  await assert.rejects(f.service.runPullRequestAction(f.review.id, 'merge'), /consistent revision/);
+  assert.deepEqual(f.calls.merges, []);
+  assert.deepEqual(f.calls.deletions, []);
+  assert.equal(f.calls.git, 0);
+});
+
 test('approve and merge creates unrequested child PRs, merges children first and deletes empty remote branches', async t => {
   const f = await fixture(t);
   const preview = await f.service.previewMerge(f.review.id);
@@ -332,7 +379,7 @@ test('unknown creation with no visible result never blindly posts again', async 
   assert.deepEqual(f.calls.creates, []); assert.deepEqual(f.calls.publishes, []);
 });
 
-test('uncertain PR creation remains a merge blocker after its source branch disappears', async t => {
+test('an exact closed PR resolves uncertain creation after its source branch disappears', async t => {
   const f = await fixture(t); await f.add();
   f.hooks.afterCreate = () => { throw new Error('Connection timed out after acceptance'); };
   await assert.rejects(f.service.publishFeedback(f.review.id), /timed out/);
@@ -340,9 +387,91 @@ test('uncertain PR creation remains a merge blocker after its source branch disa
   f.refs.delete('child:source'); f.refs.set('child:target', hash('9'));
   await f.service.refreshReview(f.review.id);
   const preview = await f.service.previewMerge(f.review.id);
-  assert.ok(preview.blockers.some(message => /creation is still unconfirmed/.test(message)));
-  await assert.rejects(f.service.runPullRequestAction(f.review.id, 'merge'), /creation is still unconfirmed/);
+  assert.deepEqual(preview.blockers, []);
+  const row = f.state.review(f.review.id)!.repositories!.find(row => row.repository.relativePath === 'child')!;
+  assert.equal(row.prId, 21);
+  assert.equal(row.creation, undefined);
   assert.deepEqual(f.calls.merges, []);
+});
+
+test('missing source branches with unique captured work or uncertain creation stay blocked without an exact closed PR', async t => {
+  for (const uncertain of [false, true]) {
+    const f = await fixture(t);
+    if (uncertain) {
+      await f.add(); f.hooks.createError = new Error('Connection timed out');
+      await assert.rejects(f.service.publishFeedback(f.review.id), /timed out/);
+    }
+    f.refs.delete('child:source'); f.refs.delete('child:target');
+    await f.service.refreshReview(f.review.id);
+    const row = f.state.review(f.review.id)!.repositories!.find(row => row.repository.relativePath === 'child')!;
+    assert.equal(row.status, 'unavailable');
+    assert.equal(row.sourceHash, hash('d'), 'missing refs cannot erase the captured work');
+    assert.match(row.error!, uncertain ? /creation is still unconfirmed/ : /changes without a matching closed PR/);
+    assert.ok((await f.service.previewMerge(f.review.id)).blockers.length);
+    assert.deepEqual(f.calls.merges, []); assert.deepEqual(f.calls.deletions, []);
+  }
+});
+
+test('closed linked and newly discovered PRs reconcile after both branches are deleted', async t => {
+  for (const state of ['MERGED', 'DECLINED', 'SUPERSEDED']) {
+    const f = await fixture(t);
+    f.prs.get('.#7')!.state = state;
+    f.prs.set('child#21', { ...pr(child, 21, hash('d')), state });
+    for (const path of ['.', 'child', 'empty', 'absent']) {
+      f.refs.delete(`${path}:source`); f.refs.delete(`${path}:target`);
+    }
+    const service = new BranchReviewService(f.reviews, f.state, () => f.client, () => undefined);
+    const result = await service.discover(f.review.id);
+    assert.deepEqual(result.repositories.map(row => row.status), ['pull-request', 'pull-request', 'missing-branch', 'missing-branch']);
+    assert.deepEqual(result.pullRequests.map(value => [value.id, value.state]), [[7, state], [21, state]]);
+    assert.equal(result.repositories[1].sourceHash, hash('d'));
+    assert.equal(result.repositories[1].targetHash, hash('b'));
+    assert.ok(result.repositories.every(row => !row.error));
+    assert.deepEqual(f.calls.merges, []); assert.deepEqual(f.calls.deletions, []); assert.equal(f.calls.git, 0);
+  }
+});
+
+test('old closed PRs never hide reused branches or attach to repositories with no captured source', async t => {
+  for (const sourceExists of [false, true]) {
+    const f = await fixture(t);
+    f.prs.set('child#21', { ...pr(child, 21, hash('e')), state: 'MERGED' });
+    f.prs.set('absent#22', { ...pr(absent, 22, hash('e')), state: 'MERGED' });
+    if (!sourceExists) f.refs.delete('child:source');
+    const service = new BranchReviewService(f.reviews, f.state, () => f.client, () => undefined);
+    const result = await service.discover(f.review.id);
+    assert.equal(result.repositories[1].status, sourceExists ? 'changes' : 'unavailable');
+    assert.equal(result.repositories[1].prId, undefined);
+    assert.equal(result.repositories[3].status, 'missing-branch');
+    assert.equal(result.repositories[3].prId, undefined);
+    assert.deepEqual(result.pullRequests.map(value => value.id), [7]);
+  }
+});
+
+test('declined and superseded PRs remain unmergeable even when their captured historical diff is readable', async t => {
+  for (const state of ['DECLINED', 'SUPERSEDED']) {
+    const f = await fixture(t);
+    f.prs.get('.#7')!.state = state;
+    await f.service.refreshReview(f.review.id);
+    assert.equal(f.state.review(f.review.id)!.repositories![0].status, 'pull-request');
+    const preview = await f.service.previewMerge(f.review.id);
+    assert.ok(preview.blockers.some(value => value.includes(state.toLowerCase())));
+    await assert.rejects(f.service.runPullRequestAction(f.review.id, 'merge'));
+    assert.deepEqual(f.calls.merges, []); assert.deepEqual(f.calls.deletions, []);
+  }
+});
+
+test('divergent or duplicate closed PRs cannot establish the result of captured branch changes', async t => {
+  for (const kind of ['target', 'duplicate']) {
+    const f = await fixture(t);
+    f.prs.set('child#21', { ...pr(child, 21, hash('d')), state: 'MERGED', ...(kind === 'target' ? { targetBranch: 'release' } : {}) });
+    if (kind === 'duplicate') f.prs.set('child#22', { ...pr(child, 22, hash('d')), state: 'DECLINED' });
+    f.refs.delete('child:source'); f.refs.delete('child:target');
+    const service = new BranchReviewService(f.reviews, f.state, () => f.client, () => undefined);
+    const result = await service.discover(f.review.id);
+    assert.equal(result.repositories[1].status, 'unavailable');
+    assert.match(result.repositories[1].error!, kind === 'target' ? /without a matching closed PR/ : /Multiple closed PRs/);
+    assert.deepEqual(result.pullRequests.map(value => value.id), [7]);
+  }
 });
 
 test('known creation rejection can retry, while concurrent source pushes preserve drafts and stop publication', async t => {

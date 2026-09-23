@@ -350,3 +350,9 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+.closed-review-notice { display: flex; align-items: center; gap: 8px; padding: 7px 13px; border-bottom: 1px solid #354638; background: #202b23; color: #b8d0bb; font-size: 11px; }
+.closed-review-notice > svg { flex-shrink: 0; }
+.closed-review-notice > span { flex: 1; overflow-wrap: anywhere; }
+.historical-diff-note { font-size: 10px; }
+.closed-review-warning { border-color: #52482e; background: #302c1e; color: #d5b978; }

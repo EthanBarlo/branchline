@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { CommentAutosave, flushPendingComments, hasPendingComments, loadCommentBackups, type CommentAnchor, type CommentBackup } from '../src/components/commentAutosave';
+import { CommentAutosave, flushPendingComments, hasPendingComments, hasReviewCommentBackups, loadCommentBackups, type CommentAnchor, type CommentBackup } from '../src/components/commentAutosave';
 import type { ReviewComment } from '../shared/types';
 
 class MemoryStorage {
@@ -15,6 +15,16 @@ class MemoryStorage {
 const storage = new MemoryStorage();
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
 beforeEach(() => storage.clear());
+
+test('retirement detects backups across every file and context without matching other reviews', () => {
+  const key = `branchline.commentDraft:${encodeURIComponent('review:old-context')}:${encodeURIComponent('missing:old-file.ts')}:comment`;
+  storage.setItem(key, '{unreadable backup');
+  assert.equal(hasReviewCommentBackups('review'), true);
+  assert.equal(hasReviewCommentBackups('review-other'), false);
+  assert.equal(hasReviewCommentBackups('rev'), false);
+  storage.removeItem(key);
+  assert.equal(hasReviewCommentBackups('review'), false);
+});
 
 function deferred() {
   let resolve!: () => void;
