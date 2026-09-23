@@ -183,6 +183,7 @@ test('approve alone does not merge, and does not repeat existing account approva
   assert.deepEqual(f.calls, ['approve:2']);
   assert.equal(f.item(1).merge, 'pending');
   assert.equal(f.item(2).approval, 'approved');
+  assert.ok(result.operation!.items.every(item => item.phase === undefined));
 });
 
 test('committed live progress shows approval, merging and confirmed merge before branch cleanup', async () => {
@@ -204,8 +205,12 @@ test('committed live progress shows approval, merging and confirmed merge before
     return false;
   };
   const result = await f.service.run('review', 'merge');
-  assert.deepEqual(events.filter(({ event }) => event.state.operation?.items[0].phase)
-    .map(({ event }) => event.state.operation!.items[0].phase), ['checking', 'approving', 'checking', 'merging', 'cleanup']);
+  const phases = events.flatMap(({ event }) => event.state.operation?.items[0].phase ?? []);
+  assert.deepEqual(phases.filter((phase, index) => phase !== phases[index - 1]), ['checking', 'approving', 'merging', 'cleanup']);
+  assert.ok(events.filter(({ event }) => {
+    const item = event.state.operation?.items[0];
+    return item?.approval === 'approved' && item.merge === 'pending';
+  }).every(({ event }) => event.state.operation!.items[0].phase === 'merging'), 'approval completion must not return the row to waiting or checking');
   for (const { event, disk } of events) {
     assert.equal(event.reviewId, 'review');
     assert.deepEqual(JSON.parse(JSON.stringify(event.state)), disk, 'listeners only receive the successfully renamed snapshot');
@@ -999,7 +1004,15 @@ test('merge preflight performs one whole-group check and scoped checks around ea
   const prs = Array.from({ length: 7 }, (_, index) => pr(index + 1, `repo-${index + 1}`));
   const f = await fixture(prs, false, prs.map(value => branchRow(value)));
   const checked: Array<string[] | undefined> = [];
-  f.hooks.branchPreflight = async options => { checked.push(options?.repositoryPaths); return []; };
+  f.hooks.branchPreflight = async options => {
+    checked.push(options?.repositoryPaths);
+    for (const repositoryPath of options?.repositoryPaths ?? []) {
+      const value = prs.find(pr => pr.repository.relativePath === repositoryPath)!;
+      const item = f.item(value.id);
+      assert.equal(item.phase, item.approval === 'approved' ? 'merging' : 'checking');
+    }
+    return [];
+  };
   assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
   assert.equal(checked.filter(paths => !paths).length, 1, 'group discovery is not repeated per repository');
   assert.equal(checked.filter(paths => paths?.length === 1).length, prs.length * 2);
@@ -1184,4 +1197,27 @@ test('a mapped pointer review finishes only after refreshed parent merge and per
   assert.equal(f.item(1).sourceHash, hash(2001));
   assert.equal(f.item(1).pointerState, 'ready');
   assert.equal(isMergeComplete(complete), true);
+});
+
+test('a failed post-approval check pauses the stable merge phase and resumes with a fresh checking phase', async () => {
+  const value = pr(1);
+  const f = await fixture([value], false, [branchRow(value)]);
+  const phases: MergeProgress['phase'][] = [];
+  f.hooks.branchPreflight = async options => {
+    if (!options?.repositoryPaths) return [];
+    phases.push(f.item(1).phase);
+    return phases.length === 2 ? ['The source branch could not be verified.'] : [];
+  };
+  const paused = await f.service.run('review', 'merge');
+  assert.equal(paused.operation!.state, 'paused');
+  assert.equal(f.item(1).approval, 'approved');
+  assert.equal(f.item(1).merge, 'pending');
+  assert.equal(f.item(1).phase, undefined);
+  assert.match(f.item(1).error ?? '', /could not be verified/);
+  assert.deepEqual(f.calls, ['approve:1'], 'the failed safety check still prevents sending a merge');
+  await f.reload();
+  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
+  assert.deepEqual(phases, ['checking', 'merging', 'checking', 'merging']);
+  assert.deepEqual(f.calls, ['approve:1', 'merge:1'], 'resuming keeps the existing account approval');
+  assert.equal(f.item(1).error, undefined);
 });

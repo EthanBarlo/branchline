@@ -2,9 +2,10 @@ import { createPortal } from 'react-dom';
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, Circle, CirclePause, ExternalLink, FolderGit2, Ticket, GitMerge, GitPullRequest, LoaderCircle, Plus, RefreshCw, Send, Settings2, SkipForward, Trash2, TriangleAlert, X } from 'lucide-react';
 import type { Project, Review, ReviewComment } from '../../shared/types';
-import type { BranchReviewRepository, CommentPublication, FeedbackPreview, IntegrationState, JiraIssue, MergeOperation, MergePreview, MergeProgress, ProjectIntegration, PullRequest, PullRequestFilter, RemoteRepositoryLoad, RemoteReviewState } from '../../shared/integrations';
+import type { BranchReviewRepository, CommentPublication, FeedbackPreview, IntegrationState, JiraIssue, MergeOperation, MergePreview, ProjectIntegration, PullRequest, PullRequestFilter, RemoteRepositoryLoad, RemoteReviewState } from '../../shared/integrations';
 import { isMergeComplete, pullRequestKey } from '../../shared/integrations';
 import { flushPendingComments } from './commentAutosave';
+import { repositoryMergeProgress } from './mergeProgress';
 import './integrations.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : String(error);
@@ -237,23 +238,6 @@ function FeedbackPullRequests({ pullRequests }: { pullRequests: PullRequest[] })
   </section>;
 }
 
-function mergeStatus(pr: PullRequest, item: MergeProgress | undefined, operation: MergeOperation | undefined, action: 'approve' | 'merge') {
-  const phaseLabels = { checking: 'Checking…', approving: 'Approving…', merging: 'Merging…', cleanup: 'Checking branch deletion…', 'updating-pointers': 'Updating pointers…' };
-  if (operation?.state === 'running' && item?.phase) return { label: phaseLabels[item.phase], tone: 'active', icon: LoaderCircle };
-  if (item?.merge === 'merged' || pr.state === 'MERGED') return item?.skipped || !item
-    ? { label: 'Skipped · already merged', tone: 'complete', icon: SkipForward }
-    : { label: 'Merged', tone: 'complete', icon: Check };
-  if (item?.merge === 'failed' || item?.approval === 'failed') return { label: 'Failed', tone: 'warning', icon: TriangleAlert };
-  if (item?.pointerState === 'review') return { label: 'Needs review', tone: 'warning', icon: CirclePause };
-  if (item?.merge === 'unknown') return { label: 'Awaiting confirmation', tone: 'warning', icon: CirclePause };
-  if (item?.merge === 'sending' || item?.merge === 'merging') return operation?.state === 'running'
-    ? { label: 'Merging…', tone: 'active', icon: LoaderCircle }
-    : { label: 'Awaiting confirmation', tone: 'warning', icon: CirclePause };
-  if (action === 'approve' && item?.approval === 'approved') return { label: 'Approved', tone: 'complete', icon: Check };
-  if (item?.error) return { label: 'Paused', tone: 'warning', icon: CirclePause };
-  return { label: 'Waiting', tone: 'waiting', icon: Circle };
-}
-
 function repositoryRows(pullRequests: PullRequest[], repositories?: BranchReviewRepository[]): BranchReviewRepository[] {
   const rows = [...(repositories || [])];
   for (const pr of pullRequests) {
@@ -267,15 +251,14 @@ function repositoryRows(pullRequests: PullRequest[], repositories?: BranchReview
   });
 }
 
-function branchStatus(row: BranchReviewRepository, merging = false) {
+function branchStatus(row: BranchReviewRepository) {
   if (row.creation?.state === 'sending') return { label: 'Creating PR…', tone: 'active', icon: LoaderCircle };
   if (row.creation?.state === 'unknown') return { label: 'PR creation unconfirmed', tone: 'warning', icon: CirclePause };
   if (row.creation?.state === 'failed') return { label: 'PR creation failed', tone: 'warning', icon: TriangleAlert };
-  if (merging && ['checking', 'sending'].includes(row.cleanup?.state || '')) return { label: row.cleanup?.state === 'sending' ? 'Deleting branch…' : 'Checking branch…', tone: 'active', icon: LoaderCircle };
   if (row.status === 'unavailable') return { label: 'Unavailable', tone: 'warning', icon: TriangleAlert };
   if (row.status === 'missing-branch') return { label: 'Branch missing', tone: 'waiting', icon: SkipForward };
-  if (row.status === 'no-changes') return { label: merging ? 'Skipped · no changes' : 'No changes', tone: row.cleanup?.state === 'deleted' ? 'complete' : 'waiting', icon: SkipForward };
-  if (row.status === 'changes') return { label: merging ? 'Create PR, then merge' : 'Changes without a PR', tone: 'waiting', icon: GitPullRequest };
+  if (row.status === 'no-changes') return { label: 'No changes', tone: row.cleanup?.state === 'deleted' ? 'complete' : 'waiting', icon: SkipForward };
+  if (row.status === 'changes') return { label: 'Changes without a PR', tone: 'waiting', icon: GitPullRequest };
   return { label: 'PR exists', tone: 'complete', icon: GitPullRequest };
 }
 
@@ -338,42 +321,31 @@ function BranchReviewRepositories({ remote, loadingRepositories }: { remote: Rem
   </>;
 }
 
-export function MergeProgressView({ pullRequests, repositories, operation, action = operation?.action || 'merge', checking = false }: { pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; operation?: MergeOperation; action?: 'approve' | 'merge'; checking?: boolean }) {
-  const ordered = repositoryRows(pullRequests, repositories);
-  const finished = ordered.filter(row => {
-    if (checking) return row.check?.state === 'ready' || row.check?.state === 'failed';
+export function MergeProgressView({ pullRequests, repositories, operation, action = operation?.action || 'merge', checking = false, running = false }: { pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; operation?: MergeOperation; action?: 'approve' | 'merge'; checking?: boolean; running?: boolean }) {
+  const rows = repositoryRows(pullRequests, repositories).map(row => {
     const pr = pullRequests.find(pr => pr.repository.relativePath === row.repository.relativePath && pr.id === row.prId);
     const item = pr && operation?.items.find(progress => progress.prKey === pullRequestKey(pr));
-    if (action === 'approve') return item?.approval === 'approved' || operation?.state === 'complete' && !pr && ['no-changes', 'missing-branch'].includes(row.status);
-    const cleanup = row.cleanup?.state || item?.cleanup;
-    return (!pr || item?.merge === 'merged' || pr.state === 'MERGED') && ['deleted', 'skipped'].includes(cleanup || '');
-  }).length;
-  const title = checking ? 'Checking repositories…' : !operation ? 'Repositories' : operation.state === 'complete' ? action === 'merge' ? finished === ordered.length ? 'Repositories complete' : 'Branch cleanup needs attention' : 'Repositories approved' : operation.state === 'paused' ? 'Operation paused' : action === 'merge' ? 'Merging repositories' : 'Approving repositories';
+    return { row, pr, item, ...repositoryMergeProgress({ row, pr, item, operation, action, checking, running }) };
+  });
+  const finished = rows.filter(row => row.finished).length;
+  const title = operation?.state === 'paused' ? 'Operation paused'
+    : operation?.state === 'complete' ? action === 'merge' ? finished === rows.length ? 'Repositories complete' : 'Branch cleanup needs attention' : 'Repositories approved'
+    : running || operation?.state === 'running' ? action === 'merge' ? 'Merging repositories' : 'Approving repositories'
+    : checking ? 'Checking repositories…' : 'Repositories';
+  const icons = { spinner: LoaderCircle, check: Check, skip: SkipForward, warning: TriangleAlert, pause: CirclePause, circle: Circle, pr: GitPullRequest };
   return <section className="merge-progress" aria-label="Pull request operation progress" aria-live="polite">
-    <div className="integration-section-heading"><h3>{title}</h3><span className="merge-progress-count">{finished} / {ordered.length}</span></div>
-    <ul className="merge-repository-list" aria-label="Repositories">{ordered.map(row => {
-      const pr = pullRequests.find(pr => pr.repository.relativePath === row.repository.relativePath && pr.id === row.prId);
-      const item = pr && operation?.items.find(progress => progress.prKey === pullRequestKey(pr));
-      const cleanupActive = action === 'merge' && ['checking', 'sending'].includes(row.cleanup?.state || '');
-      const approveSkipped = action === 'approve' && !pr && ['no-changes', 'missing-branch'].includes(row.status);
-      const checkingStatus = row.check?.state === 'ready' ? { label: 'Checked', tone: 'complete', icon: Check }
-        : row.check?.state === 'failed' ? { label: 'Check failed', tone: 'warning', icon: TriangleAlert }
-        : { label: row.check?.state === 'queued' ? 'Queued…' : 'Checking…', tone: 'active', icon: LoaderCircle };
-      const status = checking ? checkingStatus : cleanupActive ? branchStatus(row, true) : approveSkipped
-        ? { label: row.status === 'no-changes' ? 'Skipped · no changes' : 'Skipped · branch missing', tone: operation?.state === 'complete' ? 'complete' : 'waiting', icon: SkipForward }
-        : pr ? mergeStatus(pr, item, operation, action) : branchStatus(row, action === 'merge');
-      const Icon = status.icon;
-      const merged = item?.merge === 'merged' || pr?.state === 'MERGED';
-      const cleanup = !checking && action === 'merge' ? row.cleanup?.state || (merged && item?.phase !== 'cleanup' ? item?.cleanup || 'unknown' : undefined) : undefined;
+    <div className="integration-section-heading"><h3>{title}</h3><span className="merge-progress-count" title="Completed repository workflows">{finished} / {rows.length}</span></div>
+    <ul className="merge-repository-list" aria-label="Repositories">{rows.map(({ row, pr, item, status, cleanup, detail, error }) => {
+      const Icon = icons[status.icon];
       return <li className={`merge-progress-row merge-row-${status.tone}`} key={row.repository.relativePath} aria-label={pr ? `${pr.repository.repoSlug} pull request ${pr.id}` : `${row.repository.repoSlug} branch cleanup`}>
         <span className={`merge-repository-icon ${status.tone === 'active' ? 'is-active' : ''}`} aria-hidden="true"><Icon className={status.tone === 'active' ? 'spin' : ''} size={16} /></span>
         <div className="merge-repository-details"><div className="merge-repository-name"><strong>{row.repository.repoSlug}</strong>{pr && <IntegrationLink url={pr.url}>#{pr.id}<ExternalLink size={10} /></IntegrationLink>}</div><span className="merge-repository-path">{row.repository.relativePath === '.' ? 'Parent repository' : row.repository.relativePath}</span><code className="merge-repository-branches">{row.sourceBranch}<span> → </span>{row.targetBranch}</code></div>
-        <div className="merge-repository-result"><span className="merge-repository-status">{!checking && !pr && row.status === 'changes' && action === 'approve' && !row.creation ? 'Create PR, then approve' : status.label}</span><CleanupStatus state={cleanup} /></div>
-        {!checking && item?.pointerState === 'review' && <span className="pointer-progress">Pointer changes are ready. Return to the diff, review them, then resume.</span>}
-        {(checking ? row.check?.error : item?.error || row.error || row.creation?.error || row.cleanup?.error) && <span className="integration-inline-error">{checking ? row.check?.error : item?.error || row.error || row.creation?.error || row.cleanup?.error}</span>}
+        <div className="merge-repository-result"><span className="merge-repository-status">{status.label}</span>{detail && <span className="merge-repository-path">{detail}</span>}<CleanupStatus state={cleanup} /></div>
+        {item?.pointerState === 'review' && <span className="pointer-progress">Pointer changes are ready. Return to the diff, review them, then resume.</span>}
+        {error && <span className="integration-inline-error">{error}</span>}
       </li>;
     })}</ul>
-    {!checking && operation?.error && <Problem>{operation.error}</Problem>}
+    {operation?.error && <Problem>{operation.error}</Problem>}
   </section>;
 }
 
@@ -388,18 +360,16 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
   const [jiraError, setJiraError] = useState('');
   const [unknownIds, setUnknownIds] = useState<Record<string, string>>({});
   const [checkedDelivery, setCheckedDelivery] = useState<Record<string, boolean>>({});
-  const [previewChecksStarted, setPreviewChecksStarted] = useState(false);
   const latest = useRef({ onRemote, onChanged }); latest.current = { onRemote, onChanged };
   useEffect(() => {
     return window.reviewAPI.onRemoteReviewChanged(event => {
       if (event.reviewId === review.id) {
-        if (event.state.repositories?.some(row => row.check?.state === 'checking' || row.check?.state === 'queued')) setPreviewChecksStarted(true);
         latest.current.onRemote(event.state);
       }
     });
   }, [review.id]);
   async function preview(action: 'publish' | 'approve' | 'merge') {
-    setDialog(action); setLoading(true); setPreviewChecksStarted(false); setError(''); setResult(''); setJiraError(''); setFeedback(null); setMerge(null);
+    setDialog(action); setLoading(true); setError(''); setResult(''); setJiraError(''); setFeedback(null); setMerge(null);
     try {
       await flushPendingComments();
       if (action === 'merge' && isMergeComplete(remote)) {
@@ -483,8 +453,6 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
   const completed = dialog === 'approve' && operation?.state === 'complete' && operation.action === dialog && !needsPullRequest;
   const progressPullRequests = busy ? remote?.pullRequests || merge?.pullRequests || [] : merge?.pullRequests || remote?.pullRequests || [];
   const repositoryProgress = busy || loading ? remote?.repositories || merge?.repositories : merge?.repositories || remote?.repositories;
-  const progressRepositories = loading && !previewChecksStarted ? repositoryProgress?.map(row => ({ ...row, check: { state: 'queued' as const } })) : repositoryProgress;
-  const checkingRepositories = loading || busy && !!progressRepositories?.some(row => row.check?.state === 'queued' || row.check?.state === 'checking');
   return <><div className="remote-review-controls" aria-label="Bitbucket review controls">
     {remote && <BranchReviewRepositories remote={remote} loadingRepositories={loadingRepositories} />}
     <div className="remote-review-actions">
@@ -498,7 +466,7 @@ export function RemoteReviewControls({ review, remote, onRemote, onChanged, onRe
       <div className="integration-body"><p className="modal-introduction">{dialog === 'publish' ? 'Each comment goes to its file and exact lines in Bitbucket. Missing PRs are created when you publish; drafts remain saved locally.' : dialog === 'approve' ? 'Approve changes across this branch with your connected Bitbucket account. Missing PRs are created for repositories with changes.' : 'Each repository merges its changes and deletes its source branch as soon as it is ready. Repositories without changes only need branch cleanup. Progress is saved so you can resume.'}</p>{loading && dialog === 'publish' && <p className="integration-loading" role="status"><LoaderCircle className="spin" size={15} />Checking the branch across all repositories…</p>}{error && <Problem>{error}</Problem>}{result && <p className="integration-note" role="status">{result}</p>}
         {dialog === 'publish' && <FeedbackPullRequests pullRequests={remote?.pullRequests || []} />}
         {dialog === 'publish' && feedback && <><div className="feedback-publication-list">{feedback.items.map(item => <article className="feedback-publication" key={item.commentId}><div><code>{item.repositoryPath} · {item.createsPullRequest ? 'Create PR on publish' : `#${item.prId}`}</code><span className={`publication-status publication-${item.state}`}>{item.state === 'synced' ? 'Changes to publish' : human(item.state)}</span><span className="feedback-publication-action">{human(item.action)}</span></div><strong>{item.path} · {item.lineStart ? `L${item.lineStart}${item.lineEnd !== item.lineStart ? `–${item.lineEnd}` : ''}` : 'File comment'} · {item.side === 'deletions' ? 'Original' : 'New version'}</strong><p>{item.body}</p>{item.error && <Problem>{item.error}</Problem>}{item.state === 'unknown' && <div className="unknown-delivery"><p className="integration-note">Delivery is uncertain. Check Bitbucket before deciding whether to retry.</p>{remote?.pullRequests.filter(pr => pr.repository.relativePath === item.repositoryPath && pr.id === item.prId).map(pr => <IntegrationLink key={pullRequestKey(pr)} url={pr.url}>Check PR #{pr.id} in Bitbucket<ExternalLink size={11} /></IntegrationLink>)}<div className="unknown-comment-link"><input className="text-input" type="text" inputMode="numeric" aria-label="Existing Bitbucket comment ID" placeholder="Existing comment ID" value={unknownIds[item.commentId] || ''} disabled={busy} onChange={event => setUnknownIds(previous => ({ ...previous, [item.commentId]: event.target.value }))} /><button type="button" className="button button-secondary" disabled={busy || !/^[1-9]\d*$/.test(unknownIds[item.commentId] || '') || !Number.isSafeInteger(Number(unknownIds[item.commentId]))} onClick={() => void reconcileUnknown(item.commentId, Number(unknownIds[item.commentId]))}>Link existing comment</button></div><label className="integration-checkbox"><input type="checkbox" checked={!!checkedDelivery[item.commentId]} disabled={busy} onChange={event => setCheckedDelivery(previous => ({ ...previous, [item.commentId]: event.target.checked }))} /><span>I checked Bitbucket: this comment was not posted.</span></label><button type="button" className="integration-link" disabled={busy || !checkedDelivery[item.commentId]} onClick={() => void reconcileUnknown(item.commentId, null)}>Allow retry</button></div>}{item.state === 'conflict' && <div className="publication-conflict"><span>Bitbucket version</span><p>{item.remote?.deleted ? 'Deleted in Bitbucket' : item.remote?.body}</p><div className="integration-inline-actions"><button type="button" disabled={busy} onClick={() => void conflict(item.commentId, 'local')}>Keep local version</button><button type="button" disabled={busy} onClick={() => void conflict(item.commentId, 'remote')}>Use Bitbucket version</button></div></div>}{!remote?.publications[item.commentId]?.remoteId && review.comments.some(comment => comment.id === item.commentId) && item.state !== 'sending' && item.state !== 'unknown' && <button type="button" className="integration-link" disabled={busy} onClick={() => { setDialog(null); onReanchor(item.commentId); }}>Choose current lines…</button>}</article>)}</div>{!feedback.items.length && <p className="integration-note">No feedback to publish.</p>}{feedback.blockers.map((blocker, index) => <Problem key={index}>{blocker}</Problem>)}</>}
-        {dialog !== 'publish' && <><MergeProgressView pullRequests={progressPullRequests} repositories={progressRepositories} operation={visibleOperation} action={dialog} checking={checkingRepositories} />{merge && <>{dialog === 'merge' && !readyToFinish && <p className="integration-note pointer-preview">Submodule pointers: {merge.updateSubmodulePointers ? 'update after children merge; review before parent merge' : 'leave unchanged'}</p>}{merge.warnings.map((warning, index) => <p className="integration-note" key={index}>{warning}</p>)}{merge.blockers.map((blocker, index) => <Problem key={index}>{blocker}</Problem>)}</>}{jiraError && <Problem>{jiraError}</Problem>}</>}
+        {dialog !== 'publish' && <><MergeProgressView pullRequests={progressPullRequests} repositories={repositoryProgress} operation={visibleOperation} action={dialog} checking={loading} running={busy} />{merge && <>{dialog === 'merge' && !readyToFinish && <p className="integration-note pointer-preview">Submodule pointers: {merge.updateSubmodulePointers ? 'update after children merge; review before parent merge' : 'leave unchanged'}</p>}{merge.warnings.map((warning, index) => <p className="integration-note" key={index}>{warning}</p>)}{merge.blockers.map((blocker, index) => <Problem key={index}>{blocker}</Problem>)}</>}{jiraError && <Problem>{jiraError}</Problem>}</>}
       </div><div className="modal-footer">{dialog !== 'publish' && jiraLink && <button className="button button-secondary merge-jira-button" title={`Open ${jiraLink.key} to update its status in Jira`} onClick={() => void openTicket()}><ExternalLink size={12} />Open in Jira</button>}<button className="button button-secondary" disabled={busy || loading} onClick={() => setDialog(null)}>{visibleOperation && resumeNeeded ? 'Return to review' : 'Close'}</button>{dialog === 'publish' && <button className="button button-secondary" disabled={busy || loading} onClick={() => void preview('publish')}>Refresh delivery status</button>}<button className="button button-primary" disabled={busy || loading || !!completed || (dialog === 'publish' ? !publishable : dialog === 'merge' ? !canMerge : !canApprove)} onClick={() => void run()}>{busy && <LoaderCircle className="spin" size={13} />}{busy ? 'Working…' : dialog === 'publish' ? 'Publish to Bitbucket' : completed ? 'Complete' : dialog === 'merge' && readyToFinish ? 'Finish review' : visibleOperation && resumeNeeded ? 'Resume operation' : dialog === 'approve' ? 'Approve pull requests' : 'Approve, merge and delete branches'}</button></div>
     </IntegrationDialog>}
   </>;

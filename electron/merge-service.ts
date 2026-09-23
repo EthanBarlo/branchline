@@ -435,12 +435,12 @@ export class MergeService {
       if (item.merge === 'merged') return null;
       if (item.merge === 'sending' || item.merge === 'unknown' || item.merge === 'merging') return stopWith(`${reviewed.repository.relativePath}: merge delivery is still uncertain or pending. Resume after Bitbucket has confirmed its result.`);
       try {
+        await this.progress(id, key, { phase: 'checking', error: undefined });
         if (this.branches) {
           const blockers = await this.branches.preflight(id, { repositoryPaths: [reviewed.repository.relativePath] });
           if (blockers.length) throw new Error(blockers.join('\n'));
         }
         if (stopped()) return null;
-        await this.progress(id, key, { phase: 'checking', error: undefined });
         let latest = await client.getPullRequest(reviewed.repository, reviewed.id);
         if (latest.state === 'MERGED') { await this.confirmMerged(id, key, latest, client, true, stop); return null; }
         if (!sameRevision(reviewed, latest)) throw new Error(`${reviewed.repository.relativePath}: the PR changed. Refresh and review it before resuming.`);
@@ -490,14 +490,13 @@ export class MergeService {
         if (stopped()) return null;
         if (!latest.participants.some(p => p.id === account && p.approved)) {
           await client.approve(latest);
-          await this.progress(id, key, { approval: 'approved', phase: undefined, error: undefined });
-        } else await this.progress(id, key, { approval: 'approved', phase: undefined, error: undefined });
+        }
+        await this.progress(id, key, { approval: 'approved', phase: action === 'merge' ? 'merging' : undefined, error: undefined });
         if (action === 'approve' || stopped()) return null;
         if (this.branches) {
           const blockers = await this.branches.preflight(id, { repositoryPaths: [reviewed.repository.relativePath] });
           if (blockers.length) throw new Error(blockers.join('\n'));
         }
-        await this.progress(id, key, { phase: 'checking' });
         latest = await client.getPullRequest(reviewed.repository, reviewed.id);
         if (!sameRevision(reviewed, latest)) throw new Error('The PR changed after approval. Refresh before merging.');
         if (latest.state !== 'OPEN' || latest.draft || !latest.mergeStrategies.includes('merge_commit')) throw new Error('The PR is no longer ready for a standard merge. Refresh its status before resuming.');
