@@ -95,6 +95,24 @@ test('a merge alone or retained or uncertain cleanup never counts as completed',
   }
 });
 
+test('merged and unchanged repositories wait for the group before branch cleanup starts', () => {
+  const { row, item } = fixture();
+  for (const state of ['queued', 'checking', 'ready'] as const) {
+    const merged = progress({ row: { ...row, check: { state } }, item: { ...item, merge: 'merged' } });
+    assert.equal(merged.status.label, 'Merged · waiting for other merges');
+    assert.equal(merged.status.tone, 'waiting');
+    assert.equal(merged.finished, false);
+    const empty = progress({ row: { ...row, status: 'no-changes', prId: undefined, check: { state } }, pr: undefined, item: undefined });
+    assert.equal(empty.status.label, 'Waiting for merges');
+    assert.equal(empty.finished, false);
+  }
+  for (const state of ['checking', 'sending'] as const) {
+    const cleanup = progress({ row: { ...row, cleanup: { state } }, item: { ...item, merge: 'merged' } });
+    assert.equal(cleanup.status.label, 'Deleting branch…');
+    assert.equal(cleanup.status.tone, 'active');
+  }
+});
+
 test('legacy PR progress uses its own cleanup receipt when no persisted repository row exists', () => {
   const { row, item, pr } = fixture();
   const displayed = progress({ row: { ...row, check: undefined }, pr: { ...pr, state: 'MERGED' }, item: { ...item, merge: 'merged', cleanup: 'deleted', skipped: true } });

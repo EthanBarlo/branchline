@@ -71,7 +71,6 @@ async function fixture(prs = [pr(1), pr(2, 'packages/child', '.', 'packages/chil
     Object.assign(latest, { state: 'MERGED', mergeCommit: hash(value.id + 1000) });
     if (repositories) {
       remoteBranches.set(`${value.repository.relativePath}:${value.targetBranch}`, latest.mergeCommit!);
-      if (!hooks.retained) remoteBranches.delete(`${value.repository.relativePath}:${value.sourceBranch}`);
     }
     return structuredClone(latest);
   };
@@ -202,13 +201,13 @@ test('committed live progress shows approval, merging and confirmed merge before
   };
   f.hooks.retained = async () => {
     assert.equal(f.item(1).merge, 'merged', 'merge success must be durable while branch lookup is in flight');
-    assert.equal(f.item(1).phase, 'cleanup');
+    assert.equal(f.item(1).phase, undefined);
     assert.equal(f.item(1).cleanup, undefined);
     return false;
   };
   const result = await f.service.run('review', 'merge');
   const phases = events.flatMap(({ event }) => event.state.operation?.items[0].phase ?? []);
-  assert.deepEqual(phases.filter((phase, index) => phase !== phases[index - 1]), ['checking', 'approving', 'merging', 'cleanup']);
+  assert.deepEqual(phases.filter((phase, index) => phase !== phases[index - 1]), ['checking', 'approving', 'merging']);
   assert.ok(events.filter(({ event }) => {
     const item = event.state.operation?.items[0];
     return item?.approval === 'approved' && item.merge === 'pending';
@@ -339,6 +338,65 @@ test('blocks prohibited merge strategies, drafts and unavailable snapshots befor
   f.setSnapshot(undefined);
   await assert.rejects(f.service.run('review', 'merge'), /Open and refresh/);
   assert.deepEqual(f.calls, []);
+});
+
+test('known merge conflicts and unavailable conflict checks block the preview and every mutation', async () => {
+  for (const unavailable of [false, true]) {
+    const value = pr(1);
+    const f = await fixture([value], false, [branchRow(value), branchRow(pr(2, 'empty'), 'no-changes')]);
+    f.hooks.conflicts = async (mapping, source, target) => {
+      assert.equal(mapping.relativePath, value.repository.relativePath);
+      assert.equal(source, value.sourceHash); assert.equal(target, value.targetHash);
+      if (unavailable) throw providerError(403, 'Conflict details require repository access');
+      return [{ path: 'src/example.ts', scenario: 'CONTENT', message: 'Both sides changed this file' }];
+    };
+    const preview = await f.service.preview('review', 'merge');
+    assert.match(preview.blockers.join('\n'), unavailable ? /could not check merge conflicts/ : /merge conflicts in src\/example.ts.*Resolve conflicts in Bitbucket/);
+    assert.equal(f.state.review('review')!.repositories![0].check?.state, 'failed');
+    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /src\/example.ts/);
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.deletions.length, 0);
+    assert.equal((await f.service.run('review', 'approve')).operation!.state, 'complete', 'approve-only does not require a conflict-free merge');
+    assert.deepEqual(f.calls, ['approve:1']);
+  }
+});
+
+test('changed branches without PRs are checked for conflicts before PR creation', async () => {
+  for (const unavailable of [false, true]) {
+    const value = pr(1);
+    const child = pr(2, 'child');
+    const f = await fixture([value], false, [branchRow(value), branchRow(child, 'changes')]);
+    f.hooks.ensurePrs = async () => { assert.fail('Conflict checks must finish before PR creation'); };
+    f.hooks.conflicts = async (mapping, source, target) => {
+      if (mapping.relativePath !== 'child') return [];
+      assert.equal(source, child.sourceHash); assert.equal(target, child.targetHash);
+      if (unavailable) throw new Error('Conflict response unavailable');
+      return [{ path: 'child.txt', scenario: 'CONTENT', message: 'Conflict' }];
+    };
+    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /child.txt/);
+    assert.equal(f.state.review('review')!.repositories![1].check?.state, 'failed');
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.deletions.length, 0);
+  }
+});
+
+test('newly reported conflicts after approval prevent the merge and all cleanup', async () => {
+  const value = pr(1);
+  const f = await fixture([value], false, [branchRow(value), branchRow(pr(2, 'empty'), 'no-changes')]);
+  let reads = 0;
+  f.hooks.conflicts = async () => {
+    reads++;
+    return f.current(value).participants.some(participant => participant.approved)
+      ? [{ path: 'changed.ts', scenario: 'CONTENT', message: 'Conflict' }] : [];
+  };
+  const result = await f.service.run('review', 'merge');
+  assert.equal(result.operation!.state, 'paused');
+  assert.match(result.operation!.error!, /changed.ts/);
+  assert.equal(f.item(1).phase, undefined);
+  assert.equal(reads, 2, 'conflicts are checked during the preview and immediately before merging');
+  assert.deepEqual(f.calls, ['approve:1']);
+  assert.equal(f.deletions.length, 0);
+  assert.ok(result.repositories!.every(row => f.remoteBranches.has(`${row.repository.relativePath}:${row.sourceBranch}`)));
 });
 
 test('surfaces permission failures and stops before merging that PR or any parent', async () => {
@@ -624,7 +682,7 @@ async function addCreatedPr(f: Awaited<ReturnType<typeof fixture>>, value: PullR
   });
 }
 
-test('creates PRs for every reviewed changed branch and processes empty branch cleanup alongside merges', async () => {
+test('creates PRs for every reviewed changed branch and cleans all branches after merging', async () => {
   const parent = pr(1);
   const child = pr(2, 'packages/child', '.', 'packages/child');
   const empty = pr(3, 'packages/empty', '.', 'packages/empty');
@@ -647,10 +705,10 @@ test('creates PRs for every reviewed changed branch and processes empty branch c
   assert.equal(result.operation?.state, 'complete');
   assert.equal(isMergeComplete(result), true, 'all persisted merge and cleanup receipts allow finishing the review');
   assert.equal(f.calls[0], 'create:2');
-  assert.deepEqual([...f.calls.slice(1)].sort(), ['approve:1', 'approve:2', 'delete:packages/empty', 'merge:1', 'merge:2']);
+  assert.deepEqual([...f.calls.slice(1)].sort(), ['approve:1', 'approve:2', 'delete:.', 'delete:packages/child', 'delete:packages/empty', 'merge:1', 'merge:2']);
   assert.ok(result.repositories!.every(row => row.cleanup?.state === 'deleted'));
   assert.equal(result.pullRequests.length, 2, 'empty branches never need a PR');
-  assert.equal(f.deletions[0].expectedHead, empty.sourceHash);
+  assert.equal(f.deletions.find(input => input.repository.relativePath === 'packages/empty')!.expectedHead, empty.sourceHash);
 });
 
 test('approve creates missing changed-branch PRs without merging or deleting branches', async () => {
@@ -711,7 +769,7 @@ test('cleanup pauses for unmerged, changed, default and open-PR branches and ski
     f.hooks.openPrs = async mapping => mapping.relativePath === 'open' ? [{ ...pr(20, 'open'), targetBranch: 'other-target' }] : [];
     const result = await f.service.run('review', 'merge');
     assert.equal(result.operation?.state, name === 'missing' ? 'complete' : 'paused');
-    assert.equal(f.deletions.length, 0);
+    assert.equal(f.deletions.filter(input => input.repository.relativePath === name).length, 0);
     const saved = result.repositories!.find(row => row.repository.relativePath === name)!;
     assert.equal(saved.cleanup?.state, name === 'missing' ? 'skipped' : 'retained');
     if (saved.cleanup?.state === 'retained') assert.ok(saved.cleanup.error);
@@ -734,26 +792,29 @@ test('cleanup retries a known protected-branch refusal after restart without rep
   result = await f.service.run('review', 'merge');
   assert.equal(result.operation?.state, 'complete');
   assert.equal(isMergeComplete(result), true, 'all persisted merge and cleanup receipts allow finishing the review');
-  assert.deepEqual([...f.calls].sort(), ['approve:1', 'delete:a', 'delete:b', 'delete:b', 'merge:1']);
+  assert.deepEqual([...f.calls].sort(), ['approve:1', 'delete:.', 'delete:a', 'delete:b', 'delete:b', 'merge:1']);
 });
 
 test('an uncertain deletion reconciles after restart and does not resend when the branch is still present', async () => {
   const parent = pr(1);
   const empty = pr(2, 'empty');
   const f = await fixture([parent], false, [branchRow(parent), branchRow(empty, 'no-changes')]);
-  f.hooks.deleteBranch = async () => { throw new Error('connection reset after sending deletion'); };
+  f.hooks.deleteBranch = async input => {
+    if (input.repository.relativePath === 'empty') throw new Error('connection reset after sending deletion');
+    f.remoteBranches.delete(`${input.repository.relativePath}:${input.sourceBranch}`);
+  };
   let result = await f.service.run('review', 'merge');
   assert.equal(result.operation?.state, 'paused');
   assert.equal(result.repositories!.find(row => row.repository.relativePath === 'empty')!.cleanup?.state, 'unknown');
   await f.reload();
   result = await f.service.run('review', 'merge');
   assert.equal(result.operation?.state, 'paused');
-  assert.equal(f.deletions.length, 1);
+  assert.equal(f.deletions.filter(input => input.repository.relativePath === 'empty').length, 1);
   assert.match(result.operation!.error!, /has not sent another deletion/);
   f.remoteBranches.delete(`empty:${empty.sourceBranch}`);
   result = await f.service.run('review', 'merge');
   assert.equal(result.operation?.state, 'complete');
-  assert.equal(f.deletions.length, 1);
+  assert.equal(f.deletions.filter(input => input.repository.relativePath === 'empty').length, 1);
 });
 
 test('cleanup reconciles a lost success response and retains a source that races deletion', async () => {
@@ -987,7 +1048,7 @@ test('a failed parallel branch deletion drains in-flight deletions and leaves qu
   const merging = f.service.run('review', 'merge').finally(() => { settled = true; });
   try {
     await until(() => f.deletions.length === 4, 'four concurrent branch deletions');
-    assert.equal(f.calls.filter(call => call.startsWith('merge:')).length, 0, 'queued PR waits for one of the four repository workers');
+    assert.equal(f.calls.filter(call => call.startsWith('merge:')).length, 1, 'all PR merges finish before branch deletion starts');
     gates.get('empty-2')!.reject(new Error('remote rejected: branch deletion not permitted'));
     await until(() => f.state.review('review')!.repositories!.find(row => row.repository.relativePath === 'empty-2')!.cleanup?.state === 'retained', 'the protected branch result');
     assert.equal(settled, false);
@@ -1021,6 +1082,29 @@ test('merge preflight performs one whole-group check and scoped checks around ea
   for (const value of prs) assert.equal(checked.filter(paths => paths?.[0] === value.repository.relativePath).length, 2);
 });
 
+test('a failed post-approval check pauses the stable merge phase and resumes with a fresh checking phase', async () => {
+  const value = pr(1);
+  const f = await fixture([value], false, [branchRow(value)]);
+  const phases: MergeProgress['phase'][] = [];
+  f.hooks.branchPreflight = async options => {
+    if (!options?.repositoryPaths) return [];
+    phases.push(f.item(1).phase);
+    return phases.length === 2 ? ['The source branch could not be verified.'] : [];
+  };
+  const paused = await f.service.run('review', 'merge');
+  assert.equal(paused.operation!.state, 'paused');
+  assert.equal(f.item(1).approval, 'approved');
+  assert.equal(f.item(1).merge, 'pending');
+  assert.equal(f.item(1).phase, undefined);
+  assert.match(f.item(1).error ?? '', /could not be verified/);
+  assert.deepEqual(f.calls, ['approve:1'], 'the failed safety check still prevents sending a merge');
+  await f.reload();
+  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
+  assert.deepEqual(phases, ['checking', 'merging', 'checking', 'merging']);
+  assert.deepEqual(f.calls, ['approve:1', 'merge:1', 'delete:.'], 'resuming keeps the existing account approval');
+  assert.equal(f.item(1).error, undefined);
+});
+
 test('a parent can finish merging while its child is still in flight when pointer updates are off', async () => {
   const f = await fixture();
   const child = deferred();
@@ -1035,7 +1119,7 @@ test('a parent can finish merging while its child is still in flight when pointe
   assert.equal((await merging).operation!.state, 'complete');
 });
 
-test('empty repositories delete their branches while an unrelated PR is still merging', async () => {
+test('empty repositories retain their branches until every PR has finished merging', async () => {
   const slow = pr(1, 'a-pr');
   const empty = branchRow(pr(2, 'b-empty'), 'no-changes');
   const f = await fixture([slow], false, [branchRow(slow), empty]);
@@ -1043,18 +1127,19 @@ test('empty repositories delete their branches while an unrelated PR is still me
   f.hooks.merge = async value => { await gate.promise; return { pr: f.markMerged(value) }; };
   const merging = f.service.run('review', 'merge');
   try {
-    await until(() => f.state.review('review')!.operation?.items.find(item => item.prKey === pullRequestKey(slow))?.merge === 'sending' && f.state.review('review')!.repositories![1].cleanup?.state === 'deleted', 'empty branch deletion during the PR merge');
+    await until(() => f.state.review('review')!.operation?.items.find(item => item.prKey === pullRequestKey(slow))?.merge === 'sending', 'the PR merge request');
     assert.equal(f.state.review('review')!.operation!.state, 'running');
     assert.equal(f.item(1).phase, 'merging');
-    assert.equal(f.deletions[0].expectedHead, empty.sourceHash);
-    assert.equal(f.remoteBranches.has(`b-empty:${empty.sourceBranch}`), false);
+    assert.equal(f.deletions.length, 0);
+    assert.equal(f.remoteBranches.has(`b-empty:${empty.sourceBranch}`), true);
   } finally { gate.resolve(); }
   const result = await merging;
   assert.equal(result.operation!.state, 'complete');
   assert.ok(result.repositories!.every(row => row.cleanup?.state === 'deleted'));
+  assert.equal(f.deletions.find(input => input.repository.relativePath === 'b-empty')!.expectedHead, empty.sourceHash);
 });
 
-test('a merged PR completes lease-protected fallback cleanup before another PR finishes merging', async () => {
+test('a merged PR retains its source while another PR is still merging', async () => {
   const prs = [pr(1, 'a-fast'), pr(2, 'b-slow')];
   const f = await fixture(prs, false, prs.map(value => branchRow(value)));
   const gate = deferred();
@@ -1062,20 +1147,19 @@ test('a merged PR completes lease-protected fallback cleanup before another PR f
   f.hooks.merge = async value => { if (value.id === 2) await gate.promise; return { pr: f.markMerged(value) }; };
   const merging = f.service.run('review', 'merge');
   try {
-    await until(() => f.state.review('review')!.operation?.items.find(item => item.prKey === pullRequestKey(prs[0]))?.cleanup === 'deleted', 'the fast PR cleanup receipt');
+    await until(() => f.state.review('review')!.operation?.items.find(item => item.prKey === pullRequestKey(prs[0]))?.merge === 'merged', 'the fast PR merge receipt');
     assert.equal(f.item(2).merge, 'sending');
-    assert.equal(f.deletions.length, 1);
-    assert.equal(f.deletions[0].repository.relativePath, 'a-fast');
-    assert.equal(f.deletions[0].expectedHead, prs[0].sourceHash);
-    assert.equal(f.state.review('review')!.repositories![0].cleanup?.state, 'deleted');
+    assert.equal(f.deletions.length, 0);
+    assert.equal(f.item(1).phase, undefined);
+    assert.equal(f.remoteBranches.has(`a-fast:${prs[0].sourceBranch}`), true);
   } finally { gate.resolve(); }
   assert.equal((await merging).operation!.state, 'complete');
   assert.equal(f.deletions.length, 2);
 });
 
-test('PR merges and empty branch cleanup share the same four-repository concurrency budget', async () => {
+test('all PR merges finish before a separate parallel cleanup stage with four workers', async () => {
   const prs = [pr(1, 'a-pr'), pr(5, 'e-pr')];
-  const rows = [branchRow(prs[0]), ...['b-empty', 'c-empty', 'd-empty'].map((name, index) => branchRow(pr(index + 2, name), 'no-changes')), branchRow(prs[1])];
+  const rows = [branchRow(prs[0]), ...['b-empty', 'c-empty', 'd-empty', 'f-empty'].map((name, index) => branchRow(pr(index + 20, name), 'no-changes')), branchRow(prs[1])];
   const f = await fixture(prs, false, rows);
   const gates = new Map(rows.map(row => [row.repository.relativePath, deferred()]));
   let active = 0; let peak = 0;
@@ -1083,72 +1167,107 @@ test('PR merges and empty branch cleanup share the same four-repository concurre
     active++; peak = Math.max(peak, active);
     try { await gates.get(repositoryPath)!.promise; } finally { active--; }
   };
-  f.hooks.merge = async value => { await wait(value.repository.relativePath); return { pr: f.markMerged(value) }; };
-  f.hooks.deleteBranch = async input => { await wait(input.repository.relativePath); f.remoteBranches.delete(`${input.repository.relativePath}:${input.sourceBranch}`); };
+  f.hooks.deleteBranch = async input => {
+    assert.ok(f.state.review('review')!.operation!.items.every(item => item.merge === 'merged'));
+    await wait(input.repository.relativePath); f.remoteBranches.delete(`${input.repository.relativePath}:${input.sourceBranch}`);
+  };
   const merging = f.service.run('review', 'merge');
   try {
-    await until(() => active === 4, 'one merge and three branch deletions');
+    await until(() => active === 4, 'four branch deletions after merging');
     assert.ok(f.calls.includes('merge:1'));
-    assert.equal(f.deletions.length, 3);
-    assert.ok(!f.calls.includes('approve:5'));
+    assert.equal(f.deletions.length, 4);
+    assert.ok(f.calls.includes('merge:5'));
     gates.get('b-empty')!.resolve();
-    await until(() => f.calls.includes('merge:5'), 'the next PR after an empty branch finishes');
+    await until(() => f.deletions.length === 5, 'the next branch after one deletion finishes');
     assert.equal(active, 4);
-    assert.equal(f.item(1).merge, 'sending');
+    assert.equal(f.item(1).merge, 'merged');
   } finally { for (const gate of gates.values()) gate.resolve(); }
   assert.equal((await merging).operation!.state, 'complete');
   assert.equal(peak, 4);
 });
 
-test('mixed pipeline failure drains sent merges and deletions, prevents unsent cleanup, and resumes without repeating receipts', async () => {
+test('a partial merge failure retains all branches and resumes without repeating confirmed merges', async () => {
   const prs = [pr(1, 'a-failing'), pr(2, 'b-merging')];
   const rows = [...prs.map(value => branchRow(value)), ...['c-deleting', 'd-checking', 'e-queued'].map((name, index) => branchRow(pr(index + 3, name), 'no-changes'))];
   const f = await fixture(prs, false, rows);
-  const failure = deferred(); const merged = deferred(); const deleted = deferred(); const check = deferred();
+  const failure = deferred(); const merged = deferred();
   f.hooks.merge = async value => { await (value.id === 1 ? failure : merged).promise; return { pr: f.markMerged(value) }; };
-  f.hooks.deleteBranch = async input => { if (input.repository.relativePath === 'c-deleting') await deleted.promise; f.remoteBranches.delete(`${input.repository.relativePath}:${input.sourceBranch}`); };
-  f.hooks.branchPreflight = async options => { if (options?.repositoryPaths?.includes('d-checking')) await check.promise; return []; };
   let settled = false;
   const merging = f.service.run('review', 'merge').finally(() => { settled = true; });
   try {
-    await until(() => f.calls.includes('merge:1') && f.calls.includes('merge:2') && f.calls.includes('delete:c-deleting'), 'mixed in-flight writes');
+    await until(() => f.calls.includes('merge:1') && f.calls.includes('merge:2'), 'both in-flight merge requests');
     failure.reject(providerError(409, 'Required merge check failed'));
     await until(() => f.item(1).merge === 'failed', 'the persisted merge failure');
     assert.equal(settled, false);
-    assert.ok(!f.calls.includes('delete:d-checking') && !f.calls.includes('delete:e-queued'));
-  } finally { merged.resolve(); deleted.resolve(); check.resolve(); failure.resolve(); }
+    assert.equal(f.deletions.length, 0);
+  } finally { merged.resolve(); failure.resolve(); }
   const result = await merging;
   assert.equal(result.operation!.state, 'paused');
   assert.equal(f.item(2).merge, 'merged');
-  assert.equal(f.item(2).cleanup, 'deleted', 'automatic provider cleanup still reconciles after another pipeline fails');
-  assert.equal(result.repositories!.find(row => row.repository.relativePath === 'c-deleting')!.cleanup?.state, 'deleted');
-  assert.ok(!f.calls.includes('delete:d-checking') && !f.calls.includes('delete:e-queued'));
+  assert.equal(f.item(2).cleanup, undefined);
+  assert.equal(f.deletions.length, 0);
+  for (const row of rows) assert.equal(f.remoteBranches.has(`${row.repository.relativePath}:${row.sourceBranch}`), true);
   await f.reload();
-  delete f.hooks.merge; delete f.hooks.deleteBranch; delete f.hooks.branchPreflight;
+  delete f.hooks.merge;
   assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
   assert.equal(f.calls.filter(call => call === 'merge:2').length, 1);
-  assert.equal(f.calls.filter(call => call === 'delete:c-deleting').length, 1);
+  for (const row of rows) assert.equal(f.calls.filter(call => call === `delete:${row.repository.relativePath}`).length, 1);
 });
 
-test('pointer parents wait for child pipeline cleanup and still pause for review of the pointer commit', async () => {
+test('unconfirmed asynchronous merges retain every source branch until confirmation', async () => {
+  const value = pr(1);
+  const f = await fixture([value], false, [branchRow(value), branchRow(pr(2, 'empty'), 'no-changes')]);
+  f.hooks.merge = async () => ({ taskId: 'pending-task' });
+  const result = await f.service.run('review', 'merge');
+  assert.equal(result.operation!.state, 'paused');
+  assert.equal(f.item(1).merge, 'merging');
+  assert.equal(f.deletions.length, 0);
+  assert.ok(result.repositories!.every(row => f.remoteBranches.has(`${row.repository.relativePath}:${row.sourceBranch}`)));
+  f.markMerged(value);
+  await f.reload();
+  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
+  assert.equal(f.calls.filter(call => call === 'merge:1').length, 1);
+  assert.equal(f.deletions.length, 2);
+});
+
+test('resuming partial work preserves old deletion receipts and tolerates already absent merged sources', async () => {
+  const prs = [pr(1, 'a-merged'), pr(2, 'b-failed')];
+  const empty = branchRow(pr(3, 'c-deleted'), 'no-changes');
+  const f = await fixture(prs, false, [...prs.map(value => branchRow(value)), empty]);
+  f.hooks.merge = async value => {
+    if (value.id === 2) throw providerError(409, 'Merge conflict');
+    return { pr: f.markMerged(value) };
+  };
+  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'paused');
+  f.markMerged(prs[0]);
+  f.remoteBranches.delete(`a-merged:${prs[0].sourceBranch}`);
+  f.remoteBranches.delete(`c-deleted:${empty.sourceBranch}`);
+  await f.state.updateReview('review', review => { review.repositories!.find(row => row.repository.relativePath === 'c-deleted')!.cleanup = { state: 'deleted' }; });
+  await f.reload();
+  delete f.hooks.merge;
+  const result = await f.service.run('review', 'merge');
+  assert.equal(result.operation!.state, 'complete');
+  assert.ok(result.repositories!.every(row => row.cleanup?.state === 'deleted'));
+  assert.deepEqual(f.deletions.map(input => input.repository.relativePath), ['b-failed']);
+  assert.equal(f.calls.filter(call => call === 'merge:1').length, 1);
+});
+
+test('pointer review pauses keep child and parent branches until the reviewed parent merges', async () => {
   const prs = [pr(1), pr(2, 'child', '.', 'child')];
   const f = await fixture(prs, true, prs.map(value => branchRow(value)));
-  const gate = deferred();
-  f.hooks.retained = () => true;
-  f.hooks.deleteBranch = async input => { await gate.promise; f.remoteBranches.delete(`${input.repository.relativePath}:${input.sourceBranch}`); };
-  const merging = f.service.run('review', 'merge');
-  try {
-    await until(() => f.calls.includes('delete:child'), 'the child fallback cleanup');
-    assert.equal(f.item(2).merge, 'merged');
-    assert.equal(f.prepared.length, 0);
-    assert.ok(!f.calls.includes('approve:1'));
-  } finally { gate.resolve(); }
-  const result = await merging;
+  const result = await f.service.run('review', 'merge');
   assert.equal(result.operation!.state, 'paused');
-  assert.equal(f.item(2).cleanup, 'deleted');
+  assert.equal(f.item(2).merge, 'merged');
+  assert.equal(f.item(2).cleanup, undefined);
+  assert.equal(f.deletions.length, 0);
   assert.deepEqual(f.prepared[0].updates, { child: hash(1002) });
   assert.equal(f.item(1).pointerState, 'review');
   assert.ok(!f.calls.includes('merge:1'));
+  await f.refresh();
+  await f.reload();
+  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
+  assert.equal(f.calls.filter(call => call === 'merge:2').length, 1);
+  assert.equal(f.deletions.length, 2);
 });
 
 test('a confirmed PR merge cannot turn revoked repository access into a successful cleanup receipt', async () => {
@@ -1191,7 +1310,7 @@ test('a mapped pointer review finishes only after refreshed parent merge and per
   const paused = await f.service.run('review', 'merge');
   assert.equal(isMergeComplete(paused), false);
   assert.equal(f.item(2).merge, 'merged');
-  assert.equal(paused.repositories!.find(row => row.repository.relativePath === 'child')!.cleanup?.state, 'deleted');
+  assert.equal(paused.repositories!.find(row => row.repository.relativePath === 'child')!.cleanup, undefined);
   await f.refresh();
   const complete = await f.service.run('review', 'merge');
   assert.equal(complete.operation?.state, 'complete');
@@ -1199,89 +1318,4 @@ test('a mapped pointer review finishes only after refreshed parent merge and per
   assert.equal(f.item(1).sourceHash, hash(2001));
   assert.equal(f.item(1).pointerState, 'ready');
   assert.equal(isMergeComplete(complete), true);
-});
-
-test('a failed post-approval check pauses the stable merge phase and resumes with a fresh checking phase', async () => {
-  const value = pr(1);
-  const f = await fixture([value], false, [branchRow(value)]);
-  const phases: MergeProgress['phase'][] = [];
-  f.hooks.branchPreflight = async options => {
-    if (!options?.repositoryPaths) return [];
-    phases.push(f.item(1).phase);
-    return phases.length === 2 ? ['The source branch could not be verified.'] : [];
-  };
-  const paused = await f.service.run('review', 'merge');
-  assert.equal(paused.operation!.state, 'paused');
-  assert.equal(f.item(1).approval, 'approved');
-  assert.equal(f.item(1).merge, 'pending');
-  assert.equal(f.item(1).phase, undefined);
-  assert.match(f.item(1).error ?? '', /could not be verified/);
-  assert.deepEqual(f.calls, ['approve:1'], 'the failed safety check still prevents sending a merge');
-  await f.reload();
-  assert.equal((await f.service.run('review', 'merge')).operation!.state, 'complete');
-  assert.deepEqual(phases, ['checking', 'merging', 'checking', 'merging']);
-  assert.deepEqual(f.calls, ['approve:1', 'merge:1'], 'resuming keeps the existing account approval');
-  assert.equal(f.item(1).error, undefined);
-});
-
-
-test('known merge conflicts and unavailable conflict checks block the preview and every mutation', async () => {
-  for (const unavailable of [false, true]) {
-    const value = pr(1);
-    const f = await fixture([value], false, [branchRow(value), branchRow(pr(2, 'empty'), 'no-changes')]);
-    f.hooks.conflicts = async (mapping, source, target) => {
-      assert.equal(mapping.relativePath, value.repository.relativePath);
-      assert.equal(source, value.sourceHash); assert.equal(target, value.targetHash);
-      if (unavailable) throw providerError(403, 'Conflict details require repository access');
-      return [{ path: 'src/example.ts', scenario: 'CONTENT', message: 'Both sides changed this file' }];
-    };
-    const preview = await f.service.preview('review', 'merge');
-    assert.match(preview.blockers.join('\n'), unavailable ? /could not check merge conflicts/ : /merge conflicts in src\/example.ts.*Resolve conflicts in Bitbucket/);
-    assert.equal(f.state.review('review')!.repositories![0].check?.state, 'failed');
-    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /src\/example.ts/);
-    assert.deepEqual(f.calls, []);
-    assert.equal(f.deletions.length, 0);
-    assert.equal((await f.service.run('review', 'approve')).operation!.state, 'complete', 'approve-only does not require a conflict-free merge');
-    assert.deepEqual(f.calls, ['approve:1']);
-  }
-});
-
-
-test('changed branches without PRs are checked for conflicts before PR creation', async () => {
-  for (const unavailable of [false, true]) {
-    const value = pr(1);
-    const child = pr(2, 'child');
-    const f = await fixture([value], false, [branchRow(value), branchRow(child, 'changes')]);
-    f.hooks.ensurePrs = async () => { assert.fail('Conflict checks must finish before PR creation'); };
-    f.hooks.conflicts = async (mapping, source, target) => {
-      if (mapping.relativePath !== 'child') return [];
-      assert.equal(source, child.sourceHash); assert.equal(target, child.targetHash);
-      if (unavailable) throw new Error('Conflict response unavailable');
-      return [{ path: 'child.txt', scenario: 'CONTENT', message: 'Conflict' }];
-    };
-    await assert.rejects(f.service.run('review', 'merge'), unavailable ? /could not check merge conflicts/ : /child.txt/);
-    assert.equal(f.state.review('review')!.repositories![1].check?.state, 'failed');
-    assert.deepEqual(f.calls, []);
-    assert.equal(f.deletions.length, 0);
-  }
-});
-
-
-test('newly reported conflicts after approval prevent the merge and all cleanup', async () => {
-  const value = pr(1);
-  const f = await fixture([value], false, [branchRow(value)]);
-  let reads = 0;
-  f.hooks.conflicts = async () => {
-    reads++;
-    return f.current(value).participants.some(participant => participant.approved)
-      ? [{ path: 'changed.ts', scenario: 'CONTENT', message: 'Conflict' }] : [];
-  };
-  const result = await f.service.run('review', 'merge');
-  assert.equal(result.operation!.state, 'paused');
-  assert.match(result.operation!.error!, /changed.ts/);
-  assert.equal(f.item(1).phase, undefined);
-  assert.equal(reads, 2, 'conflicts are checked during the preview and immediately before merging');
-  assert.deepEqual(f.calls, ['approve:1']);
-  assert.equal(f.deletions.length, 0);
-  assert.ok(result.repositories!.every(row => f.remoteBranches.has(`${row.repository.relativePath}:${row.sourceBranch}`)));
 });

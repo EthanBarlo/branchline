@@ -69,7 +69,7 @@ export class MergeService {
     // Publish the confirmed merge before checking cleanup: source branch lookup
     // can take time or fail without changing the successful merge result.
     await this.progress(id, key, { merge: 'merged', mergeCommit: pr.mergeCommit ?? previous?.mergeCommit,
-      phase: 'cleanup', skipped: skipped ?? previous?.skipped, error: undefined });
+      phase: undefined, skipped: skipped ?? previous?.skipped, error: undefined });
     const reviewed = this.binding(id).pullRequests.find(value => pullRequestKey(value) === key);
     if (pr.sourceHash !== (reviewed?.sourceHash ?? previous?.sourceHash)) {
       const reason = `${pr.repository.relativePath}: Bitbucket confirmed a merge with a different source revision. The merge result was saved; refresh and review the changed source before continuing with other repositories.`;
@@ -85,9 +85,8 @@ export class MergeService {
     if (previous?.pointerState && previous.pointerCommit === pr.sourceHash) await this.progress(id, key, { pointerState: 'ready' });
     const row = this.binding(id).repositories?.find(row => row.repository.relativePath === pr.repository.relativePath);
     if (row) {
-      // The repository pipeline verifies repository access and reconciles source
-      // deletion before completing. A bare branch 404 alone can also mean revoked
-      // access, so it must not create a successful cleanup receipt here.
+      // Cleanup waits for every required merge. A bare branch 404 can also mean
+      // revoked access, so it cannot create a successful receipt here.
       if (row.cleanup?.state === 'deleted') await this.progress(id, key, { cleanup: 'deleted', phase: undefined });
       return;
     }
@@ -560,45 +559,48 @@ export class MergeService {
       }
       return null;
     };
-    // A worker owns one repository all the way through cleanup. Empty branches
-    // share this same budget, so they can finish while unrelated PRs still merge.
-    const jobs: Array<{ repository: RepositoryMapping; pr?: PullRequest }> = [
-      ...ordered.map(pr => ({ repository: pr.repository, pr })),
-      ...(action === 'merge' ? (binding.repositories ?? []).filter(row => !ordered.some(pr => pr.repository.relativePath === row.repository.relativePath))
-        .map(row => ({ repository: row.repository })) : []),
-    ].sort((a, b) => depth(b) - depth(a) || a.repository.relativePath.localeCompare(b.repository.relativePath));
-    const completed = new Set<string>();
-    const pipelinePause = await concurrent(jobs, async (job, stopped, stop) => {
-      if (job.pr) {
-        const pending = await mergeRepository(job.pr, stopped, stop);
-        if (pending) return pending;
+    const mergedRepositories = new Set<string>();
+    const mergePause = await concurrent(ordered, async (pr, stopped, stop) => {
+      const pending = await mergeRepository(pr, stopped, stop);
+      if (!pending && this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(pr))?.merge === 'merged') mergedRepositories.add(pr.repository.relativePath);
+      return pending;
+    }, pr => action !== 'merge' || !settings.updateSubmodulePointers
+      || this.children(pr, ordered).every(child => mergedRepositories.has(child.repository.relativePath)));
+    if (mergePause) return this.pause(id, mergePause);
+
+    if (action === 'merge') {
+      const items = this.binding(id).operation!.items;
+      if (items.some(item => item.merge !== 'merged' || item.error || item.pointerState === 'review')) {
+        return this.pause(id, 'Branch cleanup is waiting for every pull request to finish merging successfully.');
       }
-      if (action !== 'merge') return null;
-      const row = this.binding(id).repositories?.find(row => row.repository.relativePath === job.repository.relativePath);
-      if (row) {
-        // PR pipelines already checked their reviewed revisions before acting.
-        // A branch-only pipeline needs that same scoped check before cleanup.
-        if (!job.pr && this.branches && !stopped()) {
-          const blockers = await this.branches.preflight(id, { repositoryPaths: [row.repository.relativePath] });
-          if (blockers.length) { const reason = blockers.join('\n'); stop(reason); return reason; }
+      // Retain every source branch until the entire group has confirmed merges.
+      // This also keeps unchanged repositories available after partial failure.
+      const jobs: Array<{ repository: RepositoryMapping; pr?: PullRequest }> = [
+        ...ordered.map(pr => ({ repository: pr.repository, pr })),
+        ...(this.binding(id).repositories ?? []).filter(row => !ordered.some(pr => pr.repository.relativePath === row.repository.relativePath))
+          .map(row => ({ repository: row.repository })),
+      ].sort((a, b) => depth(b) - depth(a) || a.repository.relativePath.localeCompare(b.repository.relativePath));
+      const cleanupPause = await concurrent(jobs, async (job, stopped, stop) => {
+        const row = this.binding(id).repositories?.find(row => row.repository.relativePath === job.repository.relativePath);
+        if (row) {
+          if (!job.pr && this.branches && !stopped()) {
+            const blockers = await this.branches.preflight(id, { repositoryPaths: [row.repository.relativePath] });
+            if (blockers.length) { const reason = blockers.join('\n'); stop(reason); return reason; }
+          }
+          if (job.pr && !stopped()) await this.progress(id, pullRequestKey(job.pr), { phase: 'cleanup' });
+          const result = await this.cleanupBranch(id, row, client, stopped, stop);
+          if (job.pr) await this.progress(id, pullRequestKey(job.pr), { phase: undefined });
+          return result;
         }
-        const result = await this.cleanupBranch(id, row, client, stopped, stop);
-        if (job.pr) await this.progress(id, pullRequestKey(job.pr), { phase: undefined });
-        if (!result) completed.add(job.repository.relativePath);
-        return result;
-      }
-      const item = this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(job.pr!))!;
-      if (item.merge !== 'merged' && stopped()) return null;
-      if (item.merge !== 'merged' || item.cleanup !== 'deleted') {
-        const reason = `${job.repository.relativePath}: source branch cleanup is incomplete. Refresh the review and resolve the retained or unconfirmed branch before finishing.`;
-        stop(reason); return reason;
-      }
-      completed.add(job.repository.relativePath);
-      return null;
-    }, job => !job.pr || action !== 'merge' || !settings.updateSubmodulePointers
-      || this.children(job.pr, ordered).every(child => completed.has(child.repository.relativePath)
-        && this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(child))?.merge === 'merged'));
-    if (pipelinePause) return this.pause(id, pipelinePause);
+        const item = this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(job.pr!))!;
+        if (item.cleanup !== 'deleted') {
+          const reason = `${job.repository.relativePath}: source branch cleanup is incomplete. Refresh the review and resolve the retained or unconfirmed branch before finishing.`;
+          stop(reason); return reason;
+        }
+        return null;
+      });
+      if (cleanupPause) return this.pause(id, cleanupPause);
+    }
     return this.state.updateReview(id, r => { r.operation!.state = 'complete'; r.operation!.error = undefined; r.operation!.updatedAt = new Date().toISOString(); for (const item of r.operation!.items) delete item.phase; });
   }
 

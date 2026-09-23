@@ -200,7 +200,7 @@ export class BitbucketClient {
   }
   async createPullRequest(mapping: RepositoryMapping, input: { sourceBranch: string; targetBranch: string; title: string; description: string }): Promise<PullRequest> {
     if (!input || !validBranchName(input.sourceBranch) || !validBranchName(input.targetBranch) || input.sourceBranch === input.targetBranch || typeof input.title !== 'string' || !input.title.trim() || typeof input.description !== 'string') throw new Error('Choose different source and target branches and enter a pull request title.');
-    const value = await this.json(`${this.repositoryPath(mapping)}/pullrequests`, { method: 'POST', body: JSON.stringify({ title: input.title, description: input.description, source: { branch: { name: input.sourceBranch } }, destination: { branch: { name: input.targetBranch } }, close_source_branch: true }) });
+    const value = await this.json(`${this.repositoryPath(mapping)}/pullrequests`, { method: 'POST', body: JSON.stringify({ title: input.title, description: input.description, source: { branch: { name: input.sourceBranch } }, destination: { branch: { name: input.targetBranch } }, close_source_branch: false }) });
     try {
       const pr = await this.responsePullRequest(mapping, value, 'detail');
       if (pr.sourceBranch !== input.sourceBranch || pr.targetBranch !== input.targetBranch || pr.state !== 'OPEN') throw new Error('Bitbucket accepted the request but returned a different branch pair or a closed pull request. Reconcile it before trying again.');
@@ -246,7 +246,7 @@ export class BitbucketClient {
   async resolveComment(pr: PullRequest, id: number, resolved: boolean): Promise<void> { await this.json(`${this.commentPath(pr, id)}/resolve`, { method: resolved ? 'POST' : 'DELETE' }); }
   async approve(pr: PullRequest): Promise<void> { await this.json(`${this.prPath(pr)}/approve`, { method: 'POST' }); }
   async merge(pr: PullRequest): Promise<{ pr?: PullRequest; taskId?: string }> {
-    const response = await this.request(`${this.prPath(pr)}/merge`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ type: 'pullrequest', merge_strategy: 'merge_commit', close_source_branch: true }) });
+    const response = await this.request(`${this.prPath(pr)}/merge`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ type: 'pullrequest', merge_strategy: 'merge_commit', close_source_branch: false }) });
     if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error('Bitbucket redirected the merge request. Refresh its state before retrying.'); }
     const body = await readBoundedBody(response, 16 * 1024 * 1024);
     if (body.tooLarge || !body.bytes) throw new Error('Bitbucket returned an unreadable merge result. Refresh the PR before retrying.');

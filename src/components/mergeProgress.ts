@@ -53,11 +53,11 @@ export function repositoryMergeProgress({ row, pr, item, operation, action, chec
   if (row.creation?.state === 'sending') return result(isRunning ? active('Creating PR…') : warning('PR creation unconfirmed', 'pause'));
   if (isRunning) {
     if (action === 'merge' && (cleanup === 'checking' || cleanup === 'sending' || item?.phase === 'cleanup')) return result(active('Deleting branch…'));
-    if (action === 'merge' && merged) return result(waiting('Merged', 'check'));
+    if (action === 'merge' && merged) return result(waiting('Merged · waiting for other merges', 'check'));
     if (item?.phase === 'updating-pointers') return result(active('Updating pointers…'));
     if (item?.phase === 'approving') return result(active('Approving…'));
     if (item?.phase === 'merging') return result(active('Merging…'));
-    if (action === 'merge' && noChanges) return result(waiting(skipped!, 'skip'));
+    if (action === 'merge' && noChanges) return result(waiting('Waiting for merges', 'skip'));
     return result(active('Checking…'));
   }
   if (operation?.state === 'paused') return result(warning(merged ? 'Merged · cleanup paused' : 'Paused', 'pause'));

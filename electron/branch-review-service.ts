@@ -38,6 +38,17 @@ export class BranchReviewService {
     return [...configured, ...previous.filter(repo => !configured.some(value => value.relativePath === repo.relativePath))];
   }
 
+  private async mergedComparison(client: BitbucketClient, row: BranchReviewRepository, pr: PullRequest): Promise<{ row: BranchReviewRepository; pr: PullRequest }> {
+    if (!sameRepository(row.repository, pr.repository) || pr.sourceBranch !== row.sourceBranch || pr.targetBranch !== row.targetBranch || pr.unsupportedReason) {
+      throw new Error('The merged PR no longer matches this repository and branch comparison.');
+    }
+    // Keep the reviewed diff available after the source branch is deleted.
+    const targetHash = row.targetHash ?? pr.targetHash;
+    const captured = { ...pr, targetHash,
+      mergeBaseHash: pr.sourceHash === row.sourceHash && row.mergeBaseHash ? row.mergeBaseHash : await client.mergeBase(row.repository, pr.sourceHash, targetHash) };
+    return { row: { ...row, status: 'pull-request', prId: pr.id, sourceHash: captured.sourceHash, targetHash, mergeBaseHash: captured.mergeBaseHash }, pr: captured };
+  }
+
   private async inspect(client: BitbucketClient, initial: BranchReviewRepository, linked?: PullRequest): Promise<{ row: BranchReviewRepository; pr?: PullRequest }> {
     const row: BranchReviewRepository = { ...initial, error: undefined };
     const { repository, sourceBranch, targetBranch } = row;
@@ -47,13 +58,7 @@ export class BranchReviewService {
     if (pr && (!sameRepository(repository, pr.repository) || pr.sourceBranch !== sourceBranch || pr.targetBranch !== targetBranch || pr.unsupportedReason)) {
       throw new Error('The linked PR no longer matches this repository and branch comparison.');
     }
-    if (pr?.state === 'MERGED') {
-      // Completed PRs retain their historical diff even after source-branch deletion.
-      const targetHash = row.targetHash ?? linked!.targetHash;
-      const captured = { ...pr, sourceHash: pr.sourceHash, targetHash,
-        mergeBaseHash: pr.sourceHash === (row.sourceHash ?? linked!.sourceHash) ? row.mergeBaseHash ?? linked!.mergeBaseHash : await client.mergeBase(repository, pr.sourceHash, targetHash) };
-      return { row: { ...row, status: 'pull-request', prId: pr.id, sourceHash: captured.sourceHash, targetHash: captured.targetHash, mergeBaseHash: captured.mergeBaseHash }, pr: captured };
-    }
+    if (pr?.state === 'MERGED') return this.mergedComparison(client, row, pr);
     if (pr && pr.state !== 'OPEN') throw new Error(`PR #${pr.id} is ${pr.state.toLowerCase()}. Resolve it in Bitbucket before continuing.`);
     const candidates = await client.findPullRequests(repository, sourceBranch);
     if (candidates.some(value => value.unsupportedReason || value.targetBranch !== targetBranch)) throw new Error('An open PR for this source branch has a different target or source repository. Resolve that PR in Bitbucket before continuing.');
@@ -62,7 +67,12 @@ export class BranchReviewService {
     const [source, target] = await Promise.all([client.getBranch(repository, sourceBranch), client.getBranch(repository, targetBranch)]);
     if (!target) throw new Error(`Target branch “${targetBranch}” is missing. Configure or restore it before continuing.`);
     if (!source) {
-      if (found) throw new Error('The source branch for an open PR is missing. Restore it or resolve the PR in Bitbucket.');
+      if (found) {
+        // Another reviewer may have merged and deleted it during these reads.
+        const latest = await client.getPullRequest(repository, found.id);
+        if (latest.state === 'MERGED') return this.mergedComparison(client, row, latest);
+        throw new Error(`Source branch “${sourceBranch}” is missing for PR #${found.id}, which is still ${latest.state.toLowerCase()}. Restore the branch or resolve the PR in Bitbucket, then refresh this review. Branchline will not skip unmerged changes.`);
+      }
       return { row: { ...row, status: 'missing-branch', sourceHash: undefined, mergeBaseHash: undefined, targetHash: target.hash, prId: undefined } };
     }
     const mergeBaseHash = await client.mergeBase(repository, source.hash, target.hash);

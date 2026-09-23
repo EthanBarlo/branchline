@@ -21,7 +21,7 @@ function installTransport() {
   safeStorage.isEncryptionAvailable = () => false;
   const cp = require('node:child_process');
   const original = cp.execFile;
-  globalThis.providerSmoke = { requests: [], git: [], comments: [], merged: {}, approved: {}, childCreated: false, emptyDeleted: false, mergePolls: {}, mergeRequests: [] };
+  globalThis.providerSmoke = { requests: [], git: [], comments: [], merged: {}, approved: {}, childCreated: false, deleted: {}, cleanupRequests: [], mergePolls: {}, mergeRequests: [] };
   globalThis.providerSmokeGates = {};
   cp.execFile = function (command, args, ...rest) {
     if (command === 'git') {
@@ -30,13 +30,17 @@ function installTransport() {
         const state = globalThis.providerSmoke;
         const options = rest[0]; const callback = rest.at(-1);
         const workspace = require('node:path').join(process.env.BRANCHLINE_DATA_DIR, 'pointer-workspaces') + require('node:path').sep;
-        if (!options?.cwd?.startsWith(workspace) || !args.includes('https://bitbucket.org/smoke/empty.git')) throw new Error('Only the scratch cleanup workspace may contact the exact simulated cleanup remote.');
+        const remote = args.find(arg => /^https:\/\/bitbucket\.org\/smoke\/(repository|core|empty)\.git$/.test(arg));
+        if (!options?.cwd?.startsWith(workspace) || !remote) throw new Error('Only the scratch cleanup workspace may contact an exact simulated cleanup remote.');
+        const slug = remote.split('/').at(-1).replace(/\.git$/, '');
+        const sourceHash = (slug === 'empty' ? 'b' : 'a').repeat(40);
         let output;
         if (args.includes('push')) {
-          if (!args.includes(`--force-with-lease=refs/heads/feature/APP-123:${'b'.repeat(40)}`) || args.at(-1) !== ':refs/heads/feature/APP-123') throw new Error('Cleanup must send one exact-ref deletion with the captured commit lease.');
-          state.emptyDeletedBeforeMerges = !state.merged.repository && !state.merged.core;
-          state.emptyDeleted = true; output = 'To simulated remote\n-\t:refs/heads/feature/APP-123\t[deleted]\nDone\n';
-        } else output = state.emptyDeleted ? '' : `${'b'.repeat(40)}\trefs/heads/feature/APP-123\n`;
+          if (!args.includes(`--force-with-lease=refs/heads/feature/APP-123:${sourceHash}`) || args.at(-1) !== ':refs/heads/feature/APP-123') throw new Error('Cleanup must send one exact-ref deletion with the captured commit lease.');
+          if (!state.merged.repository || !state.merged.core) throw new Error('No source branch may be deleted until every required PR merge is confirmed.');
+          state.cleanupRequests.push({ slug, merged: { ...state.merged } });
+          state.deleted[slug] = true; output = 'To simulated remote\n-\t:refs/heads/feature/APP-123\t[deleted]\nDone\n';
+        } else output = state.deleted[slug] ? '' : `${sourceHash}\trefs/heads/feature/APP-123\n`;
         queueMicrotask(() => callback(null, output, ''));
         return { stdin: null };
       }
@@ -74,7 +78,7 @@ function installTransport() {
       if (method === 'POST') {
         if (slug !== 'core' || state.childCreated) throw new Error('Only the missing child PR may be created once.');
         const body = JSON.parse(init.body);
-        if (body.source.branch.name !== 'feature/APP-123' || body.destination.branch.name !== 'main' || body.close_source_branch !== true) throw new Error('The created PR must match the reviewed branch pair.');
+        if (body.source.branch.name !== 'feature/APP-123' || body.destination.branch.name !== 'main' || body.close_source_branch !== false) throw new Error('The created PR must match the reviewed branch pair and preserve its source branch until grouped cleanup.');
         state.childCreated = true; return json(pr(slug), 201);
       }
       const value = slug === 'repository' || slug === 'core' && state.childCreated ? pr(slug) : null;
@@ -82,7 +86,7 @@ function installTransport() {
       return json({ values: value && (state.invalidPullRequest || !states.length || states.includes(value.state)) ? [value] : [] });
     }
     if (/\/pullrequests\/(7|8)$/.test(route)) return json(pr(slug));
-    if (route.includes('/merge-base/')) return json({ hash: hash(slug === 'empty' ? 'b' : 'c') });
+    if (route.includes('/merge-base/')) return json({ hash: hash(slug === 'empty' ? 'b' : state.merged[slug] ? 'a' : 'c') });
     if (route.includes('/diffstat/')) return json({ values: slug === 'empty' ? [] : slug === 'core' ? [
       { status: 'renamed', old: { path: 'old.ts' }, new: { path: 'child.ts' }, lines_added: 2, lines_removed: 1 },
     ] : [
@@ -112,6 +116,7 @@ function installTransport() {
     }
     if (route.endsWith('/approve')) { state.approved[slug] = true; return json({}); }
     if (route.endsWith('/merge')) {
+      if (JSON.parse(init.body).close_source_branch !== false) throw new Error('Each merge must preserve its source branch until every required PR has merged.');
       if (!globalThis.providerSmokeGates.merges) {
         let resolve, reject;
         const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
@@ -133,7 +138,7 @@ function installTransport() {
     }
     if (route.includes('/refs/branches/')) {
       const name = decodeURIComponent(route.split('/').at(-1));
-      if (name === 'feature/APP-123' && (state.merged[slug] || slug === 'empty' && state.emptyDeleted)) return json({}, 404);
+      if (name === 'feature/APP-123' && state.deleted[slug]) return json({}, 404);
       return json({ name, target: { hash: hash(name === 'main' || slug === 'empty' ? 'b' : 'a') }, merge_strategies: ['merge_commit'] });
     }
     throw new Error(`Unmocked provider request: ${method} ${url.href}`);
@@ -318,8 +323,8 @@ try {
   assert.ok(result.progress.some(event => event.beforeResult && event.state.operation.items.some(item => item.taskId === 'desktop-core-merge-task' && item.merge === 'merging')), 'An accepted asynchronous merge stays visibly in progress until its task and PR confirm completion.');
   assert.ok(result.checks.some(states => states.filter(state => state === 'checking').length >= 2), 'The preload reports multiple repository preflight checks in progress together.');
   assert.ok(result.progress.some(event => event.beforeResult && event.state.repositories.find(row => row.repository.relativePath === 'zz-empty')?.cleanup?.state === 'sending'), 'The real preload reports no-PR repository cleanup while it is running.');
-  assert.ok(result.progress.some(event => event.beforeResult && event.state.repositories.find(row => row.repository.relativePath === 'zz-empty')?.cleanup?.state === 'deleted'
-    && event.state.operation.items.some(item => item.merge !== 'merged')), 'The empty repository finishes cleanup before unrelated PR merges complete.');
+  assert.ok(result.progress.every(event => !event.state.repositories.some(row => ['checking', 'sending', 'deleted'].includes(row.cleanup?.state))
+    || event.state.operation.items.every(item => item.merge === 'merged')), 'Branch cleanup never starts while any required PR merge is unconfirmed.');
   assert.equal(result.progress.at(-1).state.operation.state, 'complete');
   const persisted = JSON.parse(await readFile(join(dataDir, 'integrations.json'), 'utf8')).reviews[result.review.id];
   assert.deepEqual(persisted.operation, JSON.parse(JSON.stringify(result.progress.at(-1).state.operation)), 'The completion event matches the durable operation result.');
@@ -333,7 +338,8 @@ try {
   assert.deepEqual(new Set(merges.map(request => new URL(request.url).pathname.split('/')[4])), new Set(['core', 'repository']), 'Every independent PR merges once.');
   assert.equal(merges.length, 2);
   assert.equal(observed.mergeOverlapped, true, 'Both merge requests arrive before either response can complete.');
-  assert.equal(observed.emptyDeletedBeforeMerges, true, 'The empty branch is deleted independently while PR merges are still pending.');
+  assert.deepEqual(new Set(observed.cleanupRequests.map(request => request.slug)), new Set(['repository', 'core', 'empty']), 'All source branches are explicitly cleaned after merging, including the branch with no changes.');
+  assert.ok(observed.cleanupRequests.every(request => request.merged.repository && request.merged.core), 'Every leased deletion occurs after both merges are confirmed.');
   assert.equal(observed.requests.filter(request => request.method === 'POST' && request.url.endsWith('/pullrequests')).length, 1, 'Repeated publication creates exactly one missing PR.');
   assert.equal(observed.comments.length, 2, 'Repeated IPC publication cannot duplicate either comment.');
   const rootComment = observed.comments.find(comment => comment.repoSlug === 'repository');
@@ -341,9 +347,9 @@ try {
   assert.equal(rootComment.content.raw, 'Updated inline feedback');
   assert.deepEqual(rootComment.inline, { path: 'new.ts', to: 2, start_to: 1 });
   assert.deepEqual(childComment.inline, { path: 'child.ts', to: 2, start_to: 1 }, 'The created child PR gets its canonical file path and native range, without the project-relative prefix.');
-  assert.deepEqual(JSON.parse(observed.requests.find(request => request.url.endsWith('/merge')).body), { type: 'pullrequest', merge_strategy: 'merge_commit', close_source_branch: true });
+  assert.deepEqual(JSON.parse(observed.requests.find(request => request.url.endsWith('/merge')).body), { type: 'pullrequest', merge_strategy: 'merge_commit', close_source_branch: false });
   assert.ok(observed.git.length > 0, 'The production Git adapter was monitored.');
-  assert.equal(observed.git.filter(args => args.includes('push')).length, 1, 'One leased remote deletion cleans up the empty repository branch.');
+  assert.equal(observed.git.filter(args => args.includes('push')).length, 3, 'Three leased remote deletions clean up the PR and empty repository branches after every merge.');
   assert.equal(git('rev-parse', 'HEAD'), before.head); assert.equal(git('show-ref'), before.refs); assert.equal(git('status', '--porcelain=v1'), before.status);
   assert.deepEqual(await readFile(join(repo, '.git/index')), before.index); assert.deepEqual(await readFile(join(repo, 'local.txt')), before.content);
   const credentials = await readFile(join(dataDir, 'credentials.json'), 'utf8');
@@ -374,7 +380,7 @@ try {
   assert.ok(!savedReviews.reviews.some(review => review.id === result.review.id), 'Merged reviews are removed from durable local history.');
   assert.equal(savedIntegrations.reviews[result.review.id], undefined);
   assert.deepEqual((await desktop.evaluate(() => globalThis.providerSmoke)).comments, observed.comments, 'Local completion preserves published feedback.');
-  console.log(`Production desktop provider IPC passed: early repository files arrive while child content is blocked, marker and feedback persist in ${Math.round(incremental.elapsedMs)}ms during loading; cached Mark reviewed advances in ${advanceMs}ms without provider or Git requests; branch-only child changes stay visible, publishing creates one PR and native inline range, independent merges overlap, preflight reports concurrent checks, empty branches use isolated leased cleanup; separate accounts, Jira links, durable progress, diagnostics, and unchanged local Git.`);
+  console.log(`Production desktop provider IPC passed: early repository files arrive while child content is blocked, marker and feedback persist in ${Math.round(incremental.elapsedMs)}ms during loading; cached Mark reviewed advances in ${advanceMs}ms without provider or Git requests; branch-only child changes stay visible, publishing creates one PR and native inline range, independent merges overlap, preflight reports concurrent checks, every source branch waits for all required merges before isolated leased cleanup; separate accounts, Jira links, durable progress, diagnostics, and unchanged local Git.`);
 } catch (error) {
   if (desktop) {
     const pages = desktop.windows();
