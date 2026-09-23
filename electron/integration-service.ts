@@ -1,6 +1,7 @@
 import type { NewComment, Review, ReviewSnapshot, ReviewRefresh } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
 import type { BranchReviewRepository, ConnectionInput, IntegrationState, ProjectIntegration, PullRequest, PullRequestFilter, PullRequestRef, ReanchorInput, RemoteReviewState, RemoteReviewLoadProgress, RemoteRepositoryLoad, RemoteSnapshotResult } from '../shared/integrations';
+import { isMergeComplete } from '../shared/integrations';
 import { extractJiraTicketKey, jiraTicketUrl } from '../shared/jira';
 import { BitbucketClient } from './bitbucket-client';
 import { ConnectionManager, type ConnectionCredentials } from './connection-manager';
@@ -352,6 +353,22 @@ export class IntegrationService {
   resolveUnknownPublication(id: string, commentId: string, remoteId: number | null) { return this.serial(id, () => this.publication.resolveUnknown(id, commentId, remoteId)); }
   previewMerge(id: string, action: 'approve' | 'merge' = 'merge') { return this.serial(id, () => { this.requireLoaded(id); return this.merger.preview(id, action); }); }
   runPullRequestAction(id: string, action: 'approve' | 'merge') { return this.serial(id, () => { this.requireLoaded(id); return this.merger.run(id, action); }); }
+  completeMergedReview(id: string) { return this.serial(id, async () => {
+    const review = this.reviews.getState().reviews.find(review => review.id === id);
+    // A lost IPC response may be retried after local deletion has succeeded.
+    if (!review) { await this.state.removeReview(id); this.forgetReview(id); return this.reviews.getState(); }
+    if (!review.remote || !isMergeComplete(this.state.review(id))) throw new Error('Finish merging and confirm branch cleanup before removing this review.');
+    return this.removeReview(id);
+  }); }
+  /** Retire completed reviews from earlier versions and after interrupted UI completion. */
+  async removeCompletedReviews(): Promise<void> {
+    // Deletion commits the review store first. Finish metadata cleanup if the
+    // process previously exited between those two durable writes.
+    await this.state.removeOrphanedReviews(this.reviews.getState().reviews.map(review => review.id));
+    for (const review of this.reviews.getState().reviews) {
+      if (review.remote && isMergeComplete(this.state.review(review.id))) await this.completeMergedReview(review.id);
+    }
+  }
   async setReviewTicket(id: string, key: string) {
     this.reviews.getReview(id);
     if (typeof key !== 'string' || (key.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key.trim()))) throw new Error('Enter a Jira issue key such as APP-123.');
@@ -395,8 +412,18 @@ export class IntegrationService {
     if (this.remoteRefreshes.has(id)) throw new Error('Wait for the repositories to finish loading before removing this review.');
     const operation = this.state.review(id)?.operation;
     if (operation && operation.state !== 'complete' && operation.items.some(item => ['sending', 'merging', 'unknown', 'merged'].includes(item.merge) || item.pointerCommit)) throw new Error('Finish or reconcile this merge operation before removing its review.');
-    const result = await this.reviewService.deleteReview(id); await this.state.removeReview(id); this.snapshots.delete(id); this.loadProgress.delete(id); this.failedLoads.delete(id); return result;
+    return this.removeReview(id);
   }); }
+  private async removeReview(id: string) {
+    if (this.remoteRefreshes.has(id)) throw new Error('Wait for the repositories to finish loading before removing this review.');
+    const result = await this.reviewService.deleteReview(id);
+    await this.state.removeReview(id);
+    this.forgetReview(id);
+    return result;
+  }
+  private forgetReview(id: string) {
+    this.snapshots.delete(id); this.loadProgress.delete(id); this.failedLoads.delete(id);
+  }
   async deleteProject(id: string) {
     if (this.busy) throw new Error('Wait for current integration work before removing a project.');
     const reviewIds = this.reviews.getState().reviews.filter(r => r.projectId === id).map(r => r.id);

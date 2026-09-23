@@ -13,6 +13,7 @@ const fixture = await mkdtemp(join(tmpdir(), 'branchline-desktop-'));
 const repo = join(fixture, 'sample-monorepo');
 const secondRepo = join(fixture, 'sample-service');
 const actionsRepo = join(fixture, 'review-actions');
+const foldersRepo = join(fixture, 'folder-actions');
 const sparseRepo = join(fixture, 'sparse-review');
 const dataDir = join(fixture, 'app-data');
 await mkdir(join(repo, 'src'), { recursive: true });
@@ -48,6 +49,14 @@ for (const path of actionPaths) await writeFile(join(actionsRepo, path), actionC
 gitAt(actionsRepo, 'add', '.'); gitAt(actionsRepo, 'commit', '-m', 'Initial files');
 gitAt(actionsRepo, 'checkout', '-b', 'feature/actions');
 for (const path of actionPaths) await writeFile(join(actionsRepo, path), actionContents(1));
+const folderPaths = ['feature/nested/keep.ts', 'feature/nested/other.ts', 'feature/keep.ts', 'feature-other/keep.ts', 'root.ts'];
+await mkdir(join(foldersRepo, 'feature/nested'), { recursive: true });
+await mkdir(join(foldersRepo, 'feature-other'), { recursive: true });
+gitAt(foldersRepo, 'init', '-b', 'main');
+for (const path of folderPaths) await writeFile(join(foldersRepo, path), actionContents(0));
+gitAt(foldersRepo, 'add', '.'); gitAt(foldersRepo, 'commit', '-m', 'Initial folder files');
+gitAt(foldersRepo, 'checkout', '-b', 'feature/folders');
+for (const path of folderPaths) await writeFile(join(foldersRepo, path), actionContents(1));
 await mkdir(sparseRepo);
 gitAt(sparseRepo, 'init', '-b', 'main');
 const sparseLines = Array.from({ length: 720 }, (_, index) => `export const item${index + 1} = ${index + 1};`);
@@ -691,8 +700,46 @@ try {
   await restoredSparse.locator(`.review-code-diff [data-comment-id="${unchangedComment.id}"]`).getByText(unchangedComment.body, { exact: true }).waitFor();
   assert.equal(await unchangedArticle.count(), 1, 'Revealing the line must move its editor inline without duplicating feedback.');
   assert.equal(await restoredSparse.locator('.review-code-diff [data-line]').count(), expandedCount);
+
+  // Folder actions must cover hidden nested files, without opening the folder or moving the active diff.
+  await addProject(restoredSparse, foldersRepo, 'Folder actions');
+  await chooseCurrentTarget(restoredSparse, 'main');
+  await chooseOption(restoredSparse, 'Filter changed files', 'All files');
+  const folderReviewId = await picker(restoredSparse, 'Select review').getAttribute('data-value');
+  const folderRow = path => restoredSparse.locator(`[data-item-path="${path}"]`).first();
+  const folderMenu = () => restoredSparse.getByRole('menu', { name: 'File review actions' });
+  const folderApprovals = () => readState(restoredSparse).then(({ reviews }) => reviews.find(review => review.id === folderReviewId).approvals);
+  await folderRow('root.ts').click();
+  await restoredSparse.locator('.diff-file-name').filter({ hasText: 'root.ts' }).waitFor();
+  await folderRow('feature/').click();
+  assert.equal(await folderRow('feature/').getAttribute('aria-expanded'), 'false');
+  await folderRow('feature/nested/keep.ts').waitFor({ state: 'hidden' });
+  await folderRow('feature/').click({ button: 'right' });
+  await folderMenu().getByText('3 files selected', { exact: true }).waitFor();
+  await restoredSparse.screenshot({ path: 'artifacts/folder-review-actions.png', animations: 'disabled' });
+  await folderMenu().getByRole('menuitem', { name: 'Mark reviewed', exact: true }).click();
+  await waitForState(restoredSparse, ({ reviews }) => Object.keys(reviews.find(review => review.id === folderReviewId).approvals).length === 3, 'collapsed folder descendants to be reviewed');
+  assert.deepEqual(Object.keys(await folderApprovals()).sort(), ['feature/keep.ts', 'feature/nested/keep.ts', 'feature/nested/other.ts']);
+  assert.equal(await folderRow('feature/').getAttribute('aria-expanded'), 'false', 'Bulk review must preserve folder expansion.');
+  await restoredSparse.locator('.diff-file-name').filter({ hasText: 'root.ts' }).waitFor();
+  await folderRow('feature/').click({ button: 'right' });
+  await folderMenu().getByRole('menuitem', { name: 'Mark unreviewed', exact: true }).click();
+  await waitForState(restoredSparse, ({ reviews }) => Object.keys(reviews.find(review => review.id === folderReviewId).approvals).length === 0, 'folder review markers to be undone');
+
+  // The selected folder resolves only matching paths; the toolbar uses the same recursive scope.
+  await restoredSparse.getByRole('textbox', { name: 'Filter files by path', exact: true }).fill('keep.ts');
+  await folderRow('feature/').waitFor();
+  await folderRow('feature/').click({ button: 'right' });
+  await folderMenu().getByText('2 files selected', { exact: true }).waitFor();
+  await folderMenu().getByRole('menuitem', { name: 'Mark reviewed', exact: true }).click();
+  await waitForState(restoredSparse, ({ reviews }) => Object.keys(reviews.find(review => review.id === folderReviewId).approvals).length === 2, 'only matching folder descendants to be reviewed');
+  assert.deepEqual(Object.keys(await folderApprovals()).sort(), ['feature/keep.ts', 'feature/nested/keep.ts']);
+  await restoredSparse.getByRole('group', { name: 'Selected file actions' }).getByText('2 selected', { exact: true }).waitFor();
+  await restoredSparse.getByRole('button', { name: 'Mark selected files unreviewed', exact: true }).click();
+  await waitForState(restoredSparse, ({ reviews }) => Object.keys(reviews.find(review => review.id === folderReviewId).approvals).length === 0, 'filtered folder toolbar undo to finish');
+  await restoredSparse.getByRole('button', { name: 'Clear file search', exact: true }).click();
   assert.deepEqual(errors, [], `Renderer errors: ${errors.join('\n')}`);
-  console.log('Desktop smoke passed: compact split/unified comments with stable scrolling, manual context expansion and collapsed-feedback recovery, explorer-order navigation, right-click and Shift-range batch approvals, inline earlier feedback and restart relocation, autosave, completion, resizing, pickers, context isolation, clipboard, and persistence.');
+  console.log('Desktop smoke passed: compact split/unified comments with stable scrolling, manual context expansion and collapsed-feedback recovery, explorer-order navigation, right-click and Shift-range batch approvals, recursive collapsed-folder approvals with filtered scope and undo, inline earlier feedback and restart relocation, autosave, completion, resizing, pickers, context isolation, clipboard, and persistence.');
 } catch (error) {
   if (desktop) {
     const windows = desktop.windows();

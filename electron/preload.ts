@@ -34,6 +34,7 @@ const api: ReviewAPI = {
   resolveUnknownPublication: (...args) => ipcRenderer.invoke('review:feedback-unknown', ...args),
   previewMerge: (...args) => ipcRenderer.invoke('review:merge-preview', ...args),
   runPullRequestAction: (...args) => ipcRenderer.invoke('review:pullrequests-action', ...args),
+  completeMergedReview: id => ipcRenderer.invoke('review:pullrequests-complete', id),
   openIntegrationLink: url => ipcRenderer.invoke('review:integration-open', url),
   getUpdateState: () => ipcRenderer.invoke('review:update-state'),
   checkForUpdates: () => ipcRenderer.invoke('review:update-check'),

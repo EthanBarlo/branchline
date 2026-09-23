@@ -623,3 +623,111 @@ test('failure accepting the final grouped snapshot stops loading and blocks acti
   f.reviewService.acceptRemoteSnapshot = accept;
   assert.equal((await f.service.refreshReview(review.id)).snapshot.loading, false);
 });
+
+async function completedMerge(f: Awaited<ReturnType<typeof fixture>>, id: string) {
+  return f.state.updateReview(id, remote => {
+    remote.operation = { action: 'merge', state: 'complete', updatedAt: new Date().toISOString(), items: remote.pullRequests.map(pr => ({
+      prKey: pullRequestKey(pr), sourceHash: pr.sourceHash, targetHash: pr.targetHash, approval: 'approved', merge: 'merged', cleanup: 'deleted', mergeCommit: hash('d'),
+    })) };
+    for (const row of remote.repositories || []) row.cleanup = { state: row.status === 'missing-branch' ? 'skipped' : 'deleted' };
+  });
+}
+
+test('completed merge removal persists, is retryable, and leaves published feedback and the project intact', async t => {
+  const f = await fixture(t), review = await f.open();
+  await f.add(review.id);
+  await f.service.publishFeedback(review.id);
+  await f.service.setReviewTicket(review.id, 'OPS-987');
+  const link = await f.service.getJiraTicketLink(review.id);
+  await completedMerge(f, review.id);
+  const calls = structuredClone(f.calls), comments = structuredClone(f.comments);
+  const result = await f.service.completeMergedReview(review.id);
+  assert.ok(!result.reviews.some(item => item.id === review.id));
+  assert.ok(result.reviews.some(item => item.id === currentReviewId(f.project.id)));
+  assert.equal(result.projects[0].id, f.project.id);
+  assert.equal(f.state.review(review.id), null);
+  assert.equal(f.state.ticket(review.id), undefined);
+  assert.equal(f.service.validateLink(link!.url), 'https://separate.atlassian.net/browse/OPS-987');
+  assert.deepEqual(await f.service.completeMergedReview(review.id), result, 'A lost completion response can be retried.');
+  assert.deepEqual(f.comments, comments, 'Removing local history never deletes published Bitbucket comments.');
+  assert.deepEqual(f.calls, calls, 'Completion needs no provider requests, credentials or Git operations.');
+  const reloaded = new ReviewStore(f.reviewsPath); await reloaded.load();
+  const integrations = new IntegrationStore(f.statePath); await integrations.load();
+  assert.ok(!reloaded.getState().reviews.some(item => item.id === review.id));
+  assert.equal(integrations.review(review.id), null);
+});
+
+test('merge completion cannot remove partial, changed, retained or unconfirmed reviews', async t => {
+  const f = await fixture(t), review = await f.open();
+  await f.service.refreshReview(review.id);
+  const clean = await completedMerge(f, review.id);
+  const cases: Array<(remote: typeof clean) => void> = [
+    remote => { remote.operation!.action = 'approve'; },
+    remote => { remote.operation!.state = 'paused'; },
+    remote => { remote.operation!.items[0].merge = 'unknown'; },
+    remote => { remote.operation!.items[0].cleanup = 'retained'; },
+    remote => { remote.operation!.items[0].cleanup = 'unknown'; },
+    remote => { remote.operation!.items[0].error = 'Recheck the source revision'; },
+    remote => { remote.pullRequests[0].sourceHash = hash('e'); },
+    remote => { remote.operation!.items[0].pointerState = 'review'; },
+    remote => { remote.repositories = [{ repository: child, sourceBranch: review.featureBranch, targetBranch: review.baseBranch, sourceHash: hash('a'), targetHash: hash('b'), status: 'no-changes', cleanup: { state: 'pending' } }]; },
+  ];
+  for (const change of cases) {
+    const pending = structuredClone(clean); change(pending);
+    await f.state.setReview(review.id, pending);
+    await assert.rejects(() => f.service.completeMergedReview(review.id), /Finish merging and confirm branch cleanup/);
+    assert.equal(f.reviews.getReview(review.id).id, review.id);
+  }
+  await assert.rejects(() => f.service.completeMergedReview(currentReviewId(f.project.id)), /Finish merging/);
+});
+
+test('startup retires completed saved reviews without loading remote branches and preserves pending cleanup', async t => {
+  const f = await fixture(t), completed = await f.open();
+  await completedMerge(f, completed.id);
+  const pending = await f.reviews.createReview({ projectId: f.project.id, name: 'Cleanup still needed', featureBranch: 'APP-123-feature', baseBranch: 'main', includeWorkingTree: false }, true);
+  const remote = f.state.review(completed.id)!;
+  remote.operation!.items[0].cleanup = 'retained';
+  await f.state.setReview(pending.id, remote);
+  const reloaded = new ReviewStore(f.reviewsPath); await reloaded.load();
+  const integrations = new IntegrationStore(f.statePath); await integrations.load();
+  const unavailableConnections = {} as ConnectionManager;
+  const local = new ReviewService(reloaded, async () => { throw new Error('Startup must not inspect Git'); }, async () => { throw new Error('Startup must not build a snapshot'); });
+  const service = new IntegrationService(reloaded, local, integrations, unavailableConnections, {} as PointerService);
+  await service.removeCompletedReviews();
+  assert.ok(!reloaded.getState().reviews.some(item => item.id === completed.id));
+  assert.ok(reloaded.getState().reviews.some(item => item.id === pending.id));
+  assert.equal(integrations.review(completed.id), null);
+  assert.equal(integrations.review(pending.id)!.operation!.items[0].cleanup, 'retained');
+});
+
+test('completion recovers if integration cleanup fails after the local review was removed', async t => {
+  const f = await fixture(t), review = await f.open();
+  await completedMerge(f, review.id);
+  const remove = f.state.removeReview.bind(f.state);
+  let fail = true;
+  f.state.removeReview = async id => { if (fail) { fail = false; throw new Error('Storage temporarily unavailable'); } return remove(id); };
+  await assert.rejects(() => f.service.completeMergedReview(review.id), /Storage temporarily unavailable/);
+  assert.ok(!f.reviews.getState().reviews.some(item => item.id === review.id));
+  assert.ok(f.state.review(review.id));
+  const retried = await f.service.completeMergedReview(review.id);
+  assert.ok(!retried.reviews.some(item => item.id === review.id));
+  assert.equal(f.state.review(review.id), null);
+});
+
+test('startup finishes orphan metadata cleanup after interruption between review and integration removal', async t => {
+  const f = await fixture(t), review = await f.open();
+  await completedMerge(f, review.id);
+  await f.service.setReviewTicket(review.id, 'OPS-987');
+  await f.service.setReviewTicket(currentReviewId(f.project.id), 'APP-123');
+  await f.reviews.deleteReview(review.id); // Simulate termination before integrations.json was updated.
+  const reloaded = new ReviewStore(f.reviewsPath); await reloaded.load();
+  const integrations = new IntegrationStore(f.statePath); await integrations.load();
+  const local = new ReviewService(reloaded, async () => { throw new Error('Unexpected Git'); }, async () => { throw new Error('Unexpected snapshot'); });
+  const service = new IntegrationService(reloaded, local, integrations, {} as ConnectionManager, {} as PointerService);
+  await service.removeCompletedReviews();
+  const checked = new IntegrationStore(f.statePath); await checked.load();
+  assert.equal(checked.review(review.id), null);
+  assert.equal(checked.ticket(review.id), undefined);
+  assert.equal(checked.ticket(currentReviewId(f.project.id)), 'APP-123');
+  assert.deepEqual(checked.project(f.project.id), f.settings);
+});

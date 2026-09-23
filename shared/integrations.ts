@@ -1,4 +1,4 @@
-import type { DiffSide, Review, ReviewComment, ReviewSnapshot, ReviewRefresh } from './types';
+import type { AppState, DiffSide, Review, ReviewComment, ReviewSnapshot, ReviewRefresh } from './types';
 
 export type ConnectionKind = 'jira' | 'bitbucket';
 export interface ConnectionInfo { id: string; kind: ConnectionKind; label: string; email: string; accountId: string; displayName: string; siteUrl?: string; cloudId?: string; storage: 'secure' | 'session'; connected: boolean; }
@@ -70,6 +70,26 @@ export interface RemoteComment { id: number; authorId: string; body: string; res
 export interface InlinePayload { content: { raw: string }; inline: { path: string; from?: number; to?: number; start_from?: number; start_to?: number }; }
 export interface RemoteSnapshotResult { snapshot: ReviewSnapshot; pullRequests: PullRequest[]; repositories?: BranchReviewRepository[]; }
 export const pullRequestKey = (pr: Pick<PullRequest, 'repository' | 'id'>): string => `${pr.repository.relativePath}#${pr.id}`;
+/** Use persisted provider receipts, not the selected view or a renderer flag. */
+export function isMergeComplete(remote: RemoteReviewState | null | undefined): boolean {
+  const operation = remote?.operation;
+  if (!remote || operation?.action !== 'merge' || operation.state !== 'complete' || operation.error || !remote.pullRequests.length) return false;
+  if (!remote.pullRequests.every(pr => {
+    const item = operation.items.find(item => item.prKey === pullRequestKey(pr));
+    return item?.merge === 'merged' && item.cleanup === 'deleted' && item.sourceHash === pr.sourceHash && !item.error
+      && (!item.pointerState || item.pointerState === 'ready');
+  })) return false;
+  const rows = remote.repositories || [];
+  if (!rows.every(row => {
+    if (row.status === 'unavailable' || row.creation || row.status === 'changes' && !row.prId) return false;
+    const item = operation.items.find(item => item.prKey === `${row.repository.relativePath}#${row.prId}`);
+    return row.cleanup ? ['deleted', 'skipped'].includes(row.cleanup.state) : item?.cleanup === 'deleted';
+  })) return false;
+  return remote.pullRequests.every(pr => {
+    const row = rows.find(row => row.repository.relativePath === pr.repository.relativePath && row.prId === pr.id);
+    return row?.cleanup?.state === 'deleted' || operation.items.find(item => item.prKey === pullRequestKey(pr))?.cleanup === 'deleted';
+  });
+}
 export interface IntegrationAPI {
   getIntegrations(): Promise<IntegrationState>;
   getIntegrationDiagnostics(): Promise<IntegrationDiagnosticsInfo>;
@@ -95,5 +115,6 @@ export interface IntegrationAPI {
   resolveUnknownPublication(reviewId: string, commentId: string, remoteId: number | null): Promise<RemoteReviewState>;
   previewMerge(reviewId: string, action?: 'approve' | 'merge'): Promise<MergePreview>;
   runPullRequestAction(reviewId: string, action: 'approve' | 'merge'): Promise<RemoteReviewState>;
+  completeMergedReview(reviewId: string): Promise<AppState>;
   openIntegrationLink(url: string): Promise<void>;
 }

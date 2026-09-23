@@ -67,8 +67,18 @@ export class MergeService {
       await this.progress(id, key, { phase: undefined, error: reason });
       throw new Error(reason);
     }
-    if (this.binding(id).repositories?.find(row => row.repository.relativePath === pr.repository.relativePath)?.cleanup?.state === 'deleted') {
-      await this.progress(id, key, { cleanup: 'deleted', phase: undefined });
+    if (previous?.sourceHash !== pr.sourceHash) await this.progress(id, key, { sourceHash: pr.sourceHash });
+    // The parent can be merged directly in Bitbucket while paused for pointer
+    // review (or after a lost push acknowledgement). The comparison above still
+    // requires the actual source to have been reviewed. Once it matches our
+    // pointer commit, no pending pointer-review state should survive the merge.
+    if (previous?.pointerState && previous.pointerCommit === pr.sourceHash) await this.progress(id, key, { pointerState: 'ready' });
+    const row = this.binding(id).repositories?.find(row => row.repository.relativePath === pr.repository.relativePath);
+    if (row) {
+      // The repository pipeline verifies repository access and reconciles source
+      // deletion before completing. A bare branch 404 alone can also mean revoked
+      // access, so it must not create a successful cleanup receipt here.
+      if (row.cleanup?.state === 'deleted') await this.progress(id, key, { cleanup: 'deleted', phase: undefined });
       return;
     }
     const exists = await client.branchExists(pr).catch(() => undefined);
@@ -271,7 +281,7 @@ export class MergeService {
         // OPEN is not proof that the provider never received the merge request.
         await this.progress(id, item.prKey, { merge: 'unknown', error: 'Merge delivery is uncertain. Wait for Bitbucket to confirm its result before resuming.' });
       }
-      if (item.pointerState === 'pushing' && item.pointerCommit) {
+      if (latest.state !== 'MERGED' && item.pointerState === 'pushing' && item.pointerCommit) {
         if (latest.sourceHash === item.pointerCommit) await this.progress(id, item.prKey, { pointerState: 'review' });
         else if (latest.sourceHash === item.pointerBase) await this.progress(id, item.prKey, { pointerState: 'prepared' });
         else throw new Error(`${pr.repository.relativePath}: the parent branch changed during a pointer push. Refresh before resuming.`);
@@ -292,82 +302,89 @@ export class MergeService {
   }
 
   /** All writes use a source-hash lease; only commits already in the target can be deleted. */
-  private async cleanupBranches(id: string, client: BitbucketClient): Promise<string | null> {
+  private async cleanupBranch(id: string, row: BranchReviewRepository, client: BitbucketClient,
+    stopped: () => boolean, stop: (reason: string) => void): Promise<string | null> {
     const binding = this.binding(id);
-    const rows = [...(binding.repositories ?? [])].sort((a, b) => depth(b) - depth(a)
-      || a.repository.relativePath.localeCompare(b.repository.relativePath));
-    return concurrent(rows, async (row, stopped, stop) => {
-      const repositoryPath = row.repository.relativePath;
-      // A previously deleted branch may have since been deliberately recreated.
-      // A successful receipt never authorizes deleting that replacement branch.
-      if (row.cleanup?.state === 'deleted' || row.cleanup?.state === 'skipped') return null;
-      const item = binding.operation?.items.find(value => value.prKey === `${repositoryPath}#${row.prId}`);
-      const uncertain = row.cleanup?.state === 'sending' || row.cleanup?.state === 'unknown';
-      const expectedHead = (uncertain ? row.cleanup?.expectedHead : undefined) ?? item?.pointerCommit ?? row.sourceHash;
-      const save = (state: NonNullable<BranchReviewRepository['cleanup']>['state'], error?: string) => this.cleanupProgress(id, repositoryPath, { state, expectedHead, ...(error ? { error } : {}) });
+    const repositoryPath = row.repository.relativePath;
+    // A previously deleted branch may have since been deliberately recreated.
+    // A successful receipt never authorizes deleting that replacement branch.
+    if (row.cleanup?.state === 'deleted' || row.cleanup?.state === 'skipped') return null;
+    const item = binding.operation?.items.find(value => value.prKey === `${repositoryPath}#${row.prId}`);
+    const uncertain = row.cleanup?.state === 'sending' || row.cleanup?.state === 'unknown';
+    const expectedHead = (uncertain ? row.cleanup?.expectedHead : undefined) ?? item?.pointerCommit ?? row.sourceHash;
+    const save = (state: NonNullable<BranchReviewRepository['cleanup']>['state'], error?: string) => this.cleanupProgress(id, repositoryPath, { state, expectedHead, ...(error ? { error } : {}) });
+    const retain = async (error: string) => {
+      const reason = `${repositoryPath}: ${error}`;
+      stop(reason); await save('retained', error); return reason;
+    };
+    try {
+      if (row.prId && item?.merge !== 'merged') {
+        if (stopped()) return null;
+        const reason = `${repositoryPath}: its PR has not finished merging. Branch cleanup is paused.`;
+        stop(reason); return reason;
+      }
+      // Reconciliation is read-only. Preserve uncertainty on disk while it is
+      // in flight, so a second crash cannot turn it into a new deletion attempt.
+      await save(uncertain ? 'unknown' : 'checking');
+      // A private repository can return 404 when access is revoked. Verify the
+      // repository first so that response cannot masquerade as a deleted branch.
+      const repository = await client.getRepository(row.repository);
+      const source = await client.getBranch(row.repository, row.sourceBranch);
+      if (!source) { await save(row.sourceHash ? 'deleted' : 'skipped'); return null; }
+      if (!expectedHead || source.hash !== expectedHead) {
+        return await retain(item?.merge === 'merged'
+          ? 'The source branch changed after its PR was merged. Reopen the branch from Pull requests to review that new work. The completed PR will not merge or delete it.'
+          : 'The source branch contains changes that were not part of this review.');
+      }
+      if (uncertain) {
+        const reason = `${repositoryPath}: branch deletion is unconfirmed and the branch still exists. Check Bitbucket before retrying; Branchline has not sent another deletion.`;
+        stop(reason); await save('unknown', reason); return reason;
+      }
+      if (row.sourceBranch === row.targetBranch || !repository.defaultBranch || row.sourceBranch === repository.defaultBranch) {
+        return await retain('The source is the target or default branch, or the default branch could not be verified.');
+      }
+      const open = await client.findPullRequests(row.repository, row.sourceBranch, ['OPEN']);
+      if (open.length) return await retain('The source branch still has an open pull request.');
+      const target = await client.getBranch(row.repository, row.targetBranch);
+      if (!target) return await retain(`The target branch ${row.targetBranch} is missing.`);
+      if (await client.mergeBase(row.repository, source.hash, target.hash) !== source.hash) {
+        return await retain('The source branch has commits that are not merged into its target.');
+      }
+      if (stopped()) { await save('pending'); return null; }
+      const credentials = this.connections.credentials(binding.connectionId);
+      await save('sending');
+      if (stopped()) { await save('pending'); return null; }
       try {
-        if (row.prId && item?.merge !== 'merged') return `${repositoryPath}: its PR has not finished merging. Branch cleanup is paused.`;
-        // Reconciliation is read-only. Preserve uncertainty on disk while it is
-        // in flight, so a second crash cannot turn it into a new deletion attempt.
-        await save(uncertain ? 'unknown' : 'checking');
-        // A private repository can return 404 when access is revoked. Verify the
-        // repository first so that response cannot masquerade as a deleted branch.
-        const repository = await client.getRepository(row.repository);
-        const source = await client.getBranch(row.repository, row.sourceBranch);
-        if (!source) { await save(row.sourceHash ? 'deleted' : 'skipped'); return null; }
-        if (!expectedHead || source.hash !== expectedHead) {
-          await save('retained', 'The source branch contains changes that were not part of this review.'); return null;
-        }
-        if (uncertain) {
-          const reason = `${repositoryPath}: branch deletion is unconfirmed and the branch still exists. Check Bitbucket before retrying; Branchline has not sent another deletion.`;
+        await this.pointers.deleteBranch({ repository: row.repository, sourceBranch: row.sourceBranch, expectedHead,
+          credentials: { email: credentials.email, token: credentials.token } });
+      } catch (error) {
+        // A failed Git request may have reached the server. Reconcile before
+        // deciding whether a retry would be safe, without issuing another write.
+        let latest: Awaited<ReturnType<BitbucketClient['getBranch']>>;
+        try { latest = await client.getBranch(row.repository, row.sourceBranch); }
+        catch {
+          const reason = `${repositoryPath}: branch deletion could not be confirmed. ${message(error)}`;
           stop(reason); await save('unknown', reason); return reason;
         }
-        if (row.sourceBranch === row.targetBranch || !repository.defaultBranch || row.sourceBranch === repository.defaultBranch) {
-          await save('retained', 'The source is the target or default branch, or the default branch could not be verified.'); return null;
-        }
-        const open = await client.findPullRequests(row.repository, row.sourceBranch, ['OPEN']);
-        if (open.length) { await save('retained', 'The source branch still has an open pull request.'); return null; }
-        const target = await client.getBranch(row.repository, row.targetBranch);
-        if (!target) { await save('retained', `The target branch ${row.targetBranch} is missing.`); return null; }
-        if (await client.mergeBase(row.repository, source.hash, target.hash) !== source.hash) {
-          await save('retained', 'The source branch has commits that are not merged into its target.'); return null;
-        }
-        if (stopped()) { await save('pending'); return null; }
-        const credentials = this.connections.credentials(binding.connectionId);
-        await save('sending');
-        if (stopped()) { await save('pending'); return null; }
-        try {
-          await this.pointers.deleteBranch({ repository: row.repository, sourceBranch: row.sourceBranch, expectedHead,
-            credentials: { email: credentials.email, token: credentials.token } });
-        } catch (error) {
-          // A failed Git request may have reached the server. Reconcile before
-          // deciding whether a retry would be safe, without issuing another write.
-          let latest: Awaited<ReturnType<BitbucketClient['getBranch']>>;
-          try { latest = await client.getBranch(row.repository, row.sourceBranch); }
-          catch {
-            const reason = `${repositoryPath}: branch deletion could not be confirmed. ${message(error)}`;
-            stop(reason); await save('unknown', reason); return reason;
-          }
-          if (!latest) { await save('deleted'); return null; }
-          if (latest.hash !== expectedHead) { await save('retained', 'The source branch changed during cleanup and was retained.'); return null; }
-          // Explicit refusals can be retried after permissions/protection are
-          // corrected; an indeterminate transport response remains uncertain.
-          const rejected = /remote rejected|stale info|source branch changed|permission denied|not permitted|not allowed|authentication failed|could not read username|access denied|403|401/i.test(message(error));
-          const reason = `${repositoryPath}: ${message(error)}`;
-          stop(reason); await save(rejected ? 'retained' : 'unknown', reason); return reason;
-        }
-        const latest = await client.getBranch(row.repository, row.sourceBranch);
-        if (latest) { await save('retained', 'The branch exists again after deletion. Check Bitbucket before continuing.'); return null; }
-        await save('deleted');
-      } catch (error) {
-        const current = this.binding(id).repositories?.find(value => value.repository.relativePath === repositoryPath)?.cleanup;
+        if (!latest) { await save('deleted'); return null; }
+        if (latest.hash !== expectedHead) return await retain('The source branch changed during cleanup and was retained.');
+        // Explicit refusals can be retried after permissions/protection are
+        // corrected; an indeterminate transport response remains uncertain.
+        const rejected = /remote rejected|stale info|source branch changed|permission denied|not permitted|not allowed|authentication failed|could not read username|access denied|403|401/i.test(message(error));
         const reason = `${repositoryPath}: ${message(error)}`;
-        stop(reason);
-        await save(uncertain || current?.state === 'sending' ? 'unknown' : 'pending', reason);
-        return reason;
+        stop(reason); await save(rejected ? 'retained' : 'unknown', reason); return reason;
       }
-      return null;
-    });
+      const latest = await client.getBranch(row.repository, row.sourceBranch);
+      if (latest) return await retain('The branch exists again after deletion. Check Bitbucket before continuing.');
+      await save('deleted');
+    } catch (error) {
+      const current = this.binding(id).repositories?.find(value => value.repository.relativePath === repositoryPath)?.cleanup;
+      const reason = `${repositoryPath}: ${message(error)}`;
+      stop(reason);
+      await save(uncertain || current?.state === 'sending' ? 'unknown' : 'pending', reason);
+      return reason;
+    }
+    return null;
   }
 
   private async performRun(id: string, action: 'approve' | 'merge'): Promise<RemoteReviewState> {
@@ -411,7 +428,7 @@ export class MergeService {
     await this.state.updateReview(id, r => { r.operation = operation; });
     const ordered = [...binding.pullRequests].sort((a, b) => depth(b) - depth(a) || a.repository.relativePath.localeCompare(b.repository.relativePath));
     const settings = this.state.project(this.reviews.getReview(id).projectId);
-    const mergePause = await concurrent(ordered, async (reviewed, stopped, stop) => {
+    const mergeRepository = async (reviewed: PullRequest, stopped: () => boolean, stop: (reason: string) => void): Promise<string | null> => {
       const key = pullRequestKey(reviewed);
       const stopWith = (reason: string) => { stop(reason); return reason; };
       let item = this.binding(id).operation!.items.find(item => item.prKey === key)!;
@@ -425,7 +442,7 @@ export class MergeService {
         if (stopped()) return null;
         await this.progress(id, key, { phase: 'checking', error: undefined });
         let latest = await client.getPullRequest(reviewed.repository, reviewed.id);
-        if (latest.state === 'MERGED') { await this.confirmMerged(id, key, latest, client, true); return null; }
+        if (latest.state === 'MERGED') { await this.confirmMerged(id, key, latest, client, true, stop); return null; }
         if (!sameRevision(reviewed, latest)) throw new Error(`${reviewed.repository.relativePath}: the PR changed. Refresh and review it before resuming.`);
         if (latest.state !== 'OPEN' || latest.draft) throw new Error(`${reviewed.repository.relativePath}: the PR is not ready for approval.`);
         if (action === 'merge' && !latest.mergeStrategies.includes('merge_commit')) throw new Error('Standard merge commits are no longer permitted.');
@@ -515,17 +532,46 @@ export class MergeService {
         return stopWith(message(error));
       }
       return null;
-    }, reviewed => action !== 'merge' || !settings.updateSubmodulePointers
-      || this.children(reviewed, ordered).every(child => this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(child))?.merge === 'merged'));
-    if (mergePause) return this.pause(id, mergePause);
-    if (action === 'merge') {
-      if (this.branches) {
-        const blockers = await this.branches.preflight(id);
-        if (blockers.length) return this.pause(id, blockers.join('\n'));
+    };
+    // A worker owns one repository all the way through cleanup. Empty branches
+    // share this same budget, so they can finish while unrelated PRs still merge.
+    const jobs: Array<{ repository: RepositoryMapping; pr?: PullRequest }> = [
+      ...ordered.map(pr => ({ repository: pr.repository, pr })),
+      ...(action === 'merge' ? (binding.repositories ?? []).filter(row => !ordered.some(pr => pr.repository.relativePath === row.repository.relativePath))
+        .map(row => ({ repository: row.repository })) : []),
+    ].sort((a, b) => depth(b) - depth(a) || a.repository.relativePath.localeCompare(b.repository.relativePath));
+    const completed = new Set<string>();
+    const pipelinePause = await concurrent(jobs, async (job, stopped, stop) => {
+      if (job.pr) {
+        const pending = await mergeRepository(job.pr, stopped, stop);
+        if (pending) return pending;
       }
-      const cleanupPause = await this.cleanupBranches(id, client);
-      if (cleanupPause) return this.pause(id, cleanupPause);
-    }
+      if (action !== 'merge') return null;
+      const row = this.binding(id).repositories?.find(row => row.repository.relativePath === job.repository.relativePath);
+      if (row) {
+        // PR pipelines already checked their reviewed revisions before acting.
+        // A branch-only pipeline needs that same scoped check before cleanup.
+        if (!job.pr && this.branches && !stopped()) {
+          const blockers = await this.branches.preflight(id, { repositoryPaths: [row.repository.relativePath] });
+          if (blockers.length) { const reason = blockers.join('\n'); stop(reason); return reason; }
+        }
+        const result = await this.cleanupBranch(id, row, client, stopped, stop);
+        if (job.pr) await this.progress(id, pullRequestKey(job.pr), { phase: undefined });
+        if (!result) completed.add(job.repository.relativePath);
+        return result;
+      }
+      const item = this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(job.pr!))!;
+      if (item.merge !== 'merged' && stopped()) return null;
+      if (item.merge !== 'merged' || item.cleanup !== 'deleted') {
+        const reason = `${job.repository.relativePath}: source branch cleanup is incomplete. Refresh the review and resolve the retained or unconfirmed branch before finishing.`;
+        stop(reason); return reason;
+      }
+      completed.add(job.repository.relativePath);
+      return null;
+    }, job => !job.pr || action !== 'merge' || !settings.updateSubmodulePointers
+      || this.children(job.pr, ordered).every(child => completed.has(child.repository.relativePath)
+        && this.binding(id).operation!.items.find(item => item.prKey === pullRequestKey(child))?.merge === 'merged'));
+    if (pipelinePause) return this.pause(id, pipelinePause);
     return this.state.updateReview(id, r => { r.operation!.state = 'complete'; r.operation!.error = undefined; r.operation!.updatedAt = new Date().toISOString(); for (const item of r.operation!.items) delete item.phase; });
   }
 

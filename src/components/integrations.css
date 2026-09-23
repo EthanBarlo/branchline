@@ -1,6 +1,8 @@
-.integration-modal { width: 700px; }
+.integration-modal { width: 700px; display: flex; flex-direction: column; overflow: hidden; }
+.integration-modal > .modal-header, .integration-modal > .modal-footer { flex-shrink: 0; }
+.integration-modal > .modal-header { padding-bottom: 18px; }
 .integration-modal .modal-header h2 { font-size: 24px; }
-.integration-body { padding: 0 27px 24px; }
+.integration-body { padding: 0 27px 24px; min-height: 0; overflow: auto; }
 .integration-body .modal-introduction { max-width: 570px; margin-bottom: 20px; }
 .integration-body label, .connection-editor label { display: flex; flex-direction: column; gap: 7px; color: #c4c4c4; font-size: 10px; }
 .integration-body select { width: 100%; min-height: 34px; border: 1px solid #474747; border-radius: 4px; padding: 6px 9px; background: #1e1e1e; color: #e0e0e0; font-size: 11px; }
@@ -64,15 +66,15 @@
 .pr-row > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .pr-row > div > span { color: #959595; font-size: 9px; }
 .pr-row .integration-link { color: #d3d3d3; font-size: 11px; }
-.jira-issue-panel { flex-shrink: 0; border-bottom: 1px solid #333333; background: #202020; }
-.jira-issue-heading { display: flex; align-items: center; gap: 12px; min-height: 32px; padding: 0 14px 0 10px; }
-.jira-issue-toggle { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 7px 0; border: 0; background: transparent; text-align: left; }
-.jira-issue-toggle > svg { transform: rotate(-90deg); color: #858585; flex-shrink: 0; }
-.is-open .jira-issue-toggle > svg { transform: none; }
-.jira-issue-key { color: #bdbdbd; font: 9px var(--code-font); flex-shrink: 0; }
-.jira-issue-title { font-size: 11px; color: #b3b3b3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.jira-open-link { flex-shrink: 0; white-space: nowrap; font-size: 10px; }
-.jira-issue-content { padding: 5px 24px 15px 32px; max-height: 270px; overflow: auto; border-top: 1px solid #2d2d2d; }
+.integration-context-button { white-space: nowrap; flex-shrink: 0; }
+.integration-context-button:focus-visible, .remote-review-actions > button:focus-visible { outline: 2px solid #aaa; outline-offset: 3px; }
+.integration-context-count { font: 9px var(--code-font); color: #b3b3b3; padding-left: 2px; }
+.integration-context-warning { display: inline-flex; align-items: center; gap: 3px; color: #d0af92; }
+.jira-ticket-button { max-width: 145px; }
+.jira-ticket-button > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jira-issue-key { color: #bdbdbd; font: 10px var(--code-font); }
+.jira-ticket-heading { margin: 23px 0 17px; }
+.jira-ticket-heading h3 { margin: 8px 0 0; font-size: 17px; font-weight: 500; color: #dedede; line-height: 1.5; }
 .jira-ticket-form { display: flex; align-items: center; gap: 9px; margin: 7px 0 13px; }
 .jira-ticket-form > label { font-size: 10px; color: #959595; }
 .jira-ticket-form .text-input { height: 28px; max-width: 150px; padding: 0 8px; font: 10px var(--code-font); }
@@ -87,14 +89,10 @@
 .jira-description table { border-collapse: collapse; max-width: 100%; }
 .jira-description td, .jira-description th { padding: 7px 11px; border: 1px solid #414141; text-align: left; }
 .jira-description .integration-link { color: #dfdfdf; text-decoration: underline; }
-.remote-review-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; min-height: 39px; padding: 5px 12px; background: #232323; border-bottom: 1px solid #3b3b3b; }
-.remote-review-origin { display: flex; align-items: center; gap: 9px; min-width: 0; overflow: hidden; font-size: 10px; color: #b3b3b3; }
-.remote-review-origin > svg, .remote-review-origin > span { flex-shrink: 0; }
-.remote-review-origin > .integration-link { flex-shrink: 0; font-size: 9px; }
-.remote-review-origin .integration-note { margin: 0; }
-.remote-review-actions { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
-.remote-review-actions > .button { min-height: 27px; font-size: 10px; padding: 0 9px; }
-.remote-review-actions > .integration-link { font-size: 9px; margin-right: 4px; }
+.remote-review-controls { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.remote-review-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.remote-review-actions > .button, .remote-review-controls > .button { min-height: 27px; height: 27px; font-size: 10px; padding: 0 9px; gap: 6px; }
+.remote-progress-button { color: #d0af92; }
 .publication-status { font-size: 9px; color: #959595; white-space: nowrap; }
 .publication-synced { color: #b1c3ad; }
 .publication-unknown, .publication-failed, .publication-conflict { color: #d0af92; }
@@ -167,10 +165,13 @@
 .pointer-change-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 10px; color: #959595; }
 .pointer-change-row > span { flex: 1; color: #c4c4c4; overflow-wrap: anywhere; }
 .pointer-change-row > code { font-size: 10px; user-select: text; }
+@media (max-width: 1350px) {
+  .remote-secondary-action > span, .remote-progress-button > span { display: none; }
+  .remote-review-actions > .remote-secondary-action, .remote-review-actions > .remote-progress-button { width: 27px; padding: 0; justify-content: center; }
+}
 @media (max-width: 1150px) {
-  .remote-review-origin > .integration-link { display: none; }
-  .remote-review-controls { gap: 7px; }
-  .remote-review-origin { gap: 6px; }
+  .repository-context-label { display: none; }
+  .remote-review-controls, .remote-review-actions { gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .merge-progress-row { transition: none; }
@@ -178,16 +179,11 @@
 }
 
 .pr-row > svg { flex-shrink: 0; margin-top: 2px; color: #959595; }
-.branch-review-repositories { flex-shrink: 0; border-bottom: 1px solid #363636; background: #202020; }
-.branch-review-repositories > summary { display: flex; align-items: center; gap: 8px; padding: 8px 13px; cursor: pointer; list-style: none; color: #bdbdbd; font-size: 10px; }
-.branch-review-repositories > summary::-webkit-details-marker { display: none; }
-.branch-review-repositories > summary > svg { color: #858585; transform: rotate(-90deg); }
-.branch-review-repositories[open] > summary > svg { transform: none; }
-.branch-review-repositories > summary > strong { font-weight: 500; }
-.branch-review-repositories > summary > span { margin-left: auto; color: #959595; font-size: 9px; }
-.branch-review-repositories > ul { list-style: none; padding: 0 13px 8px; margin: 0; max-height: 158px; overflow: auto; }
-.branch-review-repositories li { display: grid; grid-template-columns: 14px minmax(110px, 1fr) auto auto; align-items: center; gap: 7px 10px; min-height: 35px; padding: 6px 6px; border-top: 1px solid #2e2e2e; color: #959595; font-size: 10px; }
-.branch-review-repositories li > div { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; min-width: 0; }
+.branch-review-repositories { border: 1px solid #414141; border-radius: 6px; background: #222222; overflow: hidden; }
+.branch-review-repositories > ul { list-style: none; padding: 0; margin: 0; }
+.branch-review-repositories li { display: grid; grid-template-columns: 14px minmax(110px, 1fr) auto auto; align-items: center; gap: 7px 10px; min-height: 48px; padding: 10px 12px; border-top: 1px solid #2e2e2e; color: #959595; font-size: 10px; }
+.branch-review-repositories li:first-child { border-top: 0; }
+.branch-review-repositories li > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .branch-review-repositories li strong { color: #bdbdbd; font-size: 10px; font-weight: 500; overflow-wrap: anywhere; }
 .branch-review-repositories li code { color: #858585; font-size: 9px; overflow-wrap: anywhere; }
 .branch-review-repositories li > .integration-link { font-size: 9px; justify-self: end; }

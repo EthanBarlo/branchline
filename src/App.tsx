@@ -6,7 +6,7 @@ import { UpdateButton, UpdateDetails } from './components/UpdateControls';
 import { SettingsView, type SettingsSection } from './components/SettingsView';
 import { JiraIssuePanel, ProjectIntegrationDialog, PublicationStatus, PullRequestsDialog, RemoteLoadRepositories, RemoteReviewControls } from './components/IntegrationControls';
 import { MergeCompletion } from './components/MergeCompletion';
-import { pullRequestKey } from '../shared/integrations';
+import { isMergeComplete } from '../shared/integrations';
 import type { IntegrationState, RemoteReviewLoadProgress, RemoteReviewState } from '../shared/integrations';
 import {
   ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown,
@@ -490,18 +490,23 @@ export default function App() {
   }
 
   async function mergeFinished(mergedReview: Review, state: RemoteReviewState) {
-    const operation = state.operation;
-    if (operation?.action !== 'merge' || operation.state !== 'complete' || !state.pullRequests.length
-      || !state.pullRequests.every(pr => operation.items.some(item => item.prKey === pullRequestKey(pr) && item.merge === 'merged'))) return;
+    if (!isMergeComplete(state)) return;
     await flushPendingComments();
     if (!mounted.current || deletedReviewIds.current.has(mergedReview.id)) return;
-    setRemoteStates(previous => ({ ...previous, [mergedReview.id]: state }));
-    setMergeCompletion({ reviewId: mergedReview.id, projectId: mergedReview.projectId, remote: state, jiraLink: jiraLinks[mergedReview.id] || null });
-    // Closing the active view preserves the saved review and its feedback.
-    if (selectedIdRef.current === mergedReview.id && selectedProjectRef.current === mergedReview.projectId) activateReview(currentReviewId(mergedReview.projectId));
-    void window.reviewAPI.getJiraTicketLink(mergedReview.id).then(jiraLink => {
-      if (mounted.current) setMergeCompletion(previous => previous?.reviewId === mergedReview.id ? { ...previous, jiraLink } : previous);
-    }).catch(() => { /* A browser link cannot block completion of a confirmed merge. */ });
+    // Capture navigation before removing the review; the result modal must not
+    // depend on a review ID that no longer exists in storage.
+    const jiraLink = await window.reviewAPI.getJiraTicketLink(mergedReview.id).catch(() => jiraLinks[mergedReview.id] || null);
+    const saved = await window.reviewAPI.completeMergedReview(mergedReview.id);
+    deletedReviewIds.current.add(mergedReview.id);
+    if (!mounted.current) return;
+    setProjects(saved.projects); setReviews(saved.reviews);
+    setRemoteStates(previous => { const next = { ...previous }; delete next[mergedReview.id]; return next; });
+    setRemoteLoads(previous => { const next = { ...previous }; delete next[mergedReview.id]; return next; });
+    for (const key of Object.keys(knownApprovals.current)) if (key.startsWith(`${mergedReview.id}:`)) delete knownApprovals.current[key];
+    try { localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current)); }
+    catch { /* Optional display history cannot block a confirmed completion. */ }
+    setMergeCompletion({ reviewId: mergedReview.id, projectId: mergedReview.projectId, remote: state, jiraLink });
+    if (selectedIdRef.current === mergedReview.id) activateReview(currentReviewId(mergedReview.projectId));
   }
 
   function remoteOpened(created: Review) {
@@ -663,7 +668,7 @@ export default function App() {
         {error && <div className="error-banner" role="alert"><TriangleAlert size={16} /><span>{error}</span>{review && <button onClick={() => void refresh(review.id, true)}>Retry</button>}<button className="icon-button" aria-label="Dismiss error" onClick={() => setError(null)}><X size={15} /></button></div>}
         {mergeCompletion?.projectId === selectedProjectId && <MergeCompletion reviewId={mergeCompletion.reviewId} remote={mergeCompletion.remote} jiraLink={mergeCompletion.jiraLink} onDismiss={() => setMergeCompletion(null)} />}
         {initializing ? <div className="central-empty"><LoaderCircle size={28} className="spin" /><p>Opening your workspace…</p></div> : !review ? project ? <div className="central-empty"><LoaderCircle size={24} className="spin" /><h2>Opening Current</h2><p>Reading the branch checked out in {project.name}.</p></div> : <Welcome onCreate={() => setShowAddProject(true)} /> : <>
-          <header className="review-toolbar" aria-label="Review controls">
+          <header className={`review-toolbar ${review.remote ? 'remote-toolbar' : ''}`} aria-label="Review controls">
             <button className="icon-button files-toggle" aria-label={showFiles ? 'Hide files' : 'Show files'} aria-expanded={showFiles} aria-controls="review-files" title={showFiles ? 'Hide file tree' : 'Show file tree'} onClick={toggleFiles}>{showFiles ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
             <Select className="review-picker" variant="quiet" label="Select review" title={isCurrent ? 'Current follows your checked-out branch' : review.name} value={review.id} searchPlaceholder="Find a review…" options={[
               { value: currentReviewId(review.projectId), label: 'Current', description: 'Follows your checkout' },
@@ -680,17 +685,17 @@ export default function App() {
             {jiraTicket && !projectIntegration?.jiraConnectionId && <button className="jira-ticket-button" aria-label={`Open ${jiraTicket} in Jira`} title={settings.jiraBaseUrl ? `Open ${jiraTicket} in Jira · ${settings.jiraBaseUrl}` : `Set up Jira to open ${jiraTicket}`} disabled={openingJira} onClick={() => void openJira()}><span>{jiraTicket}</span>{openingJira ? <LoaderCircle size={12} className="spin" /> : <ExternalLink size={12} />}</button>}
             <span className="working-tree-label" title={review.includeWorkingTree ? 'Includes eligible uncommitted changes and new files' : 'Reviewing committed changes only'}>{review.includeWorkingTree ? 'Local edits' : 'Commits only'}</span>
             <div className="toolbar-actions">
+              {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} loadingRepositories={remoteLoading ? loadingRepositories : undefined} reviewLoading={remoteLoading} onRemote={state => setRemoteStates(previous => ({ ...previous, [review.id]: state }))} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
+              {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraTicket} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
               <button className={`icon-button refresh-button ${error ? 'refresh-error' : ''}`} disabled={refreshing} onClick={() => void refresh(review.id, true)} aria-label="Refresh review" title={`${error ? 'Refresh failed. Click to retry.' : review.remote ? 'Refresh the cached PR diff. Also refreshes when reopened or preparing feedback for publication.' : 'Automatically checks for changes every 4 seconds.'}${snapshot ? ` Last checked ${new Date(snapshot.refreshedAt).toLocaleTimeString()}.` : ''}`}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button>
               <button className={`button button-feedback ${showFeedback ? 'active' : ''}`} aria-label={`Feedback${unresolvedComments.length ? ` (${unresolvedComments.length})` : ''}`} aria-pressed={showFeedback} onClick={() => setShowFeedback(!showFeedback)} title="Show review feedback"><MessageSquare size={15} />{unresolvedComments.length > 0 && <span className="soft-count">{unresolvedComments.length}</span>}</button>
-              {copyButton}
+              {!review.remote && copyButton}
               <WorkspaceMenu key={`${project?.id}:${review.id}`} onSettings={() => project && setSettingsProject(project)} onRepositories={() => setShowRepoDetails(!showRepoDetails)} onIntegrations={() => project && setIntegrationProject(project)} onHelp={() => setShowHelp(true)} onDelete={isCurrent ? undefined : () => setDeleteReview(review)} />
             </div>
           </header>
-          {review.remote && <RemoteReviewControls key={`remote:${review.id}`} review={review} remote={remote} loadingRepositories={remoteLoading ? loadingRepositories : undefined} reviewLoading={remoteLoading} onRemote={state => setRemoteStates(previous => ({ ...previous, [review.id]: state }))} onChanged={remoteChanged} onReanchor={beginReanchor} onMergeComplete={state => mergeFinished(review, state)} jiraLink={jiraLinks[review.id] || null} />}
-          {projectIntegration?.jiraConnectionId && <JiraIssuePanel key={`jira:${review.id}`} review={review} ticket={jiraTicket} refreshKey={String(integrationRevision)} onTicketChanged={() => setJiraLinkRevision(value => value + 1)} />}
           {!!pointerChanges.length && <details className="pointer-changes" open={files.length ? undefined : true}><summary><GitFork size={13} /><span>{pointerChanges.length} submodule pointer {pointerChanges.length === 1 ? 'change' : 'changes'}</span><ChevronDown size={12} /></summary><div>{pointerChanges.map(pointer => <div className="pointer-change-row" key={`${pointer.repositoryPath}:${pointer.path}`}><span>{pointer.repositoryPath === '.' ? '' : `${pointer.repositoryPath}/`}{pointer.path}</span><code title={pointer.oldHash || 'Not present'}>{pointer.oldHash?.slice(0, 12) || 'not present'}</code><ArrowRight size={11} /><code title={pointer.newHash || 'Removed'}>{pointer.newHash?.slice(0, 12) || 'removed'}</code></div>)}</div></details>}
           {reanchorId && <div className="reanchor-banner" role="status"><span>Select the current file and lines for your comment. Its text will be preserved.</span><button className="button button-secondary" onClick={() => setReanchorId(null)}>Cancel selection</button></div>}
-          {showRepoDetails && <div className="repository-details"><div className="repository-details-title"><strong>Repositories in this review</strong><span>Each comparison starts at its own merge base.</span><button className="icon-button" aria-label="Close repository details" onClick={() => setShowRepoDetails(false)}><X size={14} /></button></div>{snapshot?.repos.length ? snapshot.repos.map(repo => <div className="repository-detail" key={repo.relativePath}><GitFork size={14} /><span className="repository-detail-name">{repo.relativePath === '.' || !repo.relativePath ? repositoryName(review.repoPath) : repo.relativePath}</span>{repo.error ? <span className="repository-detail-error">{repo.error}</span> : <span>{repo.workingTreeIncluded ? 'Branch + working tree' : 'Branch commits'}</span>}</div>) : <p>{currentNeedsTarget ? 'Choose a target to compare repositories.' : 'Discovering repositories…'}</p>}</div>}
+          {showRepoDetails && <Modal title="Repositories in this review" onClose={() => setShowRepoDetails(false)}><div className="modal-body"><p className="integration-note">Each comparison starts at its own merge base.</p>{snapshot?.repos.length ? snapshot.repos.map(repo => <div className="repository-detail" key={repo.relativePath}><GitFork size={14} /><span className="repository-detail-name">{repo.relativePath === '.' || !repo.relativePath ? repositoryName(review.repoPath) : repo.relativePath}</span>{repo.error ? <span className="repository-detail-error">{repo.error}</span> : <span>{repo.workingTreeIncluded ? 'Branch + working tree' : 'Branch commits'}</span>}</div>) : <p>{currentNeedsTarget ? 'Choose a target to compare repositories.' : 'Discovering repositories…'}</p>}</div></Modal>}
           {!!snapshot?.warnings.length && <details className="warning-banner"><summary><TriangleAlert size={14} /><span>{snapshot.warnings.length} {snapshot.warnings.length === 1 ? 'repository notice' : 'repository notices'}</span><span className="warning-detail-label">View details</span><ChevronDown size={12} /></summary><ul>{snapshot.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
           {isCurrent && (currentNeedsTarget || currentDetached) ? <CurrentSetup detached={currentDetached} onReviewBranch={() => setShowNewReview(true)} /> : <div className={`review-workbench ${resizingFiles ? 'resizing-files' : ''}`}>
             {showFiles && <><aside className="files-sidebar" id="review-files" aria-label="Changed files" style={{ width: filePaneWidth, minWidth: filePaneWidth }}>

@@ -133,6 +133,7 @@ function installHandlers() {
   handle('feedback-unknown', (id: string, commentId: string, remoteId: number | null) => integrations.resolveUnknownPublication(id, commentId, remoteId));
   handle('merge-preview', (id: string, action?: 'approve' | 'merge') => integrations.previewMerge(id, action));
   handle('pullrequests-action', (id: string, action: 'approve' | 'merge') => integrations.runPullRequestAction(id, action));
+  handle('pullrequests-complete', (id: string) => integrations.completeMergedReview(id));
   handle('integration-open', (url: string) => shell.openExternal(integrations.validateLink(url)));
   handle('close-listener', (ready: boolean) => {
     closeListenerReady = ready === true;
@@ -238,6 +239,7 @@ app.whenReady().then(async () => {
     });
     await connections.load();
     integrations = new IntegrationService(store, reviews, integrationStore, connections, new PointerService(join(app.getPath('userData'), 'pointer-workspaces')));
+    await integrations.removeCompletedReviews();
     integrations.onRemoteReviewLoadProgress(change => {
       if (window && !window.webContents.isDestroyed()) window.webContents.send('review:remote-review-load', change);
     });

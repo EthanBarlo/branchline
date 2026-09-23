@@ -60,6 +60,10 @@
 .review-toolbar { display: flex; align-items: center; gap: 7px; height: 40px; min-height: 40px; padding: 0 11px; border-bottom: 1px solid var(--border); background: #1e1e1e; position: relative; z-index: 12; }
 .review-picker { min-width: 79px; max-width: 175px; }
 .review-picker .select-trigger { font-weight: 550; }
+.remote-toolbar .branch-comparison { min-width: 0; flex: 1; overflow: hidden; }
+.remote-toolbar .branch-chip { min-width: 0; max-width: 170px; }
+.remote-toolbar .working-tree-label { display: none; }
+.remote-toolbar .review-picker { max-width: 145px; flex-shrink: 1; }
 .toolbar-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
 .toolbar-separator { width: 1px; height: 16px; background: #3d3d3d; flex-shrink: 0; margin: 0 3px; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 6px; border: 0; border-radius: 4px; color: #a3a3a3; background: transparent; }
@@ -319,6 +323,8 @@
   .review-picker { max-width: 150px; }
 }
 @media (max-width: 1050px) {
+  .remote-toolbar .review-picker { max-width: 112px; }
+  .remote-toolbar .branch-chip { max-width: 105px; }
   .files-sidebar { width: 200px; min-width: 200px; }
   .project-tab { min-width: 110px; max-width: 195px; padding: 0 12px; }
   .chrome-app-name { display: none; }

@@ -30,10 +30,11 @@ function installTransport() {
         const state = globalThis.providerSmoke;
         const options = rest[0]; const callback = rest.at(-1);
         const workspace = require('node:path').join(process.env.BRANCHLINE_DATA_DIR, 'pointer-workspaces') + require('node:path').sep;
-        if (!options?.cwd?.startsWith(workspace) || !args.includes('https://bitbucket.org/smoke/empty.git') || !state.merged.repository || !state.merged.core) throw new Error('Only the scratch cleanup workspace may contact a simulated remote, after all reviewed changes merge.');
+        if (!options?.cwd?.startsWith(workspace) || !args.includes('https://bitbucket.org/smoke/empty.git')) throw new Error('Only the scratch cleanup workspace may contact the exact simulated cleanup remote.');
         let output;
         if (args.includes('push')) {
           if (!args.includes(`--force-with-lease=refs/heads/feature/APP-123:${'b'.repeat(40)}`) || args.at(-1) !== ':refs/heads/feature/APP-123') throw new Error('Cleanup must send one exact-ref deletion with the captured commit lease.');
+          state.emptyDeletedBeforeMerges = !state.merged.repository && !state.merged.core;
           state.emptyDeleted = true; output = 'To simulated remote\n-\t:refs/heads/feature/APP-123\t[deleted]\nDone\n';
         } else output = state.emptyDeleted ? '' : `${'b'.repeat(40)}\trefs/heads/feature/APP-123\n`;
         queueMicrotask(() => callback(null, output, ''));
@@ -305,7 +306,7 @@ try {
   assert.deepEqual(result.snapshot.files.map(file => file.id), ['new.ts', 'z-last.ts', 'zz-core/child.ts']);
   assert.equal(result.published.repositories.find(row => row.repository.relativePath === 'zz-core').prId, 8);
   assert.deepEqual(result.snapshot.warnings, []);
-  assert.equal(result.operation.operation.state, 'complete'); assert.equal(result.operation.operation.items[0].cleanup, 'deleted');
+  assert.equal(result.operation.operation.state, 'complete', result.operation.operation.error); assert.equal(result.operation.operation.items[0].cleanup, 'deleted');
   assert.equal(result.operation.operation.items[0].mergeCommit, 'd'.repeat(40));
   assert.equal(result.operation.operation.items.length, 2, 'The newly created child PR participates in the grouped merge.');
   assert.ok(result.operation.operation.items.every(item => item.merge === 'merged' && item.cleanup === 'deleted'));
@@ -316,6 +317,8 @@ try {
   assert.ok(result.progress.some(event => event.beforeResult && event.state.operation.items.some(item => item.taskId === 'desktop-core-merge-task' && item.merge === 'merging')), 'An accepted asynchronous merge stays visibly in progress until its task and PR confirm completion.');
   assert.ok(result.checks.some(states => states.filter(state => state === 'checking').length >= 2), 'The preload reports multiple repository preflight checks in progress together.');
   assert.ok(result.progress.some(event => event.beforeResult && event.state.repositories.find(row => row.repository.relativePath === 'zz-empty')?.cleanup?.state === 'sending'), 'The real preload reports no-PR repository cleanup while it is running.');
+  assert.ok(result.progress.some(event => event.beforeResult && event.state.repositories.find(row => row.repository.relativePath === 'zz-empty')?.cleanup?.state === 'deleted'
+    && event.state.operation.items.some(item => item.merge !== 'merged')), 'The empty repository finishes cleanup before unrelated PR merges complete.');
   assert.equal(result.progress.at(-1).state.operation.state, 'complete');
   const persisted = JSON.parse(await readFile(join(dataDir, 'integrations.json'), 'utf8')).reviews[result.review.id];
   assert.deepEqual(persisted.operation, JSON.parse(JSON.stringify(result.progress.at(-1).state.operation)), 'The completion event matches the durable operation result.');
@@ -329,6 +332,7 @@ try {
   assert.deepEqual(new Set(merges.map(request => new URL(request.url).pathname.split('/')[4])), new Set(['core', 'repository']), 'Every independent PR merges once.');
   assert.equal(merges.length, 2);
   assert.equal(observed.mergeOverlapped, true, 'Both merge requests arrive before either response can complete.');
+  assert.equal(observed.emptyDeletedBeforeMerges, true, 'The empty branch is deleted independently while PR merges are still pending.');
   assert.equal(observed.requests.filter(request => request.method === 'POST' && request.url.endsWith('/pullrequests')).length, 1, 'Repeated publication creates exactly one missing PR.');
   assert.equal(observed.comments.length, 2, 'Repeated IPC publication cannot duplicate either comment.');
   const rootComment = observed.comments.find(comment => comment.repoSlug === 'repository');
@@ -354,6 +358,21 @@ try {
   const log = await readFile(diagnostics.path, 'utf8');
   assert.ok(log.includes('pull_request_commit_resolved')); assert.ok(log.includes('pull_request_invalid')); assert.ok(log.includes('source.commit.hash'));
   for (const secret of ['fake-bb-token', 'fake-jira-token', 'Updated inline feedback', 'Connected issue', 'Authorization', 'smoke/repository']) assert.ok(!log.includes(secret), `Diagnostics must exclude ${secret}.`);
+  const removed = await page.evaluate(async id => {
+    const first = await window.reviewAPI.completeMergedReview(id);
+    const again = await window.reviewAPI.completeMergedReview(id);
+    let missingReviewError;
+    try { await window.reviewAPI.getRemoteReview(id); } catch (error) { missingReviewError = error.message; }
+    return { first, again, missingReviewError };
+  }, result.review.id);
+  assert.ok(!removed.first.reviews.some(review => review.id === result.review.id));
+  assert.deepEqual(removed.again, removed.first, 'Completion IPC is safe to retry.');
+  assert.match(removed.missingReviewError || '', /This review no longer exists/);
+  const savedReviews = JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8'));
+  const savedIntegrations = JSON.parse(await readFile(join(dataDir, 'integrations.json'), 'utf8'));
+  assert.ok(!savedReviews.reviews.some(review => review.id === result.review.id), 'Merged reviews are removed from durable local history.');
+  assert.equal(savedIntegrations.reviews[result.review.id], undefined);
+  assert.deepEqual((await desktop.evaluate(() => globalThis.providerSmoke)).comments, observed.comments, 'Local completion preserves published feedback.');
   console.log(`Production desktop provider IPC passed: early repository files arrive while child content is blocked, marker and feedback persist in ${Math.round(incremental.elapsedMs)}ms during loading; cached Mark reviewed advances in ${advanceMs}ms without provider or Git requests; branch-only child changes stay visible, publishing creates one PR and native inline range, independent merges overlap, preflight reports concurrent checks, empty branches use isolated leased cleanup; separate accounts, Jira links, durable progress, diagnostics, and unchanged local Git.`);
 } catch (error) {
   if (desktop) {

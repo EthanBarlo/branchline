@@ -5,6 +5,7 @@ import { FileTree as FileTreeModel, prepareFileTreeInput, themeToTreeStyles, typ
 import { Check, CheckCheck, LoaderCircle, RotateCcw, Search, X } from 'lucide-react';
 import type { ReviewComment, ReviewFile } from '../../shared/types';
 import { reviewFilePath } from './reviewFileOrder';
+import { selectedReviewFiles } from './reviewTreeSelection';
 import './review-components.css';
 import './review-tree-actions.css';
 
@@ -218,10 +219,8 @@ export function ReviewTree(props: ReviewTreeProps) {
     syncProjection();
   }, [model, activePath]);
 
-  const selectedFiles = selection.flatMap(path => {
-    const file = byPath.get(path);
-    return file ? [file] : [];
-  });
+  const selectedFiles = selectedReviewFiles(selection, byPath);
+  const selectedDirectory = selection.some(path => path.endsWith('/'));
   const busy = operationBusy || props.reviewBusy;
   const allReviewed = selectedFiles.length > 0 && selectedFiles.every(file => props.approvals[file.id] === file.fingerprint);
   const noneReviewed = selectedFiles.every(file => props.approvals[file.id] !== file.fingerprint);
@@ -265,7 +264,7 @@ export function ReviewTree(props: ReviewTreeProps) {
     const file = endpoint ? byPath.get(endpoint.path) : undefined;
     if (file && file.id !== props.selectedFileId) props.onSelect(file.id);
   }}>
-    {selectedFiles.length > 1 && <div className="tree-selection-actions" role="group" aria-label="Selected file actions">
+    {selectedFiles.length > 0 && (selectedFiles.length > 1 || selectedDirectory) && <div className="tree-selection-actions" role="group" aria-label="Selected file actions">
       <span aria-live="polite">{selectedFiles.length} selected</span>
       <button type="button" aria-label="Mark selected files reviewed" title="Mark selected files reviewed" disabled={busy || allReviewed} onClick={() => void reviewFiles(selectedFiles, true)}>{busy ? <LoaderCircle size={12} className="spin" /> : <Check size={12} />}<span>Mark reviewed</span></button>
       <button type="button" aria-label="Mark selected files unreviewed" title="Mark selected files unreviewed" disabled={busy || noneReviewed} onClick={() => void reviewFiles(selectedFiles, false)}><RotateCcw size={12} /></button>
@@ -278,18 +277,16 @@ export function ReviewTree(props: ReviewTreeProps) {
     </div> : <FileTree model={model} className="review-tree-host" style={treeTheme} aria-label="Changed files" renderContextMenu={(item, context) => {
       const paths = model.getSelectedPaths();
       const targetPaths = paths.includes(item.path) ? paths : [item.path];
-      const targets = targetPaths.flatMap(path => {
-        const file = byPath.get(path);
-        return file ? [file] : [];
-      });
-      return <TreeReviewMenu context={context} files={targets} approvals={props.approvals} busy={busy} onReview={reviewFiles} />;
+      const targets = selectedReviewFiles(targetPaths, byPath);
+      return <TreeReviewMenu context={context} files={targets} includesDirectory={targetPaths.some(path => path.endsWith('/'))} approvals={props.approvals} busy={busy} onReview={reviewFiles} />;
     }} />}
   </div>;
 }
 
-function TreeReviewMenu({ context, files, approvals, busy, onReview }: {
+function TreeReviewMenu({ context, files, includesDirectory, approvals, busy, onReview }: {
   context: ContextMenuOpenContext;
   files: ReviewFile[];
+  includesDirectory: boolean;
   approvals: Record<string, string>;
   busy: boolean;
   onReview: (files: ReviewFile[], approved: boolean) => Promise<void>;
@@ -316,7 +313,7 @@ function TreeReviewMenu({ context, files, approvals, busy, onReview }: {
     const next = event.key === 'ArrowDown' ? (current + 1) % options.length : event.key === 'ArrowUp' ? (current - 1 + options.length) % options.length : event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : null;
     if (next !== null && options.length) { event.preventDefault(); event.stopPropagation(); options[next]?.focus(); }
   }}>
-    <div className="tree-review-menu-label">{files.length === 1 ? files[0].path.split('/').at(-1) : `${files.length} files selected`}</div>
+    <div className="tree-review-menu-label">{files.length === 1 && !includesDirectory ? files[0].path.split('/').at(-1) : `${files.length} file${files.length === 1 ? '' : 's'} selected`}</div>
     <button type="button" role="menuitem" disabled={busy || !files.length || allReviewed} onClick={() => perform(true)}><Check size={14} />Mark reviewed</button>
     <button type="button" role="menuitem" disabled={busy || !files.length || noneReviewed} onClick={() => perform(false)}><RotateCcw size={14} />Mark unreviewed</button>
   </div>, document.body);

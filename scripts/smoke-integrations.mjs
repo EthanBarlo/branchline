@@ -33,7 +33,7 @@ function fixtureBridge() {
   Object.assign(remote.publications[review.comments[3].id], { state: 'conflict', remoteId: 104, authorId: 'bb-user', acknowledged: { body: 'Original wording.', resolved: false, deleted: false }, remote: { body: 'Wording edited in Bitbucket.', resolved: false, deleted: false } });
   const state = { projects: [project], reviews: [local], settings: { jiraBaseUrl: '' } };
   const integrations = { connections: [], projects: {} };
-  const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0 };
+  const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
   const remoteListeners = new Set();
   const loadListeners = new Set();
   let loadSequence = 0;
@@ -105,8 +105,9 @@ function fixtureBridge() {
     discoverRepositories: async () => clone(mappings),
     listPullRequests: async (_, filter) => { calls.filters.push(filter); return clone(filter === 'author' ? [prs[2]] : filter === 'reviewer' ? prs.slice(0, 2) : prs); },
     openPullRequestReview: async (_, refs) => { calls.opens.push(refs); state.reviews = [local, review]; return clone(review); },
-    getRemoteReview: async id => id === review.id ? clone(remote) : null,
-    getJiraTicketLink: async () => ({ key: remote.ticketKey || 'APP-123', url: `https://jira.example.atlassian.net/browse/${remote.ticketKey || 'APP-123'}` }),
+    getRemoteReview: async id => id === review.id && state.reviews.some(item => item.id === id) ? clone(remote) : null,
+    completeMergedReview: async id => { calls.completed.push(id); state.reviews = state.reviews.filter(item => item.id !== id); if (calls.completed.length === 1) throw new Error('The completion response was lost. Retry finishing this review.'); return clone(state); },
+    getJiraTicketLink: async id => { if (id === review.id && !state.reviews.some(item => item.id === id)) throw new Error('Review not found.'); return { key: remote.ticketKey || 'APP-123', url: `https://jira.example.atlassian.net/browse/${remote.ticketKey || 'APP-123'}` }; },
     openJiraTicket: async () => { const link = await api.getJiraTicketLink(); calls.links.push(link.url); return link; },
     getJiraIssue: async () => ({ key: remote.ticketKey || 'APP-123', title: remote.ticketKey ? 'A manually linked ticket' : 'Bring code review into the desktop app', url: `https://jira.example.atlassian.net/browse/${remote.ticketKey || 'APP-123'}`, description: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Review changes with the ticket alongside the diff.', marks: [{ type: 'strong' }] }] }, { type: 'bulletList', content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Keep feedback on the exact lines.' }] }] }] }, { type: 'paragraph', content: [{ type: 'text', text: '<img src=x onerror=alert(1)>' }, { type: 'text', text: 'Unsafe link', marks: [{ type: 'link', attrs: { href: 'javascript:alert(1)' } }] }, { type: 'text', text: 'Engineering docs', marks: [{ type: 'link', attrs: { href: 'https://docs.example.org/reviews' } }] }] }] } }),
     setReviewTicket: async (_, key) => { remote.ticketKey = key; },
@@ -118,6 +119,7 @@ function fixtureBridge() {
     resolveUnknownPublication: async (_, id, remoteId) => { const publication = remote.publications[id]; publication.state = remoteId ? 'synced' : 'draft'; if (remoteId) { publication.remoteId = remoteId; const comment = review.comments.find(item => item.id === id); publication.acknowledged = { body: comment.body, resolved: comment.resolved, deleted: false }; } calls.unknown.push({ id, remoteId }); return clone(remote); },
     publishFeedback: async () => { calls.publish++; if (failNextPublication) { failNextPublication = false; throw new Error('Bitbucket is temporarily unavailable. Try publishing again.'); } if (!remote.pullRequests.some(pr => pr.repository.repoSlug === 'docs')) { remote.repositories[2].creation = { state: 'sending' }; emitRemote(); await new Promise(resolve => setTimeout(resolve, 50)); remote.pullRequests.push(pr(13, mappings[2])); Object.assign(remote.repositories[2], { status: 'pull-request', prId: 13 }); delete remote.repositories[2].creation; } for (const comment of review.comments) Object.assign(remote.publications[comment.id], { state: 'synced', remoteId: remote.publications[comment.id].remoteId || 200 + Number(comment.id.at(-1)), acknowledged: { body: comment.body, resolved: comment.resolved, deleted: false } }); return clone(remote); },
     previewMerge: async () => {
+      calls.mergePreviews++;
       for (const row of remote.repositories) row.check = { state: 'checking' };
       emitRemote();
       if (firstMergePreview) {
@@ -144,8 +146,11 @@ function fixtureBridge() {
       } else if (calls.actions.filter(item => item === 'merge').length === 1) {
         Object.assign(child, { merge: 'merging', phase: 'merging' });
         Object.assign(docs, { merge: 'merging', phase: 'merging' });
+        remote.repositories[3].cleanup = { state: 'sending' };
         emitRemote();
         await operationStep();
+        remote.repositories[3].cleanup = { state: 'deleted' };
+        remote.repositories[4].cleanup = { state: 'skipped' };
         Object.assign(child, { merge: 'merged', phase: 'cleanup', mergeCommit: 'core-merge-result' });
         emitRemote();
         await operationStep();
@@ -169,10 +174,8 @@ function fixtureBridge() {
         parent.cleanup = 'deleted'; delete parent.phase;
         remote.pullRequests[0].state = 'MERGED';
         remote.repositories[2].cleanup = { state: 'checking' }; emitRemote(); await operationStep();
-        remote.repositories[2].cleanup = { state: 'sending' }; remote.repositories[3].cleanup = { state: 'sending' }; emitRemote(); await operationStep();
+        remote.repositories[2].cleanup = { state: 'sending' }; emitRemote(); await operationStep();
         remote.repositories[2].cleanup = { state: 'deleted' }; docs.cleanup = 'deleted';
-        remote.repositories[3].cleanup = { state: 'sending' }; emitRemote(); await operationStep();
-        remote.repositories[3].cleanup = { state: 'deleted' }; remote.repositories[4].cleanup = { state: 'skipped' };
         remote.operation.state = 'complete';
       }
       emitRemote();
@@ -185,6 +188,7 @@ function fixtureBridge() {
     copyFeedback: async () => 'Feedback copied',
   };
   contextBridge.exposeInMainWorld('reviewAPI', api);
+  let beforeAsyncScenario;
   contextBridge.exposeInMainWorld('integrationSmoke', {
     inspect: () => clone({ calls, integrations, state, review, remote }),
     advanceLoad: () => { if (!advanceLoad) throw new Error('No repository load is waiting.'); advanceLoad(); },
@@ -194,7 +198,9 @@ function fixtureBridge() {
     setRepositoryUnavailable: unavailable => { remote.repositories[2].status = unavailable ? 'unavailable' : 'changes'; if (unavailable) remote.repositories[2].error = 'Docs repository permission is missing.'; else delete remote.repositories[2].error; emitRemote(); },
     setSnapshotMode: mode => { snapshotMode = mode; },
     advanceOperation: () => { if (!advanceOperation) throw new Error('No operation step is waiting.'); advanceOperation(); },
+    restorePausedOperation: () => { Object.assign(remote, beforeAsyncScenario); emitRemote(); },
     markAsyncFinishedAwaitingResume: () => {
+      beforeAsyncScenario = clone(remote);
       remote.operation.state = 'paused';
       remote.operation.error = 'Bitbucket accepted the merge. Resume to confirm its result.';
       Object.assign(remote.operation.items[0], { merge: 'merging', taskId: 'finished-merge-task' });
@@ -372,10 +378,18 @@ try {
   await page.getByRole('button', { name: 'Reviewed', exact: true }).click();
   await page.getByRole('combobox', { name: 'Filter changed files', exact: true }).click();
   await page.getByRole('option', { name: 'Unreviewed', exact: true }).click();
+  assert.equal(await page.getByRole('dialog').count(), 0, 'Repository and ticket details never open automatically.');
+  assert.equal(await page.getByRole('list', { name: 'Branch review repositories', exact: true }).count(), 0, 'Repository details consume no review space while closed.');
+  await page.screenshot({ path: 'artifacts/integration-review-compact.png', animations: 'disabled' });
+  await page.getByRole('button', { name: /^Repositories:/ }).click();
+  panel = await dialog(page, 'Repositories in this review');
   const repositoryRoster = page.getByRole('list', { name: 'Branch review repositories', exact: true });
   await repositoryRoster.getByRole('listitem', { name: 'docs branch review', exact: true }).getByText('Changes without a PR', { exact: true }).waitFor();
   await repositoryRoster.getByRole('listitem', { name: 'assets branch review', exact: true }).getByText('No changes', { exact: true }).waitFor();
   await repositoryRoster.getByRole('listitem', { name: 'absent branch review', exact: true }).getByText('Branch missing', { exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'hidden' });
+  assert.equal(await page.getByRole('button', { name: /^Repositories:/ }).evaluate(button => button === document.activeElement), true, 'Closing repository details restores keyboard focus to its toolbar button.');
   await page.locator('[data-item-path="review.ts"]').click();
   await page.locator('.diff-file-name').filter({ hasText: 'review.ts' }).waitFor();
   await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
@@ -392,7 +406,10 @@ try {
   assert.equal(await panel.getByRole('button', { name: 'Approve, merge and delete branches', exact: true }).isEnabled(), true, 'A missing PR does not block merging reviewed changes.');
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await page.evaluate(() => window.integrationSmoke.setRepositoryUnavailable(true));
+  await page.getByRole('button', { name: /^Repositories:.*1 unavailable/ }).click();
+  panel = await dialog(page, 'Repositories in this review');
   await repositoryRoster.getByRole('listitem', { name: 'docs branch review', exact: true }).getByText('Unavailable', { exact: true }).waitFor();
+  await panel.getByRole('button', { name: 'Done', exact: true }).click();
   await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
   panel = await dialog(page, 'Approve and merge');
   await panel.getByRole('alert').filter({ hasText: 'Docs repository permission is missing.' }).waitFor();
@@ -428,7 +445,8 @@ try {
   await page.locator('[aria-label="Refresh review"]:not([disabled])').waitFor();
   assert.equal(await refreshCount('remote-review'), initialRemoteRefreshes + 2, 'The explicit refresh button still reloads a remote review.');
 
-  await page.getByRole('button', { name: /APP-123.*Bring code review/ }).click();
+  await page.getByRole('button', { name: 'View Jira ticket APP-123', exact: true }).click();
+  panel = await dialog(page, 'Jira ticket');
   await page.getByText('Keep feedback on the exact lines.').waitFor();
   assert.equal(await page.locator('.jira-description img').count(), 0);
   assert.equal(await page.getByRole('link', { name: 'Unsafe link', exact: true }).count(), 0);
@@ -436,7 +454,8 @@ try {
   await page.getByRole('textbox', { name: 'Review ticket key', exact: true }).fill('OPS-789');
   await page.getByRole('button', { name: 'Use ticket', exact: true }).click();
   await page.getByText('A manually linked ticket', { exact: true }).waitFor();
-  await page.getByRole('button', { name: /OPS-789.*A manually linked ticket/ }).click();
+  await panel.getByRole('button', { name: 'Done', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'View Jira ticket OPS-789', exact: true }).count(), 1, 'The linked ticket remains a compact toolbar action.');
   const refreshesBeforePublicationPreview = await refreshCount('remote-review');
   await page.getByRole('button', { name: 'Publish feedback', exact: true }).click();
   panel = await dialog(page, 'Publish feedback');
@@ -521,7 +540,7 @@ try {
   await panel.getByText('5 / 5', { exact: true }).waitFor();
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
   assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'remote-review', 'Approval alone keeps the review open.');
-  assert.equal(await page.getByRole('region', { name: 'Merge complete', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('dialog', { name: 'Pull requests merged', exact: true }).count(), 0);
 
   await page.getByRole('button', { name: 'Approve and merge', exact: true }).click();
   panel = await dialog(page, 'Approve and merge');
@@ -533,11 +552,14 @@ try {
   await parentRow.getByText('Waiting', { exact: true }).waitFor();
   assert.equal(await coreRow.locator('.spin').count(), 1, 'The active child repository displays a spinning status.');
   await panel.getByRole('listitem', { name: 'docs pull request 13', exact: true }).getByText('Merging…', { exact: true }).waitFor();
-  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 2, 'Independent repositories show simultaneous merge progress.');
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 3, 'Independent repositories merge while the empty repository deletes its branch.');
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Deleting branch…', { exact: true }).waitFor();
   assert.equal(await parentRow.locator('.spin').count(), 0, 'Waiting repositories do not appear to be merging.');
   await page.screenshot({ path: 'artifacts/integration-merge-running.png', animations: 'disabled' });
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
   await coreRow.getByText('Checking branch deletion…', { exact: true }).waitFor();
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Deleted', { exact: true }).waitFor();
+  await parentRow.getByText('Waiting', { exact: true }).waitFor();
   assert.equal(await coreRow.getByText('Deleted', { exact: true }).count(), 0, 'Deletion is not claimed before cleanup is confirmed.');
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
   await coreRow.getByText('Merged', { exact: true }).waitFor();
@@ -548,7 +570,21 @@ try {
   await page.screenshot({ path: 'artifacts/integration-merge-paused.png', animations: 'disabled' });
   await panel.getByRole('button', { name: 'Return to review', exact: true }).click();
   assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'remote-review', 'A partial merge keeps the original review open for recovery.');
-  assert.equal(await page.getByRole('region', { name: 'Merge complete', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('dialog', { name: 'Pull requests merged', exact: true }).count(), 0);
+  await page.evaluate(() => window.integrationSmoke.markAsyncFinishedAwaitingResume());
+  await page.getByRole('button', { name: 'Resume operation', exact: true }).click();
+  panel = await dialog(page, 'Approve and merge');
+  await panel.getByText('Bitbucket accepted the merge. Resume to confirm its result.', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().remote.pullRequests.every(pr => pr.state === 'MERGED')), true);
+  assert.equal(await panel.getByRole('button', { name: 'Resume operation', exact: true }).isEnabled(), true, 'A paused asynchronous merge can reconcile after every PR has finished remotely.');
+  await panel.getByRole('button', { name: 'Return to review', exact: true }).click();
+  const refreshesBeforeReviewed = await refreshCount('remote-review');
+  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
+  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
+  await page.getByText('You’re all caught up.', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().review.approvals['.:review.ts']), 'current-file');
+  assert.equal(await refreshCount('remote-review'), refreshesBeforeReviewed, 'Mark reviewed saves the displayed fingerprint and advances without refreshing the remote snapshot.');
+  await page.evaluate(() => window.integrationSmoke.restorePausedOperation());
   await page.getByRole('button', { name: 'Resume operation', exact: true }).click();
   panel = await dialog(page, 'Approve and merge');
   await panel.getByRole('button', { name: 'Resume operation', exact: true }).click();
@@ -567,55 +603,44 @@ try {
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
   await docsCleanupRow.getByText('Deleting branch…', { exact: true }).waitFor();
   assert.equal(await docsCleanupRow.locator('.spin').count(), 1, 'Independent PR branch deletion displays a spinner.');
-  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Deleting branch…', { exact: true }).waitFor();
-  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 2, 'Independent branch deletions show simultaneous progress.');
+  assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 1, 'The final repository continues cleanup after other repositories finish.');
+  await panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true }).getByText('Deleted', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('dialog', { name: 'Pull requests merged', exact: true }).count(), 0, 'The review stays open until every branch cleanup completes.');
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().state.reviews)).some(review => review.id === 'remote-review'), true, 'A merged PR with cleanup in progress remains resumable.');
   await page.evaluate(() => window.integrationSmoke.advanceOperation());
-  await docsCleanupRow.getByText('Deleted', { exact: true }).waitFor();
-  const assetsRow = panel.getByRole('listitem', { name: 'assets branch cleanup', exact: true });
-  await assetsRow.getByText('Deleting branch…', { exact: true }).waitFor();
-  assert.equal(await assetsRow.locator('.spin').count(), 1, 'Empty repositories show live cleanup progress.');
-  assert.equal(await page.getByRole('region', { name: 'Merge complete', exact: true }).count(), 0, 'The review stays open until empty branch cleanup completes.');
-  await page.evaluate(() => window.integrationSmoke.advanceOperation());
-  const receipt = page.getByRole('region', { name: 'Merge complete', exact: true });
+  await panel.getByText('The completion response was lost. Retry finishing this review.', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('button', { name: 'Finish review', exact: true }).isEnabled(), true, 'A failed local completion remains retryable after the remote merge finishes.');
+  const callsBeforeFinish = await page.evaluate(() => window.integrationSmoke.inspect().calls);
+  await panel.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('button', { name: 'Finish review', exact: true }).click();
+  panel = await dialog(page, 'Approve and merge');
+  await panel.getByRole('button', { name: 'Finish review', exact: true }).click();
+  const receipt = page.getByRole('dialog', { name: 'Pull requests merged', exact: true });
   await receipt.getByRole('heading', { name: 'Pull requests merged', exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelector('[aria-label="Select review"]')?.getAttribute('data-value') === 'current:project-1');
-  await panel.waitFor({ state: 'hidden' });
-  assert.equal(await page.getByRole('dialog').count(), 0, 'A successful group merge closes the operation dialog and active review.');
-  assert.equal(await page.locator('.remote-review-controls').count(), 0, 'The closed review leaves no stale Bitbucket controls behind the completion receipt.');
-  assert.equal(await receipt.getByText('Deleted', { exact: true }).count(), 4, 'The completed receipt retains every confirmed branch deletion.');
+  assert.equal(await page.getByRole('dialog').count(), 1, 'The operation dialog becomes a completion modal.');
+  assert.equal(await page.locator('.remote-review-controls').count(), 0, 'The completed review leaves no stale Bitbucket controls behind the modal.');
+  assert.equal(await receipt.getByText('Deleted', { exact: true }).count(), 4, 'The completion modal retains every confirmed branch deletion.');
+  const savedAfterMerge = await page.evaluate(() => window.integrationSmoke.inspect().state.reviews.find(review => review.id === 'remote-review'));
+  assert.equal(savedAfterMerge, undefined, 'The completed saved review is removed from Branchline.');
+  assert.deepEqual(await page.evaluate(() => window.integrationSmoke.inspect().calls.completed), ['remote-review', 'remote-review']);
+  const callsAfterFinish = await page.evaluate(() => window.integrationSmoke.inspect().calls);
+  assert.equal(callsAfterFinish.mergePreviews, callsBeforeFinish.mergePreviews, 'Finishing local removal does not repeat provider preflight.');
+  assert.deepEqual(callsAfterFinish.actions, callsBeforeFinish.actions, 'Finishing local removal never repeats provider merge actions.');
   await receipt.getByRole('button', { name: 'Open in Jira', exact: true }).click();
-  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.links)).at(-1), 'https://jira.example.atlassian.net/browse/OPS-789', 'The completion action opens the explicitly linked Jira ticket.');
+  assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.links)).at(-1), 'https://jira.example.atlassian.net/browse/OPS-789', 'Jira opens from the captured ticket URL after the saved review is removed.');
+  await page.screenshot({ path: 'artifacts/integration-merge-complete.png', animations: 'disabled' });
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1050, 680));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'The completion receipt fits the minimum desktop width.');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'The completion modal fits the minimum desktop width.');
+  const doneBounds = await receipt.locator('.modal-footer').getByRole('button', { name: 'Done', exact: true }).boundingBox();
+  assert.ok(doneBounds && doneBounds.y >= 0 && doneBounds.y + doneBounds.height <= 680, 'Completion actions remain visible while results scroll.');
   await page.screenshot({ path: 'artifacts/integration-merge-complete-minimum.png', animations: 'disabled' });
-  const savedAfterMerge = await page.evaluate(() => window.integrationSmoke.inspect().state.reviews.find(review => review.id === 'remote-review'));
-  assert.equal(savedAfterMerge.comments[0].body, 'Updated feedback after the first publication.', 'Closing the review preserves its saved feedback.');
-  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
-  await page.getByRole('option', { name: 'APP-123 · 2 pull requests', exact: true }).waitFor();
-  await page.keyboard.press('Escape');
-  await receipt.getByRole('button', { name: 'Dismiss merge results', exact: true }).click();
+  await receipt.getByRole('button', { name: 'Done', exact: true }).click();
   await receipt.waitFor({ state: 'hidden' });
   await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
-  await page.getByRole('option', { name: 'APP-123 · 2 pull requests', exact: true }).click();
-  await page.locator('[data-item-path="review.ts"]').click();
-  await page.locator('[data-comment-id="10000000-0000-4000-8000-000000000001"]').getByText('Updated feedback after the first publication.', { exact: true }).waitFor();
-  assert.equal(await page.getByRole('combobox', { name: 'Select review', exact: true }).getAttribute('data-value'), 'remote-review', 'A completed saved review can still be reopened to inspect its feedback.');
-  await page.evaluate(() => window.integrationSmoke.markAsyncFinishedAwaitingResume());
-  await page.getByRole('button', { name: 'Resume operation', exact: true }).click();
-  panel = await dialog(page, 'Approve and merge');
-  await panel.getByText('Bitbucket accepted the merge. Resume to confirm its result.', { exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().remote.pullRequests.every(pr => pr.state === 'MERGED')), true);
-  assert.equal(await panel.getByRole('button', { name: 'Resume operation', exact: true }).isEnabled(), true, 'A paused asynchronous merge can reconcile after every PR has finished remotely.');
-  await panel.getByRole('button', { name: 'Return to review', exact: true }).click();
-  const refreshesBeforeReviewed = await refreshCount('remote-review');
-  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
-  await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
-  await page.getByText('You’re all caught up.', { exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().review.approvals['.:review.ts']), 'current-file');
-  assert.equal(await refreshCount('remote-review'), refreshesBeforeReviewed, 'Mark reviewed saves the displayed fingerprint and advances without refreshing the remote snapshot.');
-  await page.getByRole('combobox', { name: 'Select review', exact: true }).click();
-  await page.getByRole('option', { name: 'Current', exact: true }).click();
+  assert.equal(await page.getByRole('option', { name: 'APP-123 · 2 pull requests', exact: true }).count(), 0, 'Completed reviews are absent from the active review selector.');
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'App settings', exact: true }).click();
   await settingsView.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
   await settingsView.getByRole('tab', { name: 'Jira', exact: true }).click();
@@ -644,7 +669,7 @@ try {
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').id, 'jira');
   assert.equal(data.integrations.connections.find(item => item.kind === 'jira').connected, true);
   assert.deepEqual(errors, []);
-  console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, whole-branch entry with fixed membership, missing PR draft/publication creation links, empty and missing branch visibility and live deletion, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, progressive parallel repository loading with early review and preserved feedback/selection, per-repository preflight spinners, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic review closing with saved feedback, Jira completion action, and minimum-width layout. Atlassian calls were stubbed.');
+  console.log('Integration desktop smoke passed: full-page settings, keyboard sidebar tabs, preserved setup drafts, token generator links, copied scope guidance, separate credentials, invalid/replaced tokens, mappings, whole-branch entry with fixed membership, missing PR draft/publication creation links, empty and missing branch visibility and live deletion, filters/grouping/forks, cached remote snapshots with explicit opening/publication refresh, local checkout polling, progressive parallel repository loading with early review and preserved feedback/selection, per-repository preflight spinners, marking reviewed without refresh, Jira ADF/manual key, stale re-anchoring, delivery recovery, conflicts, publish with grouped PR links after failure and success, approve-only preservation, live repository merge/cleanup, paused merge/resume with skipped children, automatic removal of completed reviews, compact repository and Jira dialogs, modal completion with captured Jira link and lost-response retry without more provider calls, and minimum-width layout. Atlassian calls were stubbed.');
 } catch (error) {
   const page = desktop?.windows()[0];
   if (page) {

@@ -194,5 +194,13 @@ export class IntegrationStore {
   }
   setTicket(id: string, key: string): Promise<void> { identifier(id); return this.write(next => { if (key) next.tickets[id] = key; else delete next.tickets[id]; }); }
   removeReview(id: string): Promise<void> { identifier(id); return this.write(next => { delete next.reviews[id]; delete next.tickets[id]; }); }
+  async removeOrphanedReviews(reviewIds: string[]): Promise<void> {
+    const active = new Set(reviewIds);
+    if (![...Object.keys(this.state.reviews), ...Object.keys(this.state.tickets)].some(id => !active.has(id))) return;
+    await this.write(next => {
+      for (const id of Object.keys(next.reviews)) if (!active.has(id)) delete next.reviews[id];
+      for (const id of Object.keys(next.tickets)) if (!active.has(id)) delete next.tickets[id];
+    });
+  }
   removeProject(id: string, reviewIds: string[]): Promise<void> { identifier(id); reviewIds.forEach(identifier); return this.write(next => { delete next.projects[id]; for (const reviewId of reviewIds) { delete next.reviews[reviewId]; delete next.tickets[reviewId]; } }); }
 }
