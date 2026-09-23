@@ -90,6 +90,7 @@ npm run build
 npm run test:desktop
 npm run test:desktop:background-review
 npm run test:desktop:jira
+npm run test:desktop:jira-browser
 npm run test:desktop:updates
 npm run test:desktop:integrations
 npm run test:desktop:integration-backend

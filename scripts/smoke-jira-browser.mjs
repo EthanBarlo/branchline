@@ -114,6 +114,35 @@ async function nativeViews() {
       views: main.contentView.children.filter(view => view.webContents).map(view => ({ id: view.webContents.id, url: view.webContents.getURL(), bounds: view.getBounds() })) };
   });
 }
+async function resizeReviewWindow(stage) {
+  const resize = await desktop.evaluate(({ BrowserWindow, screen }) => {
+    const main = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html'));
+    const before = { outer: main.getSize(), content: main.getContentSize() };
+    const minimum = main.getMinimumSize();
+    const maximum = main.getMaximumSize();
+    const display = screen.getDisplayMatching(main.getBounds()).workAreaSize;
+    const available = [display.width, display.height];
+    const requested = before.outer.map((size, axis) => {
+      const limit = Math.max(minimum[axis], Math.min(available[axis], maximum[axis] || Infinity));
+      if (size > minimum[axis]) return Math.max(minimum[axis], Math.min(limit, size - 160));
+      return size < limit ? Math.min(limit, size + 160) : size;
+    });
+    if (requested.every((size, axis) => size === before.outer[axis])) {
+      throw new Error(`The display cannot resize the review window within its limits: ${JSON.stringify({ before, minimum, maximum, available })}`);
+    }
+    main.setSize(requested[0], requested[1], false);
+    return { before, minimum, available, requested };
+  });
+  await until(async () => {
+    const content = (await nativeViews()).size;
+    const viewport = await desktop.evaluate(async ({ BrowserWindow }) => {
+      const main = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html'));
+      return main.webContents.executeJavaScript('[innerWidth, innerHeight]');
+    });
+    return content.some((size, axis) => size !== resize.before.content[axis]) && content.every((size, axis) => size === viewport[axis]);
+  }, `${stage} resize to change the actual main-window viewport`);
+  console.log('Jira window resize:', JSON.stringify({ stage, ...resize, actualContent: (await nativeViews()).size }));
+}
 async function openTicket(page, ticket = 'APP-123') {
   await page.getByRole('button', { name: `View Jira ticket ${ticket}`, exact: true }).click();
   await page.getByRole('dialog', { name: `Jira ticket ${ticket}`, exact: true }).waitFor();
@@ -172,7 +201,9 @@ try {
     const toolbar = native.views.find(view => view.url.endsWith('/jira-browser.html')).bounds;
     const website = native.views.find(view => view.url.startsWith('https:')).bounds;
     const surface = await page.locator('.jira-browser-surface').boundingBox();
+    const viewport = await page.evaluate(() => [innerWidth, innerHeight]);
     assert.ok(surface, 'The native views have a visible modal surface.');
+    assert.deepEqual(viewport, native.size, 'The renderer viewport matches the actual main-window content bounds.');
     assert.ok(surface.width > Math.min(native.size[0], 1500) * .85, 'The full Jira page uses most of the available review window.');
     assert.equal(native.mainId, mainId);
     assert.equal(native.windows, 1);
@@ -181,6 +212,7 @@ try {
     assert.equal(website.y, toolbar.y + toolbar.height);
     assert.equal(website.width, toolbar.width);
     assert.ok(Math.abs(toolbar.x - surface.x) <= 1 && Math.abs(toolbar.y - surface.y) <= 1, 'Native Jira views align with the modal surface.');
+    assert.ok(Math.abs(toolbar.width - surface.width) <= 1, 'Native Jira views fill the actual modal surface width.');
     assert.ok(Math.abs(website.height + toolbar.height - surface.height) <= 1, 'Jira fills the modal below its compact toolbar.');
     assert.ok(website.x >= 0 && website.y >= 0 && website.x + website.width <= native.size[0] && website.y + website.height <= native.size[1], 'Native views remain within the main window.');
   };
@@ -192,11 +224,16 @@ try {
   await page.getByRole('dialog', { name: 'Jira ticket APP-123', exact: true }).getByRole('button', { name: 'Close', exact: true }).focus();
   await page.keyboard.press('Tab');
   await until(() => desktop.evaluate(({ webContents }) => webContents.getFocusedWebContents()?.getURL().endsWith('/jira-browser.html')), 'Tab from the modal footer to focus the native Jira controls');
-  const oldWidth = (await nativeViews()).views.find(view => view.url.endsWith('/jira-browser.html')).bounds.width;
-  await desktop.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html')).setSize(1050, 700);
-  });
-  await until(async () => (await nativeViews()).views.find(view => view.url.endsWith('/jira-browser.html')).bounds.width < oldWidth, 'Jira modal to resize with the main window');
+  const beforeResize = (await nativeViews()).views.find(view => view.url.startsWith('https:')).bounds;
+  await resizeReviewWindow('embedded Jira');
+  await until(async () => {
+    const native = await nativeViews();
+    const toolbar = native.views.find(view => view.url.endsWith('/jira-browser.html'))?.bounds;
+    const website = native.views.find(view => view.url.startsWith('https:'))?.bounds;
+    const surface = await page.locator('.jira-browser-surface').boundingBox();
+    return toolbar && website && surface && (website.width !== beforeResize.width || website.height !== beforeResize.height)
+      && Math.abs(toolbar.width - surface.width) <= 1 && Math.abs(toolbar.height + website.height - surface.height) <= 1;
+  }, 'native Jira views to resize and fill the actual modal surface');
   await assertToolbarFits();
   await clickToolbar('menu');
   await until(() => desktop.evaluate(() => !!globalThis.jiraSmoke.menu), 'the Jira browser options menu');
@@ -322,10 +359,7 @@ try {
   });
   try {
     await until(() => desktop.evaluate(() => globalThis.jiraSmoke.resetHeld), 'the delayed Jira session reset');
-    const width = await page.evaluate(() => innerWidth);
-    await desktop.evaluate(({ BrowserWindow }, width) => {
-      BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html')).setSize(width > 1250 ? 1100 : 1400, 820);
-    }, width);
+    await resizeReviewWindow('pending sign-in reset');
     await until(() => desktop.evaluate(() => !!globalThis.jiraSmoke.resizedDuringReset), 'the modal resize while native views are detached');
   } finally { await desktop.evaluate(() => globalThis.jiraSmoke.releaseReset()); }
   await until(() => contents('document.querySelector("#issue")?.hidden === true'), 'reset sign-in to reopen a logged-out ticket');
