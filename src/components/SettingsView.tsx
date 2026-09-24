@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowDownToLine, Check, ChevronDown, FileText, GitPullRequest, LoaderCircle, Ticket, TriangleAlert } from 'lucide-react';
+import { ArrowLeft, ArrowDownToLine, Check, ChevronDown, FileText, GitPullRequest, LoaderCircle, Monitor, Moon, Sun, Ticket, TriangleAlert } from 'lucide-react';
 import type { AppSettings } from '../../shared/types';
 import type { UpdateState } from '../../shared/updates';
 import { jiraTicketUrl, normalizeJiraBaseUrl } from '../../shared/jira';
@@ -8,8 +8,9 @@ import { DiagnosticSettings } from './DiagnosticSettings';
 import { UpdateDetails } from './UpdateControls';
 import './settings.css';
 
-export type SettingsSection = 'jira' | 'bitbucket' | 'updates' | 'diagnostics';
+export type SettingsSection = 'appearance' | 'jira' | 'bitbucket' | 'updates' | 'diagnostics';
 const sections = [
+  { id: 'appearance', label: 'Appearance', icon: Sun },
   { id: 'jira', label: 'Jira', icon: Ticket },
   { id: 'bitbucket', label: 'Bitbucket', icon: GitPullRequest },
   { id: 'updates', label: 'Updates', icon: ArrowDownToLine },
@@ -17,7 +18,7 @@ const sections = [
 ] as const;
 const message = (error: unknown) => error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : String(error);
 
-export function SettingsView({ initialSection = 'jira', showLegacyLinks = false, settings, ticket, onSaved, onConnectionsChanged, onClose, updateState, updateBridgeError, onUpdateAction }: {
+export function SettingsView({ initialSection = 'appearance', showLegacyLinks = false, settings, ticket, onSaved, onConnectionsChanged, onClose, updateState, updateBridgeError, onUpdateAction }: {
   initialSection?: SettingsSection; showLegacyLinks?: boolean;
   settings: AppSettings; ticket: string | null; onSaved: (settings: AppSettings) => void;
   onConnectionsChanged: () => void; onClose: () => void;
@@ -25,7 +26,8 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
   onUpdateAction: (action: 'check' | 'download' | 'install') => void;
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
-  const [busy, setBusy] = useState({ jira: false, bitbucket: false, links: false, ticketView: false });
+  const [busy, setBusy] = useState({ appearance: false, jira: false, bitbucket: false, links: false, ticketView: false });
+  const appearanceBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, appearance: value })), []);
   const scroll = useRef<HTMLDivElement>(null);
   const jiraBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, jira: value })), []);
   const bitbucketBusy = useCallback((value: boolean) => setBusy(previous => ({ ...previous, bitbucket: value })), []);
@@ -38,7 +40,7 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
   return <section className="settings-view" role="region" aria-label="Settings">
     <aside className="settings-sidebar">
       <button className="settings-back" type="button" disabled={saving} onClick={onClose}><ArrowLeft size={15} />Back to review</button>
-      <div className="settings-sidebar-heading"><h1>Settings</h1><p>Accounts, updates and diagnostics.</p></div>
+      <div className="settings-sidebar-heading"><h1>Settings</h1><p>Appearance, accounts and application preferences.</p></div>
       <div className="settings-navigation" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
         {sections.map(({ id, label, icon: Icon }, index) => <button key={id} id={`settings-tab-${id}`} role="tab" type="button" disabled={saving} aria-controls={`settings-panel-${id}`} aria-selected={section === id} tabIndex={section === id ? 0 : -1} onClick={() => select(id)} onKeyDown={event => {
           const next = event.key === 'ArrowDown' ? (index + 1) % sections.length : event.key === 'ArrowUp' ? (index - 1 + sections.length) % sections.length : event.key === 'Home' ? 0 : event.key === 'End' ? sections.length - 1 : null;
@@ -50,6 +52,9 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
     </aside>
     <div className="settings-scroll" ref={scroll}>
       <div className="settings-content">
+        <div id="settings-panel-appearance" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-appearance" hidden={section !== 'appearance'}>
+          <AppearanceSettings settings={settings} onSaved={onSaved} onBusyChange={appearanceBusy} />
+        </div>
         <div id="settings-panel-jira" className="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-jira" hidden={section !== 'jira'}>
           <ConnectionSettings kind="jira" onChanged={onConnectionsChanged} onBusyChange={jiraBusy} />
           <JiraViewSettings settings={settings} onSaved={onSaved} onBusyChange={ticketViewBusy} />
@@ -67,6 +72,44 @@ export function SettingsView({ initialSection = 'jira', showLegacyLinks = false,
         </div>
       </div>
     </div>
+  </section>;
+}
+
+const themes = [
+  { id: 'system', label: 'System', description: 'Match your device appearance and follow changes automatically.', icon: Monitor },
+  { id: 'light', label: 'Light', description: 'Use the light appearance at any time.', icon: Sun },
+  { id: 'dark', label: 'Dark', description: 'Use the dark appearance at any time.', icon: Moon },
+] as const;
+
+function AppearanceSettings({ settings, onSaved, onBusyChange }: {
+  settings: AppSettings; onSaved: (settings: AppSettings) => void; onBusyChange: (value: boolean) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const inFlight = useRef(false);
+  async function save(theme: AppSettings['theme']) {
+    if (inFlight.current || theme === settings.theme) return;
+    inFlight.current = true; setSaving(true); onBusyChange(true); setError(''); setSaved(false);
+    try { onSaved(await window.reviewAPI.updateSettings({ theme })); setSaved(true); }
+    catch (reason) { setError(message(reason)); }
+    finally { inFlight.current = false; setSaving(false); onBusyChange(false); }
+  }
+
+  return <section aria-labelledby="appearance-heading">
+    <header className="settings-page-heading"><span className="settings-kicker">APPLICATION</span><h2 id="appearance-heading">Appearance</h2><p>Choose how Branchline looks on this device.</p></header>
+    <fieldset className="settings-theme-choices" disabled={saving} aria-describedby="settings-theme-hint">
+      <legend>Theme</legend>
+      <p id="settings-theme-hint">Changes apply as soon as you choose an option. System is the default.</p>
+      <div className="settings-theme-options">{themes.map(({ id, label, description, icon: Icon }) => <label key={id} className="settings-theme-option">
+        <input type="radio" name="branchline-theme" value={id} checked={settings.theme === id} onChange={() => void save(id)} />
+        <Icon size={18} aria-hidden="true" />
+        <span><strong>{label}</strong><small>{description}</small></span>
+      </label>)}</div>
+    </fieldset>
+    {saving && <span className="settings-theme-status" role="status"><LoaderCircle className="spin" size={13} />Saving preference…</span>}
+    {saved && <span className="settings-theme-status" role="status"><Check size={13} />Preference saved</span>}
+    {error && <div className="form-error settings-theme-error" role="alert"><TriangleAlert size={15} /><span>{error}</span></div>}
   </section>;
 }
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell } from 'electron';
 import { join } from 'node:path';
 import { stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -49,6 +49,15 @@ let showUpdatesOnReady = false;
 const rendererFile = join(__dirname, '../dist/index.html');
 const devURL = !app.isPackaged ? process.env.BRANCHLINE_DEV_URL : undefined;
 
+function resolvedTheme(): 'light' | 'dark' {
+  const preference = store.getSettings().theme;
+  return preference === 'system' ? nativeTheme.shouldUseDarkColors ? 'dark' : 'light' : preference;
+}
+
+function windowBackgroundColor(): string {
+  return resolvedTheme() === 'dark' ? '#181818' : '#f7f7f6';
+}
+
 function cancelFlush() {
   pendingFlush?.reject(new Error('The window did not finish saving.'));
   pendingFlush = null;
@@ -97,7 +106,13 @@ function installHandlers() {
     if (jiraBrowser.hasOpenWindows()) throw new Error('Close the Jira ticket before installing an update so any Jira edits can finish saving.');
     return updates.install();
   });
-  handle('settings-update', (changes: Partial<AppSettings>) => store.updateSettings(changes));
+  handle('settings-update', async (changes: Partial<AppSettings>) => {
+    const settings = await store.updateSettings(changes);
+    nativeTheme.themeSource = settings.theme;
+    if (window && !window.isDestroyed()) window.setBackgroundColor(windowBackgroundColor());
+    jiraBrowser.updateTheme();
+    return settings;
+  });
   handle('jira-open', async (id: string) => {
     const link = await integrations.getJiraTicketLink(id);
     if (!link) throw new Error('Choose a Jira ticket and configure its Jira connection or browser link in Settings.');
@@ -203,7 +218,7 @@ function createWindow() {
   closeGate.reset();
   window = new BrowserWindow({
     width: 1500, height: 980, minWidth: 1050, minHeight: 680,
-    title: 'Branchline', backgroundColor: '#181818',
+    title: 'Branchline', backgroundColor: windowBackgroundColor(),
     titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -259,6 +274,12 @@ app.whenReady().then(async () => {
     configureIntegrationDiagnostics(join(process.env.BRANCHLINE_DATA_DIR ? join(app.getPath('userData'), 'logs') : app.getPath('logs'), 'integrations.log'));
     store = new ReviewStore(join(app.getPath('userData'), 'reviews.json'));
     await store.load();
+    nativeTheme.themeSource = store.getSettings().theme;
+    nativeTheme.on('updated', () => {
+      if (store.getSettings().theme !== 'system') return;
+      if (window && !window.isDestroyed()) window.setBackgroundColor(windowBackgroundColor());
+      jiraBrowser?.updateTheme();
+    });
     projects = new ProjectService(store);
     reviews = new ReviewService(store, inspectRepo, config => config.remote ? integrations.buildSnapshot(config as import('../shared/types').Review) : buildSnapshot(config));
     const integrationStore = new IntegrationStore(join(app.getPath('userData'), 'integrations.json'));
@@ -273,7 +294,7 @@ app.whenReady().then(async () => {
     integrations.onRemoteReviewLoadProgress(change => {
       if (window && !window.webContents.isDestroyed()) window.webContents.send('review:remote-review-load', change);
     });
-    jiraBrowser = new JiraBrowser();
+    jiraBrowser = new JiraBrowser(resolvedTheme);
     updates = createUpdateService(async () => {
       await installGate.prepare(() => flushWindow('install'));
       if (jiraBrowser.hasOpenWindows()) throw new Error('Close the Jira ticket before installing an update so any Jira edits can finish saving.');

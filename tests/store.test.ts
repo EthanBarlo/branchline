@@ -401,7 +401,7 @@ test('every project owns one permanent initially unconfigured Current review', a
     await reopened.load();
     assert.deepEqual(reopened.getReview(current.id), current);
     await reopened.deleteProject(project.id);
-    assert.deepEqual(reopened.getState(), { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website' } });
+    assert.deepEqual(reopened.getState(), { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' } });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -723,12 +723,12 @@ test('Jira settings normalize, persist, clear, and share the review mutation que
     const filePath = join(dir, 'reviews.json');
     const store = new ReviewStore(filePath);
     await store.load();
-    assert.deepEqual(store.getSettings(), { jiraBaseUrl: '', jiraTicketView: 'website' });
+    assert.deepEqual(store.getSettings(), { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' });
     const [settings, review] = await Promise.all([
       store.updateSettings({ jiraBaseUrl: ' https://jira.example.invalid/team/jira/// ' }),
       store.createReview(config),
     ]);
-    assert.deepEqual(settings, { jiraBaseUrl: 'https://jira.example.invalid/team/jira', jiraTicketView: 'website' });
+    assert.deepEqual(settings, { jiraBaseUrl: 'https://jira.example.invalid/team/jira', jiraTicketView: 'website', theme: 'system' });
     await Promise.all([
       store.updateSettings({ jiraBaseUrl: 'https://jira.example.invalid/jira' }),
       store.addComment(review.id, currentComment),
@@ -745,7 +745,7 @@ test('Jira settings normalize, persist, clear, and share the review mutation que
     await reopened.updateSettings({ jiraBaseUrl: '   ' });
     const cleared = new ReviewStore(filePath);
     await cleared.load();
-    assert.deepEqual(cleared.getState().settings, { jiraBaseUrl: '', jiraTicketView: 'website' });
+    assert.deepEqual(cleared.getState().settings, { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' });
     assert.deepEqual(cleared.getReview(review.id), store.getReview(review.id));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -765,7 +765,7 @@ test('settings migration adds a blank URL without changing existing reviews or i
     await writeFile(filePath, JSON.stringify(legacy));
     const store = new ReviewStore(filePath);
     await store.load();
-    assert.deepEqual(store.getState(), { ...legacy, settings: { jiraBaseUrl: '', jiraTicketView: 'website' } });
+    assert.deepEqual(store.getState(), { ...legacy, settings: { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' } });
     assert.deepEqual(JSON.parse(await readFile(filePath, 'utf8')), store.getState());
     const reopened = new ReviewStore(filePath);
     await reopened.load();
@@ -787,20 +787,67 @@ test('Jira view preferences migrate existing settings and persist independently 
     await writeFile(filePath, JSON.stringify(legacy));
     const store = new ReviewStore(filePath);
     await store.load();
-    assert.deepEqual(store.getState(), { ...legacy, settings: { ...legacy.settings, jiraTicketView: 'website' } });
+    assert.deepEqual(store.getState(), { ...legacy, settings: { ...legacy.settings, jiraTicketView: 'website', theme: 'system' } });
     assert.deepEqual(JSON.parse(await readFile(filePath, 'utf8')), store.getState());
     const settings = await store.updateSettings({ jiraTicketView: 'summary' });
-    assert.deepEqual(settings, { jiraBaseUrl: legacy.settings.jiraBaseUrl, jiraTicketView: 'summary' });
+    assert.deepEqual(settings, { jiraBaseUrl: legacy.settings.jiraBaseUrl, jiraTicketView: 'summary', theme: 'system' });
     await store.updateSettings({ jiraBaseUrl: 'https://other.example.invalid' });
     const reopened = new ReviewStore(filePath);
     await reopened.load();
-    assert.deepEqual(reopened.getSettings(), { jiraBaseUrl: 'https://other.example.invalid', jiraTicketView: 'summary' });
+    assert.deepEqual(reopened.getSettings(), { jiraBaseUrl: 'https://other.example.invalid', jiraTicketView: 'summary', theme: 'system' });
     assert.deepEqual(reopened.getReview(review.id), original.getReview(review.id));
     const before = await stat(filePath);
     await reopened.updateSettings({ jiraTicketView: 'summary' });
     assert.equal((await stat(filePath)).ino, before.ino, 'unchanged preferences do not rewrite review data');
     await reopened.updateSettings({ jiraTicketView: 'website', jiraBaseUrl: '' });
-    assert.deepEqual(reopened.getSettings(), { jiraBaseUrl: '', jiraTicketView: 'website' });
+    assert.deepEqual(reopened.getSettings(), { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('theme defaults to System for existing settings and persists each explicit choice', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'branchline-store-'));
+  try {
+    const filePath = join(dir, 'reviews.json');
+    const legacy = { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'summary' } };
+    await writeFile(filePath, JSON.stringify(legacy));
+    const store = new ReviewStore(filePath);
+    await store.load();
+    assert.deepEqual(store.getSettings(), { ...legacy.settings, theme: 'system' });
+    assert.deepEqual(JSON.parse(await readFile(filePath, 'utf8')).settings, store.getSettings());
+
+    for (const theme of ['light', 'dark', 'system'] as const) {
+      const updated = await store.updateSettings({ theme });
+      assert.equal(updated.theme, theme);
+      assert.equal(updated.jiraTicketView, 'summary');
+      const reopened = new ReviewStore(filePath);
+      await reopened.load();
+      assert.equal(reopened.getSettings().theme, theme);
+    }
+    const before = await stat(filePath);
+    await store.updateSettings({ theme: 'system' });
+    assert.equal((await stat(filePath)).ino, before.ino, 'unchanged theme does not rewrite saved data');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('invalid theme choices leave settings intact and reject damaged saved preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'branchline-store-'));
+  try {
+    const filePath = join(dir, 'reviews.json');
+    const store = new ReviewStore(filePath);
+    await store.updateSettings({ theme: 'light' });
+    const before = await readFile(filePath, 'utf8');
+    for (const invalid of ['', 'auto', false, 42, null, undefined]) {
+      await assert.rejects(() => store.updateSettings({ theme: invalid as 'system' }), /System, Light, or Dark/);
+      assert.equal(await readFile(filePath, 'utf8'), before);
+      if (invalid === undefined) continue;
+      const invalidPath = join(dir, 'invalid-theme.json');
+      const contents = JSON.stringify({ projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website', theme: invalid } });
+      await writeFile(invalidPath, contents);
+      const invalidStore = new ReviewStore(invalidPath);
+      await assert.rejects(() => invalidStore.load(), /invalid format/);
+      assert.equal(await readFile(invalidPath, 'utf8'), contents);
+    }
+    assert.equal(store.getSettings().theme, 'light');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

@@ -10,6 +10,7 @@ import { captureCommentContext, placeComments, type CommentPlacement, type Place
 import './review-components.css';
 
 interface DiffViewerProps {
+  theme: 'light' | 'dark';
   file: ReviewFile;
   comments: ReviewComment[];
   diffStyle: 'split' | 'unified';
@@ -26,6 +27,10 @@ interface DiffViewerProps {
 }
 
 type Annotation = { session: CommentAutosave; placement: CommentPlacement; outdated: boolean };
+const diffThemeCSS = {
+  dark: ':host { --diffs-font-family: Menlo, Consolas, monospace; --diffs-font-size: 12px; --diffs-line-height: 23px; --diffs-bg: #181818; --diffs-fg: #dcdcdc; --diffs-bg-addition-override: #213b2a; --diffs-bg-deletion-override: #3d2827; --diffs-modified-color-override: #b8b8b8; --diffs-selection-base: #b8b8b8; --diffs-selection-number-fg: #eeeeee; --diffs-bg-selection-override: #929292; --diffs-bg-selection-number-override: #777777; --diffs-bg-hover-override: #b8b8b8; }',
+  light: ':host { --diffs-font-family: Menlo, Consolas, monospace; --diffs-font-size: 12px; --diffs-line-height: 23px; --diffs-bg: #ffffff; --diffs-fg: #242424; --diffs-bg-addition-override: #e6ffec; --diffs-bg-deletion-override: #ffebe9; --diffs-modified-color-override: #626262; --diffs-selection-base: #0969da; --diffs-selection-number-fg: #242424; --diffs-bg-selection-override: #d8e8ff; --diffs-bg-selection-number-override: #bcd6ff; --diffs-bg-hover-override: #e9e9e7; }',
+};
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const anchorFromComment = (comment: ReviewComment): CommentAnchor => ({ side: comment.side, lineStart: comment.lineStart, lineEnd: comment.lineEnd, context: comment.context, contextBefore: comment.contextBefore, contextAfter: comment.contextAfter, fingerprint: comment.fingerprint, path: comment.path });
 function lineLabel(anchor: Pick<CommentAnchor, 'side' | 'lineStart' | 'lineEnd'>) {
@@ -69,7 +74,7 @@ function CommentEditor({ session, outdated, placement, isRemote, publication, on
   </article>;
 }
 
-export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment, onUpdateComment, onDeleteComment, isRemote, allowNewComments = true, publications, onBeginReanchor, reanchorCommentId, onReanchorSelection }: DiffViewerProps) {
+export function DiffViewer({ theme, file, comments, diffStyle, draftScope, onAddComment, onUpdateComment, onDeleteComment, isRemote, allowNewComments = true, publications, onBeginReanchor, reanchorCommentId, onReanchorSelection }: DiffViewerProps) {
   const alive = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
   const selectionVersion = useRef(0);
@@ -196,14 +201,14 @@ export function DiffViewer({ file, comments, diffStyle, draftScope, onAddComment
     void beginComment({ side, lineStart, lineEnd, ...captureCommentContext(content, lineStart, lineEnd), fingerprint: file.fingerprint, path: side === 'deletions' ? file.oldPath ?? file.path : file.path });
   }, [file.oldContent, file.newContent, file.fingerprint, file.path, file.oldPath, reanchorCommentId, onReanchorSelection, allowNewComments]);
   const options = useMemo<FileDiffOptions<Annotation, undefined>>(() => ({
-    theme: 'pierre-dark', themeType: 'dark', diffStyle,
+    theme: theme === 'light' ? 'pierre-light' : 'pierre-dark', themeType: theme, diffStyle,
     diffIndicators: 'classic', disableFileHeader: true,
     hunkSeparators: 'line-info-basic', enableLineSelection: allowNewComments,
     expandUnchanged: false, onPostRender: trackVisibleComments,
     enableGutterUtility: allowNewComments, lineHoverHighlight: 'both',
     onLineSelected: startComment, onGutterUtilityClick: startComment, overflow: 'scroll',
-    unsafeCSS: ':host { --diffs-font-family: Menlo, Consolas, monospace; --diffs-font-size: 12px; --diffs-line-height: 23px; --diffs-bg: #181818; --diffs-fg: #dcdcdc; --diffs-bg-addition-override: #213b2a; --diffs-bg-deletion-override: #3d2827; --diffs-modified-color-override: #b8b8b8; --diffs-selection-base: #b8b8b8; --diffs-selection-number-fg: #eeeeee; --diffs-bg-selection-override: #929292; --diffs-bg-selection-number-override: #777777; --diffs-bg-hover-override: #b8b8b8; }',
-  }), [diffStyle, startComment, trackVisibleComments, allowNewComments]);
+    unsafeCSS: diffThemeCSS[theme],
+  }), [theme, diffStyle, startComment, trackVisibleComments, allowNewComments]);
 
   return <div className="review-diff-viewer" ref={scroller}>
     {error && <div className="review-component-error review-diff-error" role="alert">{error}<button type="button" aria-label="Dismiss error" onClick={() => setError('')}><X size={14} /></button></div>}

@@ -109,6 +109,7 @@ export interface ReviewRefresh {
 export interface AppSettings {
   jiraBaseUrl: string;
   jiraTicketView?: 'website' | 'summary';
+  theme: 'system' | 'light' | 'dark';
 }
 export interface AppState { projects: Project[]; reviews: Review[]; settings: AppSettings }
 export interface RepoInspection {

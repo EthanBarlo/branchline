@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { UpdateState } from '../shared/updates';
 import { updatesBusy } from '../shared/updates';
@@ -24,6 +24,7 @@ import { ReviewTree } from './components/ReviewTree';
 import { orderReviewFiles } from './components/reviewFileOrder';
 import { Select } from './components/Select';
 import { flushPendingComments, hasReviewCommentBackups } from './components/commentAutosave';
+import { applyTheme, readBootTheme, rememberTheme, resolveTheme } from './theme';
 
 type FileFilter = 'all' | 'unreviewed' | 'commented';
 type CommentSelection = { side: DiffSide; lineStart: number; lineEnd: number; context: string; contextBefore?: string; contextAfter?: string; fingerprint?: string; path?: string };
@@ -87,11 +88,23 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showNewReview, setShowNewReview] = useState(false);
   const [showAddProject, setShowAddProject] = useState(false);
-  const [settings, setSettings] = useState<AppSettings>({ jiraBaseUrl: '' });
+  const [settings, setSettings] = useState<AppSettings>({ jiraBaseUrl: '', theme: readBootTheme() });
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const resolvedTheme = resolveTheme(settings.theme, systemDark);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>('jira');
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance');
   const [showLegacyLinks, setShowLegacyLinks] = useState(false);
   const openingSettings = useRef(false);
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setSystemDark(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+  useLayoutEffect(() => {
+    applyTheme(resolvedTheme);
+    rememberTheme(settings.theme);
+  }, [resolvedTheme, settings.theme]);
   const [integrations, setIntegrations] = useState<IntegrationState>({ connections: [], projects: {} });
   const [integrationRevision, setIntegrationRevision] = useState(0);
   const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
@@ -733,7 +746,7 @@ export default function App() {
     finally { setOpeningJira(false); }
   }
 
-  async function openSettings(section: SettingsSection = 'jira', legacy = false) {
+  async function openSettings(section: SettingsSection = 'appearance', legacy = false) {
     if (openingSettings.current) return;
     openingSettings.current = true;
     try {
@@ -811,7 +824,7 @@ export default function App() {
             {showFiles && <><aside className="files-sidebar" id="review-files" aria-label="Changed files" style={{ width: filePaneWidth, minWidth: filePaneWidth }}>
               <div className="files-heading"><h2>Files <span>{filter === 'unreviewed' ? pendingReviewFiles.length - approvedCount : files.length}</span></h2><Select className="file-filter-select" variant="quiet" searchable={false} label="Filter changed files" value={filter} onChange={value => changeFilter(value as FileFilter)} options={[{ value: 'all', label: 'All files' }, { value: 'unreviewed', label: 'Unreviewed' }, { value: 'commented', label: 'Commented' }]} /></div>
               <label className="file-search"><Search size={13} /><input aria-label="Filter files by path" placeholder="Find a file…" value={query} onChange={event => setQuery(event.target.value)} />{query && <button className="icon-button" aria-label="Clear file search" onClick={() => setQuery('')}><X size={12} /></button>}</label>
-              <div className="tree-container"><ReviewTree key={viewKey} files={files} selectedFileId={selectedFile?.id ?? null} approvals={review.approvals} historicalFiles={historicalFiles} reviewedVersions={knownApprovals.current[viewKey] || {}} comments={review.comments} onSelect={selectFile} onReviewFiles={reviewFiles} reviewBusy={approvalBusy} loading={remoteLoading} onOrderChange={ids => { explorerOrder.current[viewKey] = ids; }} filter={filter} query={query} /></div>
+              <div className="tree-container"><ReviewTree key={viewKey} theme={resolvedTheme} files={files} selectedFileId={selectedFile?.id ?? null} approvals={review.approvals} historicalFiles={historicalFiles} reviewedVersions={knownApprovals.current[viewKey] || {}} comments={review.comments} onSelect={selectFile} onReviewFiles={reviewFiles} reviewBusy={approvalBusy} loading={remoteLoading} onOrderChange={ids => { explorerOrder.current[viewKey] = ids; }} filter={filter} query={query} /></div>
               <div className="compact-progress" title={`${approvedCount} of ${pendingReviewFiles.length} files reviewed · +${additions} −${deletions}`}><span><CircleCheck size={12} />{approvedCount} / {pendingReviewFiles.length} reviewed</span><button className="icon-button" onClick={nextUnreviewed} disabled={approvedCount === pendingReviewFiles.length} aria-label="Next unreviewed file" title="Next unreviewed file"><ArrowRight size={13} /></button><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
             </aside><div className="file-pane-resizer" role="separator" aria-label="Resize file pane" aria-orientation="vertical" aria-valuemin={180} aria-valuemax={Math.min(520, window.innerWidth - 500)} aria-valuenow={Math.round(filePaneWidth)} tabIndex={0} title="Drag to resize · Arrow keys to adjust · Double-click to reset" onPointerDown={event => {
               if (event.button !== 0) return;
@@ -829,7 +842,7 @@ export default function App() {
                 <div className="diff-toolbar"><div className="diff-file-name" title={`${fileLocation(selectedFile)} · ${selectedFile.source === 'working-tree' ? 'Working tree' : 'Committed'} · +${selectedFile.additions} −${selectedFile.deletions}`}><FileCode2 size={14} /><span title={fileLocation(selectedFile)}>{fileLocation(selectedFile)}</span><span className={`file-status file-status-${selectedFile.status.toLowerCase()}`}>{({ A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', T: 'Type changed' })[selectedFile.status]}</span></div><div className="diff-toolbar-actions"><div className="diff-style-switch" role="group" aria-label="Diff layout"><button className={diffStyle === 'split' ? 'active' : ''} aria-pressed={diffStyle === 'split'} onClick={() => setDiffStyle('split')}>Split</button><button className={diffStyle === 'unified' ? 'active' : ''} aria-pressed={diffStyle === 'unified'} onClick={() => setDiffStyle('unified')}>Unified</button></div><span className="toolbar-separator" /><button className={`reviewed-button ${approved ? 'approved' : ''}`} disabled={approvalBusy || historicalFile || !!selectedFile.unavailable} onClick={() => void toggleApproval()} aria-pressed={approved} title={approved ? 'Mark this file as unreviewed' : 'Mark this version of the file as reviewed'}>{approvalBusy ? <LoaderCircle className="spin" size={14} /> : approved ? <CircleCheck size={15} /> : <Circle size={15} />}<span>{approved ? 'Reviewed' : 'Mark reviewed'}</span></button></div></div>
                 {historicalFile && <div className="closed-review-notice historical-diff-note" role="status"><CircleCheck size={13} /><span>This PR was {historicalState}. These are its historical changes; no further review is needed for this repository.</span></div>}
                 {!historicalFile && staleApproval && <div className="changed-since-review"><RefreshCw size={13} />This file changed since you reviewed it. Take another look.</div>}
-                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}:${anchorRevision}`} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} isRemote={!!review.remote} allowNewComments={!historicalFile} publications={remote?.publications} onBeginReanchor={beginReanchor} reanchorCommentId={reanchorId} onReanchorSelection={reanchorSelection} /></div>
+                <div className="diff-content"><DiffViewer key={`${viewKey}:${selectedFile.id}:${anchorRevision}`} theme={resolvedTheme} draftScope={viewKey} file={selectedFile} comments={fileComments} diffStyle={diffStyle} onAddComment={addComment} onUpdateComment={updateComment} onDeleteComment={removeComment} isRemote={!!review.remote} allowNewComments={!historicalFile} publications={remote?.publications} onBeginReanchor={beginReanchor} reanchorCommentId={reanchorId} onReanchorSelection={reanchorSelection} /></div>
               </>}
             </section>
             {showFeedback && <FeedbackPanel key={viewKey} review={review} files={files} onClose={() => setShowFeedback(false)} onSelect={selectFile} onUpdate={updateComment} onDelete={removeComment} onError={setError} copyButton={copyButton} remote={remote} onReanchor={beginReanchor} />}

@@ -18,7 +18,7 @@ npm run build
 npm start
 ```
 
-`npm run package` produces an unpacked desktop application in `release/`. `npm run dist` produces installers; macOS builds include a universal DMG and ZIP for Intel and Apple Silicon. Local builds are unsigned unless you configure signing. The release workflow requires Developer ID signing and notarization.
+`npm run package` produces an unpacked app for your machine and replaces the previous local app after a successful build. On Apple Silicon, open `release/mac-arm64/Branchline.app`. `npm run dist` produces installers; macOS builds include a universal DMG and ZIP for Intel and Apple Silicon. Local macOS packages are unsigned. The release workflow requires Developer ID signing and notarization.
 
 ## App updates
 

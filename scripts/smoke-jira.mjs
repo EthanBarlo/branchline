@@ -64,6 +64,7 @@ async function settings(page) {
   const view = page.getByRole('region', { name: 'Settings', exact: true });
   await view.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
   assert.equal(await page.getByRole('dialog').count(), 0, 'Settings is a full application view, not a modal.');
+  await view.getByRole('tab', { name: 'Jira', exact: true }).click();
   await browserLinks(view);
   return view;
 }
@@ -98,7 +99,28 @@ try {
 
   let page = await launch();
   // Global settings must be usable before the first project exists.
-  let dialog = await settings(page);
+  assert.equal((await state(page)).settings.theme, 'system', 'System is the default theme.');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  await page.getByRole('button', { name: 'App settings', exact: true }).click();
+  let dialog = page.getByRole('region', { name: 'Settings', exact: true });
+  await dialog.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  assert.equal(await dialog.getByRole('tab', { name: 'Appearance', exact: true }).getAttribute('aria-selected'), 'true');
+  const appearance = dialog.getByRole('tabpanel', { name: 'Appearance', exact: true });
+  assert.equal(await appearance.getByRole('radio', { name: /System/ }).isChecked(), true);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await appearance.getByRole('radio', { name: /Light/ }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  assert.equal((await state(page)).settings.theme, 'light');
+  await page.screenshot({ path: 'artifacts/settings-light.png', animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await appearance.getByRole('radio', { name: /Dark/ }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  assert.equal((await state(page)).settings.theme, 'dark');
+  await dialog.getByRole('tab', { name: 'Jira', exact: true }).click();
+  await browserLinks(dialog);
   assert.equal((await state(page)).projects.length, 0);
   // Exercise the real preload/main external-link path and Electron clipboard.
   // Preserve the system clipboard around this isolated permission check.
@@ -183,8 +205,18 @@ try {
   page = await launch();
   await ticket(page, 'APP-123').waitFor();
   assert.equal((await state(page)).settings.jiraBaseUrl, baseURL, 'The normalized global setting must survive a restart.');
+  assert.equal((await state(page)).settings.theme, 'dark', 'The chosen theme must survive a restart.');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
   dialog = await settings(page);
   assert.equal(await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).inputValue(), baseURL);
+  await dialog.getByRole('tab', { name: 'Appearance', exact: true }).click();
+  assert.equal(await dialog.getByRole('tabpanel', { name: 'Appearance', exact: true }).getByRole('radio', { name: /Dark/ }).isChecked(), true);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await dialog.getByRole('tabpanel', { name: 'Appearance', exact: true }).getByRole('radio', { name: /System/ }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await page.waitForFunction(async () => (await window.reviewAPI.getState()).settings.theme === 'system');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
   await dialog.getByRole('button', { name: 'Back to review', exact: true }).click();
 
   // Pause background polling with its existing visibility guard. The main
@@ -229,13 +261,14 @@ try {
   await ticket(page, 'APP-123').click();
   dialog = page.getByRole('region', { name: 'Settings', exact: true });
   await dialog.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  await dialog.getByRole('tab', { name: 'Jira', exact: true }).click();
   await browserLinks(dialog);
   assert.equal(await dialog.getByRole('textbox', { name: 'Jira base URL', exact: true }).inputValue(), '');
   assert.deepEqual(await openedURLs(), [`${baseURL}/browse/OPS-456`, `${baseURL}/browse/APP-123`]);
   await dialog.getByRole('button', { name: 'Back to review', exact: true }).click();
   assert.equal(JSON.parse(await readFile(join(dataDir, 'reviews.json'), 'utf8')).settings.jiraBaseUrl, '', 'Clearing the Jira URL must also persist to disk.');
   assert.deepEqual(errors, [], `Renderer errors: ${errors.join('\n')}`);
-  console.log('Jira desktop smoke passed: full-page settings, isolated diagnostics and static log reveal, real scope clipboard and token-link handler, global settings, validation, normalization, restart persistence, context-path URLs, latest Current checkout, fixed saved branches, no-key branches, and clearing configuration. External opens were stubbed.');
+  console.log('Jira desktop smoke passed: default System theme, OS preference changes, Light/Dark overrides, restart persistence, full-page settings, isolated diagnostics and static log reveal, real scope clipboard and token-link handler, global settings, validation, normalization, context-path URLs, latest Current checkout, fixed saved branches, no-key branches, and clearing configuration. External opens were stubbed.');
 } catch (error) {
   const page = desktop?.windows()[0];
   if (page) {

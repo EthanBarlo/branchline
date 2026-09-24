@@ -10,6 +10,7 @@ import './review-components.css';
 import './review-tree-actions.css';
 
 interface ReviewTreeProps {
+  theme: 'light' | 'dark';
   files: ReviewFile[];
   selectedFileId: string | null;
   approvals: Record<string, string>;
@@ -25,7 +26,7 @@ interface ReviewTreeProps {
   query: string;
 }
 
-const treeTheme = themeToTreeStyles({
+const darkTreeTheme = themeToTreeStyles({
   type: 'dark', bg: '#1e1e1e', fg: '#d0d0d0',
   colors: {
     'sideBar.background': '#1e1e1e',
@@ -42,6 +43,29 @@ const treeTheme = themeToTreeStyles({
     'gitDecoration.renamedResourceForeground': '#91bed2',
   },
 });
+
+const lightTreeTheme = themeToTreeStyles({
+  type: 'light', bg: '#f7f7f6', fg: '#242424',
+  colors: {
+    'sideBar.background': '#f7f7f6',
+    'sideBar.foreground': '#242424',
+    'list.hoverBackground': '#e9e9e7',
+    'list.activeSelectionBackground': '#dededb',
+    'list.activeSelectionForeground': '#242424',
+    'list.inactiveSelectionBackground': '#e9e9e7',
+    'list.inactiveSelectionForeground': '#242424',
+    'focusBorder': '#626262',
+    'gitDecoration.addedResourceForeground': '#267338',
+    'gitDecoration.modifiedResourceForeground': '#966400',
+    'gitDecoration.deletedResourceForeground': '#b44437',
+    'gitDecoration.renamedResourceForeground': '#256d91',
+  },
+});
+
+const rowDecorationColors = {
+  dark: { historical: '#b8d0bb', reviewed: '#d0d0d0', changed: '#efc17b', pending: '#969696', count: '#b7b7b7' },
+  light: { historical: '#3f7050', reviewed: '#444440', changed: '#875b25', pending: '#62625d', count: '#6b6b66' },
+};
 
 const gitStatuses = { A: 'added', M: 'modified', D: 'deleted', R: 'renamed', T: 'modified' } as const;
 
@@ -164,11 +188,12 @@ export function ReviewTree(props: ReviewTreeProps) {
       const count = latest.current.commentCounts.get(file.id) ?? 0;
       const historical = latest.current.props.historicalFiles?.[file.id];
       const state = historical || (reviewed ? 'Reviewed' : changed ? 'Changed' : 'Unreviewed');
+      const colors = rowDecorationColors[latest.current.props.theme];
       return {
         text: `${state}${count ? ` · ${count}` : ''}`,
         parts: [
-          { text: `${historical ? '' : reviewed ? '✓ ' : changed ? '↻ ' : ''}${state}`, color: historical ? '#b8d0bb' : reviewed ? '#d0d0d0' : changed ? '#efc17b' : '#969696' },
-          ...(count ? [{ text: ` · ${count}`, color: '#b7b7b7' }] : []),
+          { text: `${historical ? '' : reviewed ? '✓ ' : changed ? '↻ ' : ''}${state}`, color: historical ? colors.historical : reviewed ? colors.reviewed : changed ? colors.changed : colors.pending },
+          ...(count ? [{ text: ` · ${count}`, color: colors.count }] : []),
         ],
         title: [historical || (changed ? 'Needs re-review' : state), count ? `${count} open comment${count === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · '),
       };
@@ -201,7 +226,7 @@ export function ReviewTree(props: ReviewTreeProps) {
     const host = model.getFileTreeContainer();
     if (host) model.render({ fileTreeContainer: host });
     syncProjection();
-  }, [model, visibleFiles, props.approvals, props.reviewedVersions, props.historicalFiles, commentCounts]);
+  }, [model, visibleFiles, props.approvals, props.reviewedVersions, props.historicalFiles, props.theme, commentCounts]);
 
   useEffect(() => {
     if (!activePath) return;
@@ -277,7 +302,7 @@ export function ReviewTree(props: ReviewTreeProps) {
       {props.loading && !query ? <LoaderCircle size={24} className="spin" /> : props.filter === 'unreviewed' && !query ? <CheckCheck size={24} /> : <Search size={24} />}
       <strong>{props.loading && !query ? 'Loading files…' : props.filter === 'unreviewed' && !query ? 'All caught up' : 'No matching files'}</strong>
       <p>{props.loading && !query ? 'More repositories are still being checked.' : props.filter === 'unreviewed' && !query ? Object.keys(props.historicalFiles || {}).length ? 'No files need further review. Completed PR files remain under All files.' : 'Every changed file has been reviewed.' : props.filter === 'commented' && !query ? 'Files with open comments will appear here.' : 'Try a different search or filter.'}</p>
-    </div> : <FileTree model={model} className="review-tree-host" style={treeTheme} aria-label="Changed files" renderContextMenu={(item, context) => {
+    </div> : <FileTree model={model} className="review-tree-host" style={props.theme === 'light' ? lightTreeTheme : darkTreeTheme} aria-label="Changed files" renderContextMenu={(item, context) => {
       const paths = model.getSelectedPaths();
       const targetPaths = paths.includes(item.path) ? paths : [item.path];
       const targets = selectedReviewFiles(targetPaths, byPath).filter(file => !props.historicalFiles?.[file.id]);

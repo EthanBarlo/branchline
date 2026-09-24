@@ -1,24 +1,24 @@
 .closed-review-cleanup-modal { width: 720px; }
-.closed-review-scan-status { display: flex; justify-content: space-between; gap: 16px; margin: 17px 0 12px; color: #a3a3a3; font-size: 11px; }
+.closed-review-scan-status { display: flex; justify-content: space-between; gap: 16px; margin: 17px 0 12px; color: var(--tone-a3a3a3); font-size: 11px; }
 .closed-review-scan-status > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
 .closed-review-scan-status > span:last-child { flex-shrink: 0; font: 10px var(--code-font); }
-.closed-review-list { list-style: none; padding: 0; margin: 0; border: 1px solid #414141; border-radius: 6px; overflow: hidden; }
+.closed-review-list { list-style: none; padding: 0; margin: 0; border: 1px solid var(--tone-414141); border-radius: 6px; overflow: hidden; }
 .closed-review-list:empty { display: none; }
-.closed-review-row { padding: 15px; background: #222; }
-.closed-review-row + .closed-review-row { border-top: 1px solid #363636; }
-.closed-review-row-heading { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 9px; color: #959595; }
-.closed-review-row-heading > strong { color: #d3d3d3; font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.closed-review-row { padding: 15px; background: var(--tone-222); }
+.closed-review-row + .closed-review-row { border-top: 1px solid var(--tone-363636); }
+.closed-review-row-heading { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 9px; color: var(--tone-959595); }
+.closed-review-row-heading > strong { color: var(--tone-d3d3d3); font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
 .closed-review-row-status { max-width: 130px; font-size: 10px; text-align: right; }
-.closed-review-ready .closed-review-row-status, .closed-review-ready .closed-review-row-heading > svg, .closed-review-removed .closed-review-row-status, .closed-review-removed .closed-review-row-heading > svg { color: #b1c3ad; }
-.closed-review-warning .closed-review-row-status, .closed-review-warning .closed-review-row-heading > svg { color: #d0af92; }
-.closed-review-reason, .closed-review-unpublished { margin: 8px 0 0 25px; color: #a3a3a3; font-size: 10px; line-height: 1.65; overflow-wrap: anywhere; }
-.closed-review-unpublished { color: #d0af92; }
-.closed-review-removed .closed-review-unpublished { color: #a3a3a3; }
+.closed-review-ready .closed-review-row-status, .closed-review-ready .closed-review-row-heading > svg, .closed-review-removed .closed-review-row-status, .closed-review-removed .closed-review-row-heading > svg { color: var(--tone-b1c3ad); }
+.closed-review-warning .closed-review-row-status, .closed-review-warning .closed-review-row-heading > svg { color: var(--tone-d0af92); }
+.closed-review-reason, .closed-review-unpublished { margin: 8px 0 0 25px; color: var(--tone-a3a3a3); font-size: 10px; line-height: 1.65; overflow-wrap: anywhere; }
+.closed-review-unpublished { color: var(--tone-d0af92); }
+.closed-review-removed .closed-review-unpublished { color: var(--tone-a3a3a3); }
 .closed-review-prs { list-style: none; display: flex; flex-wrap: wrap; gap: 7px 16px; margin: 10px 0 0 25px; padding: 0; }
 .closed-review-prs > li { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 10px; }
-.closed-review-prs > li > span { color: #858585; font-size: 9px; }
-.closed-review-removal-notice { margin-top: 17px; color: #b3b3b3; font-size: 11px; line-height: 1.75; }
+.closed-review-prs > li > span { color: var(--tone-858585); font-size: 9px; }
+.closed-review-removal-notice { margin-top: 17px; color: var(--tone-b3b3b3); font-size: 11px; line-height: 1.75; }
 .closed-review-removal-notice p { margin: 8px 0; }
-.closed-review-removal-notice > strong { color: #d0af92; font-weight: 500; }
-.closed-review-result { padding: 11px 13px; border: 1px solid #455440; border-radius: 5px; color: #b1c3ad; background: #293125; font-size: 11px; line-height: 1.7; }
+.closed-review-removal-notice > strong { color: var(--tone-d0af92); font-weight: 500; }
+.closed-review-result { padding: 11px 13px; border: 1px solid var(--tone-455440); border-radius: 5px; color: var(--tone-b1c3ad); background: var(--tone-293125); font-size: 11px; line-height: 1.7; }
 .closed-review-rescan { margin-right: auto; }

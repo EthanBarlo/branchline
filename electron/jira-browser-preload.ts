@@ -1,6 +1,7 @@
 import { ipcRenderer } from 'electron';
 
 interface JiraBrowserState {
+  theme: 'light' | 'dark';
   key: string;
   accountLabel: string;
   site: string;
@@ -23,6 +24,7 @@ window.addEventListener('DOMContentLoaded', () => {
     void ipcRenderer.invoke('jira-browser:resize', height).catch(() => {});
   }).observe(header);
   ipcRenderer.on('jira-browser:state', (_event, state: JiraBrowserState) => {
+    document.documentElement.dataset.theme = state.theme;
     const connection = `Connection: ${state.accountLabel} · ${state.site}`;
     const status = state.error || state.message;
     text('ticket', state.key);

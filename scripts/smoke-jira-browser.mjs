@@ -192,6 +192,15 @@ try {
   console.log('One click opened the full Jira page inside the review window.');
   assert.match(await chrome("document.querySelector('#connection').textContent"), /one@example.invalid/);
   assert.match(await chrome("document.querySelector('#origin').textContent"), /https:\/\/smoke.atlassian.net/);
+  await page.evaluate(() => window.reviewAPI.updateSettings({ theme: 'light' }));
+  await until(() => chrome("document.documentElement.dataset.theme === 'light'"), 'light Jira toolbar');
+  assert.equal(await chrome('getComputedStyle(document.documentElement).backgroundColor'), 'rgb(255, 255, 255)');
+  await page.evaluate(() => window.reviewAPI.updateSettings({ theme: 'dark' }));
+  await until(() => chrome("document.documentElement.dataset.theme === 'dark'"), 'dark Jira toolbar');
+  assert.equal(await chrome('getComputedStyle(document.documentElement).backgroundColor'), 'rgb(34, 34, 34)');
+  await page.evaluate(() => window.reviewAPI.updateSettings({ theme: 'system' }));
+  const systemTheme = await desktop.evaluate(({ nativeTheme }) => nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
+  await until(() => chrome(`document.documentElement.dataset.theme === '${systemTheme}'`), 'system Jira toolbar');
   const assertToolbarFits = async () => {
     const layout = await chrome("({ height: document.querySelector('header').getBoundingClientRect().height, overflow: document.documentElement.scrollWidth > innerWidth, originWidth: document.querySelector('#origin').getBoundingClientRect().width })");
     assert.equal(layout.height, 48, 'Ready Jira uses a single compact row.');

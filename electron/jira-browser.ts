@@ -45,7 +45,7 @@ export class JiraBrowser {
   private closePreparation: Promise<boolean> | null = null;
   private closingAll = false;
 
-  constructor() {
+  constructor(private readonly theme: () => 'light' | 'dark') {
     ipcMain.handle(actionChannel, async (event, action: unknown) => {
       const viewer = this.trustedViewer(event);
       if (viewer.closing || this.closingAll) return;
@@ -115,6 +115,14 @@ export class JiraBrowser {
   focusEmbedded(id: string): void {
     const viewer = [...this.viewers].find(item => item.id === id);
     if (viewer && !viewer.closing && !viewer.chrome.isDestroyed()) viewer.chrome.focus();
+  }
+
+  updateTheme(): void {
+    for (const viewer of this.viewers) {
+      if (viewer.chrome.isDestroyed()) continue;
+      viewer.chromeView.setBackgroundColor(this.theme() === 'dark' ? '#222222' : '#ffffff');
+      this.publish(viewer);
+    }
   }
 
   async closeEmbedded(id: string): Promise<boolean> {
@@ -246,7 +254,7 @@ export class JiraBrowser {
     this.viewers.add(viewer);
     parent.contentView.addChildView(chromeView);
     parent.contentView.addChildView(view);
-    chromeView.setBackgroundColor('#222222');
+    chromeView.setBackgroundColor(this.theme() === 'dark' ? '#222222' : '#ffffff');
     view.setBackgroundColor('#ffffff');
     const resize = () => this.resize(viewer);
     const parentClosed = () => this.destroyViewer(viewer);
@@ -383,7 +391,7 @@ export class JiraBrowser {
       key: viewer.target.key, accountLabel: viewer.target.accountLabel, site: new URL(viewer.target.siteUrl).host,
       currentOrigin, loading: !contents.isDestroyed() && contents.isLoading(),
       canGoBack: !contents.isDestroyed() && contents.navigationHistory.canGoBack(),
-      error: viewer.error, message: viewer.message,
+      error: viewer.error, message: viewer.message, theme: this.theme(),
     });
   }
 

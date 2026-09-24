@@ -16,7 +16,7 @@
     "test:desktop:integrations": "node scripts/smoke-integrations.mjs",
     "test:desktop:integration-backend": "node scripts/smoke-integration-backend.mjs",
     "typecheck": "tsc --noEmit",
-    "package": "npm run build && electron-builder --dir",
+    "package": "npm run build && node scripts/package-local.mjs",
     "dist": "npm run build && electron-builder",
     "test:desktop:updates": "node scripts/smoke-updates.mjs",
     "release:verify": "node scripts/verify-release.mjs",

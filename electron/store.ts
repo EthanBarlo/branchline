@@ -22,6 +22,11 @@ function jiraTicketView(value: unknown): NonNullable<AppSettings['jiraTicketView
   return value;
 }
 
+function themeChoice(value: unknown): AppSettings['theme'] {
+  if (value !== 'system' && value !== 'light' && value !== 'dark') throw new Error('Choose System, Light, or Dark for the theme.');
+  return value;
+}
+
 export function validateApprovalFiles(files: unknown, approved: unknown): FileApproval[] {
   if (typeof approved !== 'boolean') throw new Error('Choose whether to mark the selected files reviewed.');
   if (!Array.isArray(files) || files.length === 0) throw new Error('Select at least one file to update.');
@@ -90,15 +95,16 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
   let reviews = parsed.reviews;
   if (new Set(reviews.map(review => review.id)).size !== reviews.length) throw invalid();
   let projects: Project[];
-  let settings: AppSettings = { jiraBaseUrl: '', jiraTicketView: 'website' };
+  let settings: AppSettings = { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' };
   let migrated = !Object.hasOwn(parsed, 'settings');
   if (!migrated) {
     if (!record(parsed.settings) || !Object.hasOwn(parsed.settings, 'jiraBaseUrl')) throw invalid();
     try {
       const jiraBaseUrl = normalizeJiraBaseUrl(parsed.settings.jiraBaseUrl);
       const ticketView = Object.hasOwn(parsed.settings, 'jiraTicketView') ? jiraTicketView(parsed.settings.jiraTicketView) : 'website';
-      settings = { ...parsed.settings, jiraBaseUrl, jiraTicketView: ticketView };
-      migrated = jiraBaseUrl !== parsed.settings.jiraBaseUrl || ticketView !== parsed.settings.jiraTicketView;
+      const theme = Object.hasOwn(parsed.settings, 'theme') ? themeChoice(parsed.settings.theme) : 'system';
+      settings = { ...parsed.settings, jiraBaseUrl, jiraTicketView: ticketView, theme };
+      migrated = jiraBaseUrl !== parsed.settings.jiraBaseUrl || ticketView !== parsed.settings.jiraTicketView || theme !== parsed.settings.theme;
     } catch { throw invalid(); }
   }
   if (Object.hasOwn(parsed, 'projects')) {
@@ -150,7 +156,7 @@ function migrateState(parsed: unknown): { state: AppState; migrated: boolean } {
 }
 
 export class ReviewStore {
-  private state: AppState = { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website' } };
+  private state: AppState = { projects: [], reviews: [], settings: { jiraBaseUrl: '', jiraTicketView: 'website', theme: 'system' } };
   private pending: Promise<unknown> = Promise.resolve();
   private loadError: Error | null = null;
   constructor(private readonly filePath: string) {}
@@ -175,11 +181,12 @@ export class ReviewStore {
   updateSettings(changes: Partial<AppSettings>): Promise<AppSettings> {
     let changed = false;
     return this.mutate(() => {
-      if (!record(changes) || !['jiraBaseUrl', 'jiraTicketView'].some(key => Object.hasOwn(changes, key))) throw new Error('Provide a Jira setting to update.');
+      if (!record(changes) || !['jiraBaseUrl', 'jiraTicketView', 'theme'].some(key => Object.hasOwn(changes, key))) throw new Error('Provide a setting to update.');
       const jiraBaseUrl = Object.hasOwn(changes, 'jiraBaseUrl') ? normalizeJiraBaseUrl(changes.jiraBaseUrl) : this.state.settings.jiraBaseUrl;
       const ticketView = Object.hasOwn(changes, 'jiraTicketView') ? jiraTicketView(changes.jiraTicketView) : this.state.settings.jiraTicketView ?? 'website';
-      changed = this.state.settings.jiraBaseUrl !== jiraBaseUrl || this.state.settings.jiraTicketView !== ticketView;
-      if (changed) this.state.settings = { ...this.state.settings, jiraBaseUrl, jiraTicketView: ticketView };
+      const theme = Object.hasOwn(changes, 'theme') ? themeChoice(changes.theme) : this.state.settings.theme;
+      changed = this.state.settings.jiraBaseUrl !== jiraBaseUrl || this.state.settings.jiraTicketView !== ticketView || this.state.settings.theme !== theme;
+      if (changed) this.state.settings = { ...this.state.settings, jiraBaseUrl, jiraTicketView: ticketView, theme };
       return this.state.settings;
     }, () => changed);
   }

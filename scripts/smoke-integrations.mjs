@@ -35,7 +35,7 @@ function fixtureBridge() {
     ['closed-merged', 'Old merged review'], ['closed-declined', 'Old declined review'], ['closed-reopened', 'Reopened during cleanup'],
     ['closed-open', 'Still active review'], ['closed-unavailable', 'Unavailable review'], ['closed-blocked', 'Unfinished cleanup review'],
   ].map(([id, name]) => ({ ...local, id, name, kind: 'saved', remote: true, includeWorkingTree: false, comments: id === 'closed-merged' ? [comment(6, 'An unpublished local note.')] : [] }));
-  const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '', jiraTicketView: 'summary' } };
+  const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '', jiraTicketView: 'summary', theme: 'system' } };
   const integrations = { connections: [], projects: {} };
   const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
   Object.assign(calls, { cleanupChecks: [], cleanupRemovals: [], activeCleanupChecks: 0, maxCleanupChecks: 0 });
@@ -100,7 +100,7 @@ function fixtureBridge() {
     onRemoteReviewChanged: listener => { remoteListeners.add(listener); return () => { remoteListeners.delete(listener); }; },
     getUpdateState: async () => ({ revision: 0, currentVersion: '0.10.0', phase: 'disabled', disabledReason: 'Updates disabled in fixture.' }),
     getState: async () => clone(state),
-    updateSettings: async changes => { state.settings = changes; return clone(changes); },
+    updateSettings: async changes => { state.settings = { ...state.settings, ...changes }; return clone(state.settings); },
     refreshReview: async id => { calls.refreshes.push(id);
       const automatic = automaticScenarios.get(id);
       if (automatic) {
@@ -339,11 +339,28 @@ try {
   await settingsView.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
   assert.equal(await page.getByRole('dialog').count(), 0, 'Settings replaces the review workspace rather than opening a modal.');
   assert.equal(await settingsView.getByRole('tablist', { name: 'Settings sections', exact: true }).getAttribute('aria-orientation'), 'vertical');
+  const appearanceTab = settingsView.getByRole('tab', { name: 'Appearance', exact: true });
   const jiraTab = settingsView.getByRole('tab', { name: 'Jira', exact: true });
   const bitbucketTab = settingsView.getByRole('tab', { name: 'Bitbucket', exact: true });
   const updatesTab = settingsView.getByRole('tab', { name: 'Updates', exact: true });
   const diagnosticsTab = settingsView.getByRole('tab', { name: 'Diagnostics', exact: true });
-  assert.equal(await jiraTab.getAttribute('aria-selected'), 'true');
+  assert.equal(await appearanceTab.getAttribute('aria-selected'), 'true', 'Appearance is the initial settings section.');
+  const appearancePanel = settingsView.getByRole('tabpanel', { name: 'Appearance', exact: true });
+  assert.equal(await appearancePanel.getByRole('radio', { name: /System/ }).isChecked(), true);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await appearancePanel.getByRole('radio', { name: /Light/ }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().state.settings.theme), 'light');
+  await page.screenshot({ path: 'artifacts/settings-appearance-light.png', animations: 'disabled' });
+  await appearancePanel.getByRole('radio', { name: /Dark/ }).click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  assert.equal(await page.evaluate(() => window.integrationSmoke.inspect().state.settings.theme), 'dark');
+  await appearancePanel.getByRole('radio', { name: /System/ }).click();
+  await page.waitForFunction(() => window.integrationSmoke.inspect().state.settings.theme === 'system');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  await jiraTab.click();
   let panel = settingsView.getByRole('tabpanel', { name: 'Jira', exact: true });
   await panel.getByRole('textbox', { name: 'Jira site URL', exact: true }).fill('https://jira.example.atlassian.net');
   await panel.getByRole('textbox', { name: 'Account email', exact: true }).fill('jira@example.org');
@@ -385,7 +402,8 @@ try {
   await page.keyboard.press('ArrowUp');
   assert.equal(await updatesTab.getAttribute('aria-selected'), 'true', 'ArrowUp selects Updates before Diagnostics.');
   await page.keyboard.press('Home');
-  assert.equal(await jiraTab.getAttribute('aria-selected'), 'true', 'Home returns to Jira.');
+  assert.equal(await appearanceTab.getAttribute('aria-selected'), 'true', 'Home returns to the first settings section.');
+  await jiraTab.click();
   panel = settingsView.getByRole('tabpanel', { name: 'Jira', exact: true });
   assert.equal(await panel.getByRole('textbox', { name: 'Jira site URL', exact: true }).inputValue(), 'https://jira.example.atlassian.net');
   assert.equal(await panel.getByRole('textbox', { name: 'Account email', exact: true }).inputValue(), 'jira@example.org');
