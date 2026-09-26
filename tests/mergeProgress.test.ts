@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BranchReviewRepository, MergeOperation, MergeProgress, PullRequest } from '../shared/integrations';
-import { repositoryMergeProgress } from '../src/components/mergeProgress';
+import { repositoryMergeProgress } from "../src/features/integrations/mergeProgress";
 
 type Input = Parameters<typeof repositoryMergeProgress>[0];
 

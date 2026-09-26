@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { FileTree } from '@pierre/trees';
-import { orderReviewFiles, reviewFilePath } from '../src/components/reviewFileOrder';
+import { orderReviewFiles, reviewFilePath } from "../src/features/reviews/reviewFileOrder";
 import type { ReviewFile } from '../shared/types';
 
 function file(path: string, repoRelativePath = '.'): ReviewFile {

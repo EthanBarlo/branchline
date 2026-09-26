@@ -4,7 +4,7 @@ A desktop code review app for repositories with Git submodules. Review local bra
 
 ## Run
 
-Requires Node.js 22.12+ and Git installed on your machine.
+Requires Node.js 22.13+ and Git installed on your machine.
 
 ```sh
 npm install
@@ -19,6 +19,10 @@ npm start
 ```
 
 `npm run package` produces an unpacked app for your machine and replaces the previous local app after a successful build. On Apple Silicon, open `release/mac-arm64/Branchline.app`. `npm run dist` produces installers; macOS builds include a universal DMG and ZIP for Intel and Apple Silicon. Local macOS packages are unsigned. The release workflow requires Developer ID signing and notarization.
+
+## Styling
+
+React component styles use StyleX. Define new component rules with `stylex.create` beside the component and apply them with `stylex.props`. Shared visual roles and sizing constants live in `src/tokens.stylex.ts`; `src/appThemes.ts` supplies the dark palette. The selected theme is applied to the document before React starts. Renderer styles live with their components in `src/features` and `src/ui`. Semantic DOM classes remain where desktop tests and integrations use them. `src/styles.css` contains only global reset and browser or Electron rules. `npm run lint:styles` checks StyleX rules; `npm run format:check` checks component formatting. Both run during `npm run build`.
 
 ## App updates
 

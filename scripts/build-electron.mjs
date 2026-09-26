@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { copyFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 
 await build({
   entryPoints: ['electron/main.ts', 'electron/preload.ts', 'electron/jira-browser-preload.ts'],
@@ -12,4 +12,4 @@ await build({
   external: ['electron', 'electron-updater', 'electron-log/main'],
   sourcemap: true,
 });
-await copyFile('electron/jira-browser.html', 'dist-electron/jira-browser.html');
+await rm('dist-electron/jira-browser.html', { force: true });

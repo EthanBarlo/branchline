@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { CommentAnchor } from '../src/components/commentAutosave';
-import { CommentAutosave } from '../src/components/commentAutosave';
-import { captureCommentContext, placeComments } from '../src/components/commentPlacement';
+import type { CommentAnchor } from "../src/features/reviews/commentAutosave";
+import { CommentAutosave } from "../src/features/reviews/commentAutosave";
+import { captureCommentContext, placeComments } from "../src/features/reviews/commentPlacement";
 
 const file = (newContent: string | null, fingerprint: string, oldContent: string | null = 'original\n') => ({ newContent, oldContent, fingerprint, binary: false });
 const anchor = (content: string, lineStart: number, lineEnd = lineStart, side: 'additions' | 'deletions' = 'additions'): CommentAnchor => ({

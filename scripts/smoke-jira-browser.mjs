@@ -184,8 +184,11 @@ try {
   // The default entry point opens the full ticket directly, without an API
   // summary request or any additional BrowserWindow.
   await page.reload();
+  await page.evaluate(() => window.reviewAPI.updateSettings({ theme: 'dark' }));
   await page.evaluate(() => { window.jiraClosedEvents = []; window.reviewAPI.onJiraBrowserClosed(id => window.jiraClosedEvents.push(id)); });
   await openTicket(page);
+  assert.equal(await chrome('window.branchlineJiraInitialTheme'), 'dark', 'The toolbar receives the saved dark theme before its first state message.');
+  assert.equal(await chrome('getComputedStyle(document.documentElement).backgroundColor'), 'rgb(34, 34, 34)');
   const mainId = (await nativeViews()).mainId;
   assert.equal(await page.getByRole('dialog', { name: 'Jira ticket', exact: true }).count(), 0, 'No intermediate summary dialog opens.');
   assert.equal((await desktop.evaluate(() => globalThis.jiraSmoke.apiRequests)).filter(url => url.includes('/issue/') && !url.includes('/issue/picker')).length, 0, 'The full-page default does not require an issue API request.');

@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, WebContentsView, dialog, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, session, shell } from 'electron';
 import type { IpcMainInvokeEvent, Session, WebContents } from 'electron';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,13 +9,19 @@ import type { JiraBrowserTarget } from './jira-browser-policy';
 
 export type { JiraBrowserTarget } from './jira-browser-policy';
 
-const chromeFile = join(__dirname, 'jira-browser.html');
-const chromeURL = pathToFileURL(chromeFile).href;
+const chromeFile = join(__dirname, '../dist/electron/jira-browser.html');
+const devURL = !app.isPackaged ? process.env.BRANCHLINE_DEV_URL : undefined;
+const chromeURL = devURL ? `${devURL}/electron/jira-browser.html` : pathToFileURL(chromeFile).href;
 const minimumToolbarHeight = 48;
 const maximumToolbarHeight = 160;
 const stateChannel = 'jira-browser:state';
 const actionChannel = 'jira-browser:action';
 const resizeChannel = 'jira-browser:resize';
+
+// Electron needs a concrete view color before the StyleX toolbar stylesheet loads.
+function chromeBackgroundColor(theme: 'light' | 'dark'): string {
+  return theme === 'dark' ? '#222222' : '#ffffff';
+}
 
 interface Viewer {
   id: string;
@@ -120,7 +126,7 @@ export class JiraBrowser {
   updateTheme(): void {
     for (const viewer of this.viewers) {
       if (viewer.chrome.isDestroyed()) continue;
-      viewer.chromeView.setBackgroundColor(this.theme() === 'dark' ? '#222222' : '#ffffff');
+      viewer.chromeView.setBackgroundColor(chromeBackgroundColor(this.theme()));
       this.publish(viewer);
     }
   }
@@ -240,6 +246,7 @@ export class JiraBrowser {
     }
     const chromeView = new WebContentsView({ webPreferences: {
       preload: join(__dirname, 'jira-browser-preload.cjs'),
+      additionalArguments: [`--branchline-jira-theme=${this.theme()}`],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
     } });
     const view = new WebContentsView({ webPreferences: {
@@ -254,7 +261,7 @@ export class JiraBrowser {
     this.viewers.add(viewer);
     parent.contentView.addChildView(chromeView);
     parent.contentView.addChildView(view);
-    chromeView.setBackgroundColor(this.theme() === 'dark' ? '#222222' : '#ffffff');
+    chromeView.setBackgroundColor(chromeBackgroundColor(this.theme()));
     view.setBackgroundColor('#ffffff');
     const resize = () => this.resize(viewer);
     const parentClosed = () => this.destroyViewer(viewer);
@@ -281,7 +288,7 @@ export class JiraBrowser {
     chrome.on('will-frame-navigate', event => event.preventDefault());
     this.configureRemote(viewer, contents, parent);
     try {
-      await chrome.loadFile(chromeFile);
+      await chrome.loadURL(chromeURL);
       if (parent.isDestroyed() || chrome.isDestroyed()) throw new Error('The Jira modal closed before it was ready.');
       this.publish(viewer);
       chrome.focus();

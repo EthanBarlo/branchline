@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { CommentAutosave, flushPendingComments, hasPendingComments, hasReviewCommentBackups, loadCommentBackups, type CommentAnchor, type CommentBackup } from '../src/components/commentAutosave';
+import { CommentAutosave, flushPendingComments, hasPendingComments, hasReviewCommentBackups, loadCommentBackups, type CommentAnchor, type CommentBackup } from "../src/features/reviews/commentAutosave";
 import type { ReviewComment } from '../shared/types';
 
 class MemoryStorage {

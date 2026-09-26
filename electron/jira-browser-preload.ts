@@ -1,4 +1,7 @@
-import { ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
+
+const initialTheme = process.argv.includes('--branchline-jira-theme=dark') ? 'dark' : 'light';
+contextBridge.exposeInMainWorld('branchlineJiraInitialTheme', initialTheme);
 
 interface JiraBrowserState {
   theme: 'light' | 'dark';
