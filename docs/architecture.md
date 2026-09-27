@@ -1,5 +1,7 @@
 # Architecture
 
+For a visual introduction, read the [architecture walkthrough](architecture-walkthrough.md), including component composition, StyleX ownership, comment saves, and navigation guards.
+
 Branchline has three code boundaries. `src` runs in a browser renderer, `electron` owns native and provider access, and `shared` defines the data exchanged between them. The renderer calls the typed preload API; it does not import desktop services. `npm run lint` enforces these dependency directions during every build.
 
 ## Source layout
