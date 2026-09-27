@@ -59,17 +59,20 @@ export const FieldLabel = forwardRef<HTMLLabelElement, LabelHTMLAttributes<HTMLL
   },
 );
 
-export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
-  function TextInput({ className = '', ...props }, ref) {
-    return (
-      <input
-        {...props}
-        ref={ref}
-        className={`text-input ${className} ${stylex.props(styles.input).className}`}
-      />
-    );
-  },
-);
+type TextInputProps = InputHTMLAttributes<HTMLInputElement> & { xstyle?: stylex.StyleXStyles };
+
+export const TextInput = forwardRef<HTMLInputElement, TextInputProps>(function TextInput(
+  { className = '', xstyle, ...props },
+  ref,
+) {
+  return (
+    <input
+      {...props}
+      ref={ref}
+      className={`text-input ${className} ${stylex.props(styles.input, xstyle).className}`}
+    />
+  );
+});
 
 export function FormError({
   children,

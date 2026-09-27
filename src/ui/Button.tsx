@@ -61,17 +61,18 @@ const styles = stylex.create({
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'primary' | 'secondary' | 'danger';
   copied?: boolean;
+  xstyle?: stylex.StyleXStyles;
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = 'secondary', copied = false, className = '', ...props },
+  { variant = 'secondary', copied = false, xstyle, className = '', ...props },
   ref,
 ) {
   return (
     <button
       {...props}
       ref={ref}
-      className={`button button-${variant} ${copied ? 'is-copied' : ''} ${className} ${stylex.props(styles.button, styles[variant], copied && styles.copied).className}`}
+      className={`button button-${variant} ${copied ? 'is-copied' : ''} ${className} ${stylex.props(styles.button, styles[variant], copied && styles.copied, xstyle).className}`}
     />
   );
 });
