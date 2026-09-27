@@ -1,83 +1,96 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { ReviewAPI } from '../shared/types';
+import type { ReviewAPI } from '../shared/api';
+import {
+  reviewEvents,
+  type ReviewRequestName,
+  type ReviewRequestArguments,
+  type ReviewRequestResult,
+} from '../shared/ipc';
+
+function invoke<Name extends ReviewRequestName>(
+  name: Name,
+  ...args: ReviewRequestArguments<Name>
+): Promise<ReviewRequestResult<Name>> {
+  return ipcRenderer.invoke(`review:${name}`, ...args);
+}
 
 const api: ReviewAPI = {
-  getIntegrations: () => ipcRenderer.invoke('review:integrations-state'),
-  getIntegrationDiagnostics: () => ipcRenderer.invoke('review:integration-diagnostics'),
-  openIntegrationLog: () => ipcRenderer.invoke('review:integration-log-open'),
-  copyConnectionScopes: (kind) => ipcRenderer.invoke('review:connection-copy-scopes', kind),
-  saveConnection: (input) => ipcRenderer.invoke('review:connection-save', input),
-  testConnection: (id) => ipcRenderer.invoke('review:connection-test', id),
-  disconnectConnection: (id) => ipcRenderer.invoke('review:connection-disconnect', id),
-  configureProjectIntegration: (...args) => ipcRenderer.invoke('review:integrations-project', ...args),
-  discoverRepositories: (id) => ipcRenderer.invoke('review:integrations-discover', id),
-  listPullRequests: (...args) => ipcRenderer.invoke('review:pullrequests-list', ...args),
-  openPullRequestReview: (...args) => ipcRenderer.invoke('review:pullrequests-open', ...args),
-  getRemoteReview: (id) => ipcRenderer.invoke('review:pullrequests-state', id),
+  getIntegrations: () => invoke('integrations-state'),
+  getIntegrationDiagnostics: () => invoke('integration-diagnostics'),
+  openIntegrationLog: () => invoke('integration-log-open'),
+  copyConnectionScopes: (kind) => invoke('connection-copy-scopes', kind),
+  saveConnection: (input) => invoke('connection-save', input),
+  testConnection: (id) => invoke('connection-test', id),
+  disconnectConnection: (id) => invoke('connection-disconnect', id),
+  configureProjectIntegration: (...args) => invoke('integrations-project', ...args),
+  discoverRepositories: (id) => invoke('integrations-discover', id),
+  listPullRequests: (...args) => invoke('pullrequests-list', ...args),
+  openPullRequestReview: (...args) => invoke('pullrequests-open', ...args),
+  getRemoteReview: (id) => invoke('pullrequests-state', id),
   onRemoteReviewLoadProgress: (callback) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
       change: import('../shared/integrations').RemoteReviewLoadProgress,
     ) => callback(change);
-    ipcRenderer.on('review:remote-review-load', listener);
-    return () => ipcRenderer.removeListener('review:remote-review-load', listener);
+    ipcRenderer.on(reviewEvents.remoteReviewLoad, listener);
+    return () => ipcRenderer.removeListener(reviewEvents.remoteReviewLoad, listener);
   },
   onRemoteReviewChanged: (callback) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
       change: import('../shared/integrations').RemoteReviewChanged,
     ) => callback(change);
-    ipcRenderer.on('review:remote-review-changed', listener);
+    ipcRenderer.on(reviewEvents.remoteReviewChanged, listener);
     return () => {
-      ipcRenderer.removeListener('review:remote-review-changed', listener);
+      ipcRenderer.removeListener(reviewEvents.remoteReviewChanged, listener);
     };
   },
-  getJiraIssue: (...args) => ipcRenderer.invoke('review:jira-issue', ...args),
-  getJiraTicketSuggestions: (...args) => ipcRenderer.invoke('review:jira-ticket-suggestions', ...args),
-  getJiraTicketLink: (id) => ipcRenderer.invoke('review:jira-ticket-link', id),
-  openJiraBrowser: (...args) => ipcRenderer.invoke('review:jira-browser-open', ...args),
-  resizeJiraBrowser: (...args) => ipcRenderer.invoke('review:jira-browser-resize', ...args),
-  focusJiraBrowser: (id) => ipcRenderer.invoke('review:jira-browser-focus', id),
-  closeJiraBrowser: (id) => ipcRenderer.invoke('review:jira-browser-close', id),
+  getJiraIssue: (...args) => invoke('jira-issue', ...args),
+  getJiraTicketSuggestions: (...args) => invoke('jira-ticket-suggestions', ...args),
+  getJiraTicketLink: (id) => invoke('jira-ticket-link', id),
+  openJiraBrowser: (...args) => invoke('jira-browser-open', ...args),
+  resizeJiraBrowser: (...args) => invoke('jira-browser-resize', ...args),
+  focusJiraBrowser: (id) => invoke('jira-browser-focus', id),
+  closeJiraBrowser: (id) => invoke('jira-browser-close', id),
   onJiraBrowserClosed: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
-    ipcRenderer.on('review:jira-browser-closed', listener);
-    return () => ipcRenderer.removeListener('review:jira-browser-closed', listener);
+    ipcRenderer.on(reviewEvents.jiraBrowserClosed, listener);
+    return () => ipcRenderer.removeListener(reviewEvents.jiraBrowserClosed, listener);
   },
   onJiraBrowserClearTicket: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
-    ipcRenderer.on('review:jira-browser-clear-ticket', listener);
-    return () => ipcRenderer.removeListener('review:jira-browser-clear-ticket', listener);
+    ipcRenderer.on(reviewEvents.jiraBrowserClearTicket, listener);
+    return () => ipcRenderer.removeListener(reviewEvents.jiraBrowserClearTicket, listener);
   },
-  setReviewTicket: (...args) => ipcRenderer.invoke('review:jira-ticket', ...args),
-  previewFeedback: (id) => ipcRenderer.invoke('review:feedback-preview', id),
-  publishFeedback: (id) => ipcRenderer.invoke('review:feedback-publish', id),
-  reanchorComment: (...args) => ipcRenderer.invoke('review:feedback-reanchor', ...args),
-  resolveCommentConflict: (...args) => ipcRenderer.invoke('review:feedback-conflict', ...args),
-  resolveUnknownPublication: (...args) => ipcRenderer.invoke('review:feedback-unknown', ...args),
-  previewMerge: (...args) => ipcRenderer.invoke('review:merge-preview', ...args),
-  runPullRequestAction: (...args) => ipcRenderer.invoke('review:pullrequests-action', ...args),
-  completeMergedReview: (id) => ipcRenderer.invoke('review:pullrequests-complete', id),
-  checkClosedReview: (id) => ipcRenderer.invoke('review:closed-review-check', id),
-  removeClosedReviews: (...args) => ipcRenderer.invoke('review:closed-reviews-remove', ...args),
-  openIntegrationLink: (url) => ipcRenderer.invoke('review:integration-open', url),
-  getUpdateState: () => ipcRenderer.invoke('review:update-state'),
-  checkForUpdates: () => ipcRenderer.invoke('review:update-check'),
-  downloadUpdate: () => ipcRenderer.invoke('review:update-download'),
-  installUpdate: () => ipcRenderer.invoke('review:update-install'),
+  setReviewTicket: (...args) => invoke('jira-ticket', ...args),
+  previewFeedback: (id) => invoke('feedback-preview', id),
+  publishFeedback: (id) => invoke('feedback-publish', id),
+  reanchorComment: (...args) => invoke('feedback-reanchor', ...args),
+  resolveCommentConflict: (...args) => invoke('feedback-conflict', ...args),
+  resolveUnknownPublication: (...args) => invoke('feedback-unknown', ...args),
+  previewMerge: (...args) => invoke('merge-preview', ...args),
+  runPullRequestAction: (...args) => invoke('pullrequests-action', ...args),
+  completeMergedReview: (id) => invoke('pullrequests-complete', id),
+  checkClosedReview: (id) => invoke('closed-review-check', id),
+  removeClosedReviews: (...args) => invoke('closed-reviews-remove', ...args),
+  openIntegrationLink: (url) => invoke('integration-open', url),
+  getUpdateState: () => invoke('update-state'),
+  checkForUpdates: () => invoke('update-check'),
+  downloadUpdate: () => invoke('update-download'),
+  installUpdate: () => invoke('update-install'),
   onUpdateStateChanged: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: import('../shared/updates').UpdateState) =>
       callback(state);
-    ipcRenderer.on('review:update-state-changed', listener);
+    ipcRenderer.on(reviewEvents.updateStateChanged, listener);
     return () => {
-      ipcRenderer.removeListener('review:update-state-changed', listener);
+      ipcRenderer.removeListener(reviewEvents.updateStateChanged, listener);
     };
   },
   onUpdateDialogRequested: (callback) => {
     const listener = () => callback();
-    ipcRenderer.on('review:update-show', listener);
+    ipcRenderer.on(reviewEvents.updateShow, listener);
     return () => {
-      ipcRenderer.removeListener('review:update-show', listener);
+      ipcRenderer.removeListener(reviewEvents.updateShow, listener);
     };
   },
   onBeforeClose: (callback) => {
@@ -88,42 +101,42 @@ const api: ReviewAPI = {
       void Promise.resolve()
         .then(() => callback(request.reason))
         .then(
-          () => ipcRenderer.invoke('review:close-ready', request.id, true),
-          () => ipcRenderer.invoke('review:close-ready', request.id, false),
+          () => invoke('close-ready', request.id, true),
+          () => invoke('close-ready', request.id, false),
         )
         .catch(() => undefined);
     };
-    ipcRenderer.on('review:before-close', listener);
-    void ipcRenderer.invoke('review:close-listener', true);
+    ipcRenderer.on(reviewEvents.beforeClose, listener);
+    void invoke('close-listener', true);
     return () => {
-      ipcRenderer.removeListener('review:before-close', listener);
-      void ipcRenderer.invoke('review:close-listener', false).catch(() => undefined);
+      ipcRenderer.removeListener(reviewEvents.beforeClose, listener);
+      void invoke('close-listener', false).catch(() => undefined);
     };
   },
   onCloseCancelled: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
-    ipcRenderer.on('review:close-cancelled', listener);
+    ipcRenderer.on(reviewEvents.closeCancelled, listener);
     return () => {
-      ipcRenderer.removeListener('review:close-cancelled', listener);
+      ipcRenderer.removeListener(reviewEvents.closeCancelled, listener);
     };
   },
-  getState: () => ipcRenderer.invoke('review:state'),
-  updateSettings: (changes) => ipcRenderer.invoke('review:settings-update', changes),
-  openJiraTicket: (id) => ipcRenderer.invoke('review:jira-open', id),
-  chooseRepo: () => ipcRenderer.invoke('review:choose-repo'),
-  inspectRepo: (path) => ipcRenderer.invoke('review:inspect', path),
-  createProject: (input) => ipcRenderer.invoke('review:project-create', input),
-  updateProject: (...args) => ipcRenderer.invoke('review:project-update', ...args),
-  deleteProject: (id) => ipcRenderer.invoke('review:project-delete', id),
-  createReview: (input) => ipcRenderer.invoke('review:create', input),
-  deleteReview: (id) => ipcRenderer.invoke('review:delete', id),
-  refreshReview: (id) => ipcRenderer.invoke('review:refresh', id),
-  setCurrentTarget: (...args) => ipcRenderer.invoke('review:current-target', ...args),
-  setApproval: (...args) => ipcRenderer.invoke('review:approve', ...args),
-  setApprovals: (...args) => ipcRenderer.invoke('review:approve-many', ...args),
-  addComment: (...args) => ipcRenderer.invoke('review:comment-add', ...args),
-  updateComment: (...args) => ipcRenderer.invoke('review:comment-update', ...args),
-  deleteComment: (...args) => ipcRenderer.invoke('review:comment-delete', ...args),
-  copyFeedback: (...args) => ipcRenderer.invoke('review:copy', ...args),
+  getState: () => invoke('state'),
+  updateSettings: (changes) => invoke('settings-update', changes),
+  openJiraTicket: (id) => invoke('jira-open', id),
+  chooseRepo: () => invoke('choose-repo'),
+  inspectRepo: (path) => invoke('inspect', path),
+  createProject: (input) => invoke('project-create', input),
+  updateProject: (...args) => invoke('project-update', ...args),
+  deleteProject: (id) => invoke('project-delete', id),
+  createReview: (input) => invoke('create', input),
+  deleteReview: (id) => invoke('delete', id),
+  refreshReview: (id) => invoke('refresh', id),
+  setCurrentTarget: (...args) => invoke('current-target', ...args),
+  setApproval: (...args) => invoke('approve', ...args),
+  setApprovals: (...args) => invoke('approve-many', ...args),
+  addComment: (...args) => invoke('comment-add', ...args),
+  updateComment: (...args) => invoke('comment-update', ...args),
+  deleteComment: (...args) => invoke('comment-delete', ...args),
+  copyFeedback: (...args) => invoke('copy', ...args),
 };
 contextBridge.exposeInMainWorld('reviewAPI', api);

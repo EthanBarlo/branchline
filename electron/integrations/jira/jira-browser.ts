@@ -1,3 +1,4 @@
+import { reviewEvents } from '../../../shared/ipc';
 import { app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, session, shell } from 'electron';
 import type { IpcMainInvokeEvent, Session, WebContents } from 'electron';
 import { join } from 'node:path';
@@ -73,7 +74,7 @@ export class JiraBrowser {
             break;
           case 'clear-ticket':
             if (!viewer.window.webContents.isDestroyed())
-              viewer.window.webContents.send('review:jira-browser-clear-ticket', viewer.id);
+              viewer.window.webContents.send(reviewEvents.jiraBrowserClearTicket, viewer.id);
             break;
           case 'close':
             await this.closeViewer(viewer);
@@ -245,9 +246,9 @@ export class JiraBrowser {
         await this.clearSession(target.connectionId);
         if (!this.closingAll && !parent.isDestroyed())
           await this.createViewer(target, parent, this.resettingBounds.get(id) || bounds, id);
-        else if (!parent.isDestroyed()) parent.webContents.send('review:jira-browser-closed', id);
+        else if (!parent.isDestroyed()) parent.webContents.send(reviewEvents.jiraBrowserClosed, id);
       } catch (error) {
-        if (!parent.isDestroyed()) parent.webContents.send('review:jira-browser-closed', id);
+        if (!parent.isDestroyed()) parent.webContents.send(reviewEvents.jiraBrowserClosed, id);
         throw error;
       } finally {
         this.resettingBounds.delete(id);
@@ -408,7 +409,7 @@ export class JiraBrowser {
     if (!viewer.contents.isDestroyed()) viewer.contents.close({ waitForBeforeUnload: false });
     if (!viewer.chrome.isDestroyed()) viewer.chrome.close({ waitForBeforeUnload: false });
     if (notify && !viewer.window.isDestroyed() && !viewer.window.webContents.isDestroyed()) {
-      viewer.window.webContents.send('review:jira-browser-closed', viewer.id);
+      viewer.window.webContents.send(reviewEvents.jiraBrowserClosed, viewer.id);
       viewer.window.webContents.focus();
     }
   }

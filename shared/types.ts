@@ -1,5 +1,4 @@
-import type { UpdateAPI } from './updates';
-import type { ClosedReviewCheck, IntegrationAPI } from './integrations';
+import type { ClosedReviewCheck } from './integrations';
 
 export type DiffSide = 'additions' | 'deletions';
 export type FileStatus = 'A' | 'M' | 'D' | 'R' | 'T';
@@ -143,49 +142,4 @@ export type NewComment = Omit<ReviewComment, 'id' | 'createdAt' | 'resolved'> & 
 export interface FileApproval {
   fileId: string;
   fingerprint: string;
-}
-
-export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
-  onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
-  onCloseCancelled(callback: (message: string) => void): () => void;
-  getState(): Promise<AppState>;
-  updateSettings(changes: Partial<AppSettings>): Promise<AppSettings>;
-  openJiraTicket(reviewId: string): Promise<void>;
-  chooseRepo(): Promise<string | null>;
-  inspectRepo(path: string): Promise<RepoInspection>;
-  createProject(input: NewProject): Promise<Project>;
-  updateProject(id: string, changes: { name?: string; defaultBaseBranch?: string }): Promise<Project>;
-  deleteProject(id: string): Promise<AppState>;
-  createReview(input: NewReview): Promise<Review>;
-  deleteReview(id: string): Promise<AppState>;
-  refreshReview(id: string): Promise<ReviewRefresh>;
-  setCurrentTarget(projectId: string, target: string): Promise<ReviewRefresh>;
-  setApproval(
-    reviewId: string,
-    fileId: string,
-    fingerprint: string,
-    approved: boolean,
-    contextKey?: string,
-  ): Promise<Review>;
-  setApprovals(
-    reviewId: string,
-    files: FileApproval[],
-    approved: boolean,
-    contextKey?: string,
-  ): Promise<Review>;
-  addComment(reviewId: string, input: NewComment, contextKey?: string): Promise<Review>;
-  updateComment(
-    reviewId: string,
-    commentId: string,
-    changes: { body?: string; resolved?: boolean },
-    contextKey?: string,
-  ): Promise<Review>;
-  deleteComment(reviewId: string, commentId: string, contextKey?: string): Promise<Review>;
-  copyFeedback(reviewId: string, contextKey?: string): Promise<string>;
-}
-
-declare global {
-  interface Window {
-    reviewAPI: ReviewAPI;
-  }
 }
