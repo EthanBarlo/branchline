@@ -7,7 +7,7 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "npm run routes:generate && tsc --noEmit && npm run lint:styles && npm run format:check && vite build && node scripts/build-electron.mjs",
+    "build": "npm run routes:generate && tsc --noEmit && npm run lint && npm run format:check && vite build && node scripts/build-electron.mjs",
     "start": "electron .",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs",
     "test:desktop": "node scripts/smoke.mjs",
@@ -22,10 +22,11 @@
     "test:desktop:updates": "node scripts/smoke-updates.mjs",
     "release:verify": "node scripts/verify-release.mjs",
     "test:desktop:jira-browser": "node scripts/smoke-jira-browser.mjs",
-    "format": "prettier --write src",
-    "format:check": "prettier --check src",
+    "format": "prettier --write src electron shared",
+    "format:check": "prettier --check src electron shared",
     "routes:generate": "node scripts/generate-routes.mjs",
-    "test:desktop:routing": "node scripts/smoke-routing.mjs"
+    "test:desktop:routing": "node scripts/smoke-routing.mjs",
+    "lint": "eslint src electron shared --ext .ts,.tsx"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.1",

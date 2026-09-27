@@ -8,7 +8,9 @@ import { Button, IconButton } from '../../ui/Button';
 import { DialogFooter, DialogIntroduction } from '../../ui/Dialog';
 import { TextInput } from '../../ui/Field';
 import { Spinner, spinStyle } from '../../ui/Spinner';
-import { IntegrationDialog, Problem, message } from './IntegrationPrimitives';
+import { IntegrationDialog } from './IntegrationDialog';
+import { Problem } from './IntegrationError';
+import { errorMessage as message } from '../../lib/errorMessage';
 
 const emptyProject = (): ProjectIntegration => ({ repositories: [], updateSubmodulePointers: false });
 

@@ -9,7 +9,10 @@ import { DialogFooter } from '../../ui/Dialog';
 import { TextInput } from '../../ui/Field';
 import { Spinner, spinStyle } from '../../ui/Spinner';
 import { JiraBrowserDialog } from '../jira/browser/JiraBrowserDialog';
-import { IntegrationDialog, IntegrationLink, Problem, message } from './IntegrationPrimitives';
+import { IntegrationDialog } from './IntegrationDialog';
+import { IntegrationLink } from './IntegrationLink';
+import { Problem } from './IntegrationError';
+import { errorMessage as message } from '../../lib/errorMessage';
 
 function safeUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') return;

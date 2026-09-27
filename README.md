@@ -22,9 +22,11 @@ npm start
 
 ## Styling
 
-React component styles use StyleX. Define new component rules with `stylex.create` beside the component and apply them with `stylex.props`. Shared visual roles and sizing constants live in `src/tokens.stylex.ts`; `src/appThemes.ts` supplies the dark palette. The selected theme is applied to the document before React starts. Renderer styles live with their components in `src/features` and `src/ui`. Semantic DOM classes remain where desktop tests and integrations use them. `src/styles.css` contains only global reset and browser or Electron rules. `npm run lint:styles` checks StyleX rules; `npm run format:check` checks component formatting. Both run during `npm run build`.
+React component styles use StyleX. Define new component rules with `stylex.create` beside the component and apply them with `stylex.props`. Shared visual roles and sizing constants live in `src/theme/tokens.stylex.ts`; `src/theme/appThemes.ts` supplies the dark palette. The selected theme is applied to the document before React starts. Renderer styles live with their components in `src/features` and `src/ui`. Semantic DOM classes remain where desktop tests and integrations use them. `src/styles.css` contains only global reset and browser or Electron rules. `npm run lint` checks StyleX rules and architecture boundaries; `npm run format:check` checks source formatting. Both run during `npm run build`.
 
-## Renderer architecture
+## Architecture
+
+See [the architecture guide](docs/architecture.md) for folder ownership, component/hook boundaries, IPC contracts, and verification commands.
 
 Navigation uses TanStack Router with routes in `src/routes` and a generated `src/routeTree.gen.ts`. Run `npm run routes:generate` after adding routes; development and build commands also generate the tree. Keep styles and implementation in their feature folders, with route files declaring destinations and layouts.
 

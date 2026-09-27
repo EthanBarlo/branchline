@@ -11,7 +11,7 @@ import { BranchReviewService } from '../electron/integrations/bitbucket/branch-r
 import { ProviderError, type ConnectionManager } from '../electron/integrations/connection-manager';
 import type { BitbucketClient } from '../electron/integrations/bitbucket/bitbucket-client';
 import type { PointerService } from '../electron/git/pointer-service';
-import { branchReviewKey, pullRequestKey, type BranchReviewRepository, type InlinePayload, type PullRequest, type RemoteComment, type RepositoryMapping } from '../shared/integrations';
+import { branchReviewKey, pullRequestKey, type InlinePayload, type PullRequest, type RemoteComment, type RepositoryMapping } from '../shared/integrations';
 import type { Review, ReviewFile, ReviewSnapshot } from '../shared/types';
 
 const hash = (value: string) => value.repeat(40);

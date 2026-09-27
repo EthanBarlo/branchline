@@ -17,7 +17,9 @@ import { Button } from '../../ui/Button';
 import { DialogFooter, DialogIntroduction } from '../../ui/Dialog';
 import { Spinner, spinStyle } from '../../ui/Spinner';
 import { flushPendingComments } from '../reviews/diff/commentAutosave';
-import { IntegrationDialog, IntegrationError, IntegrationLink } from './IntegrationPrimitives';
+import { IntegrationDialog } from './IntegrationDialog';
+import { IntegrationError } from './IntegrationError';
+import { IntegrationLink } from './IntegrationLink';
 
 type CleanupRow = {
   reviewId: string;

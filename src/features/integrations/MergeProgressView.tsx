@@ -13,7 +13,8 @@ import type { BranchReviewRepository, MergeOperation, PullRequest } from '../../
 import { pullRequestKey } from '../../../shared/integrations';
 import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { spinStyle } from '../../ui/Spinner';
-import { IntegrationLink, Problem } from './IntegrationPrimitives';
+import { IntegrationLink } from './IntegrationLink';
+import { Problem } from './IntegrationError';
 import { repositoryMergeProgress } from './mergeProgress';
 
 import { CleanupStatus, repositoryRows } from './RemoteRepositoryStatus';

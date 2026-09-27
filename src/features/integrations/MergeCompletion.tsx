@@ -6,7 +6,8 @@ import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { DialogFooter } from '../../ui/Dialog';
 import { Spinner } from '../../ui/Spinner';
-import { IntegrationDialog, IntegrationError } from './IntegrationPrimitives';
+import { IntegrationDialog } from './IntegrationDialog';
+import { IntegrationError } from './IntegrationError';
 import { MergeProgressView } from './MergeProgressView';
 
 export function MergeCompletion({

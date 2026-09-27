@@ -9,7 +9,10 @@ import { Button, IconButton } from '../../ui/Button';
 import { DialogFooter, DialogNote } from '../../ui/Dialog';
 import { Spinner, spinStyle } from '../../ui/Spinner';
 import { flushPendingComments } from '../reviews/diff/commentAutosave';
-import { IntegrationDialog, IntegrationLink, Problem, message } from './IntegrationPrimitives';
+import { IntegrationDialog } from './IntegrationDialog';
+import { IntegrationLink } from './IntegrationLink';
+import { Problem } from './IntegrationError';
+import { errorMessage as message } from '../../lib/errorMessage';
 
 export function PullRequestsDialog({
   project,

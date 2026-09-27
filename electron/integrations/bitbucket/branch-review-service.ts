@@ -5,7 +5,7 @@ import type {
   RemoteReviewState,
   RepositoryMapping,
 } from '../../../shared/integrations';
-import { branchReviewKey, pullRequestKey } from '../../../shared/integrations';
+import { branchReviewKey } from '../../../shared/integrations';
 import type { ReviewSnapshot } from '../../../shared/types';
 import type { BitbucketClient } from './bitbucket-client';
 import { IntegrationStore } from '../integration-store';

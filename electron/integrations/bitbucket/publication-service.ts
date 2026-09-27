@@ -1,4 +1,4 @@
-import type { ReviewComment, ReviewFile, ReviewSnapshot } from '../../../shared/types';
+import type { ReviewComment, ReviewSnapshot } from '../../../shared/types';
 import type {
   CommentPublication,
   FeedbackPreview,
