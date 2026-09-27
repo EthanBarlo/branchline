@@ -1,11 +1,17 @@
-import { useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { flushSync } from 'react-dom';
 import {
   isMergeComplete,
   type ClosedReviewCleanupResult,
   type RemoteReviewState,
 } from '../../../../shared/integrations';
-import { currentReviewId, type AppSettings, type Project, type Review } from '../../../../shared/types';
+import {
+  currentReviewId,
+  type AppSettings,
+  type Project,
+  type Review,
+  type ReviewRefresh,
+} from '../../../../shared/types';
 import { errorMessage } from '../../../lib/errorMessage';
 import { flushPendingComments, hasReviewCommentBackups } from '../diff/commentAutosave';
 import type { ReviewData } from './useReviewData';
@@ -52,20 +58,27 @@ export function useReviewRetirement({
   const [mergeCompletion, setMergeCompletion] = useState<MergeCompletion | null>(null);
   const closingReviewIds = useRef(new Set<string>());
   const closingDialogs = useRef(new Map<HTMLElement, boolean>());
-  const { mounted, deletedReviewIds, selectedIdRef, selectedProjectRef, latestReviews } = data;
+  const {
+    isMounted,
+    isReviewRemoved,
+    getSelection,
+    markReviewsDeleted,
+    reconcileRemovedReviews,
+    onReviewRefreshed,
+  } = data;
 
   async function mergeFinished(mergedReview: Review, state: RemoteReviewState) {
     if (!isMergeComplete(state)) return;
     await flushPendingComments();
-    if (!mounted.current || deletedReviewIds.current.has(mergedReview.id)) return;
+    if (!isMounted() || isReviewRemoved(mergedReview.id)) return;
     // Capture navigation before removing the review; the result modal must not
     // depend on a review ID that no longer exists in storage.
     const jiraLink = await window.reviewAPI
       .getJiraTicketLink(mergedReview.id)
       .catch(() => jiraLinks[mergedReview.id] || null);
     const saved = await window.reviewAPI.completeMergedReview(mergedReview.id);
-    deletedReviewIds.current.add(mergedReview.id);
-    if (!mounted.current) return;
+    markReviewsDeleted([mergedReview.id]);
+    if (!isMounted()) return;
     setProjects(saved.projects);
     setReviews(saved.reviews);
     data.forgetReviews([mergedReview.id]);
@@ -75,23 +88,15 @@ export function useReviewRetirement({
       remote: state,
       jiraLink,
     });
-    if (selectedIdRef.current === mergedReview.id) activateReview(currentReviewId(mergedReview.projectId));
+    if (getSelection().reviewId === mergedReview.id) activateReview(currentReviewId(mergedReview.projectId));
   }
 
   function closedReviewsRemoved(result: ClosedReviewCleanupResult) {
-    const savedIds = new Set(result.state.reviews.map((review) => review.id));
-    const removed = new Set([
-      ...result.removedIds,
-      ...latestReviews.current.filter((review) => !savedIds.has(review.id)).map((review) => review.id),
-    ]);
-    for (const id of removed) deletedReviewIds.current.add(id);
-    if (!mounted.current) return;
+    const removed = reconcileRemovedReviews(result.state.reviews, result.removedIds);
+    if (!removed) return;
     const removedIds = [...removed];
-    latestReviews.current = result.state.reviews;
     setProjects(result.state.projects);
-    setReviews(result.state.reviews);
     setSettings(result.state.settings);
-    data.forgetReviews(removedIds);
     setJiraLinks((previous) =>
       Object.fromEntries(
         Object.entries(previous).filter(
@@ -110,15 +115,16 @@ export function useReviewRetirement({
       /* Optional display history cannot block confirmed removal. */
     }
     setMergeCompletion((previous) => (previous && removed.has(previous.reviewId) ? null : previous));
-    if (selectedIdRef.current && removed.has(selectedIdRef.current)) {
-      activateReview(selectedProjectRef.current ? currentReviewId(selectedProjectRef.current) : null);
+    const selection = getSelection();
+    if (selection.reviewId && removed.has(selection.reviewId)) {
+      activateReview(selection.projectId ? currentReviewId(selection.projectId) : null);
     }
   }
 
-  data.retireClosedReview.current = async (result) => {
+  async function retireClosedReview(result: ReviewRefresh) {
     const { review: checkedReview, closedReview } = result;
-    if (!mounted.current || !checkedReview.remote || deletedReviewIds.current.has(checkedReview.id))
-      return deletedReviewIds.current.has(checkedReview.id);
+    if (!isMounted() || !checkedReview.remote || isReviewRemoved(checkedReview.id))
+      return isReviewRemoved(checkedReview.id);
     if (!closedReview) {
       setClosedReviewNotice((previous) => (previous?.reviewId === checkedReview.id ? null : previous));
       return false;
@@ -160,8 +166,8 @@ export function useReviewRetirement({
       );
       closedReviewsRemoved(removal);
       const retained = removal.retained.find((item) => item.reviewId === checkedReview.id);
-      const removed = deletedReviewIds.current.has(checkedReview.id);
-      if (mounted.current)
+      const removed = isReviewRemoved(checkedReview.id);
+      if (isMounted())
         setClosedReviewNotice({
           projectId: checkedReview.projectId,
           ...(removed ? {} : { reviewId: checkedReview.id }),
@@ -174,7 +180,7 @@ export function useReviewRetirement({
         });
       return removed;
     } catch (reason) {
-      if (mounted.current)
+      if (isMounted())
         setClosedReviewNotice({
           projectId: checkedReview.projectId,
           reviewId: checkedReview.id,
@@ -188,9 +194,12 @@ export function useReviewRetirement({
         for (const [element, inert] of closingDialogs.current) element.inert = inert;
         closingDialogs.current.clear();
       }
-      if (mounted.current) setClosingReviewId([...closingReviewIds.current][0] || null);
+      if (isMounted()) setClosingReviewId([...closingReviewIds.current][0] || null);
     }
-  };
+  }
+
+  // Register before the data hook starts polling in its passive effect.
+  useLayoutEffect(() => onReviewRefreshed(retireClosedReview), [onReviewRefreshed, retireClosedReview]);
 
   return {
     closingReviewId,

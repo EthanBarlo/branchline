@@ -1,43 +1,32 @@
 import * as stylex from '@stylexjs/stylex';
 import { useEffect, useRef, useState } from 'react';
-import type { Project, Review } from '../../../../shared/types';
-import { currentReviewId, reviewContextKey } from '../../../../shared/types';
 import { errorMessage } from '../../../lib/errorMessage';
-import { ClosedReviewCleanup } from '../../integrations/ClosedReviewCleanup';
-import {
-  JiraIssuePanel,
-  ProjectIntegrationDialog,
-  PullRequestsDialog,
-  RemoteReviewControls,
-} from '../../integrations/index';
+import { JiraIssuePanel } from '../../integrations/JiraIssuePanel';
 import { MergeCompletion } from '../../integrations/MergeCompletion';
-import { AddProjectDialog } from '../../projects/AddProjectDialog';
-import { ProjectSettingsDialog } from '../../projects/ProjectSettingsDialog';
+import { RemoteReviewControls } from '../../integrations/remote-review/RemoteReviewControls';
+import { OpeningWorkspace } from '../../workspace/OpeningWorkspace';
+import { Welcome } from '../../workspace/Welcome';
+import { WorkspaceMenu } from '../../workspace/WorkspaceMenu';
 import { ClosedReviewNotice } from '../ClosedReviewNotice';
-import { flushPendingComments } from '../diff/commentAutosave';
 import { CopyFeedbackButton } from '../CopyFeedbackButton';
 import { CurrentSetup } from '../CurrentSetup';
+import { flushPendingComments } from '../diff/commentAutosave';
 import { ErrorBanner } from '../ErrorBanner';
-import { NewReviewDialog } from '../NewReviewDialog';
 import { PointerChanges } from '../PointerChanges';
 import { ReanchorBanner } from '../ReanchorBanner';
 import { RepositoryDetailsDialog } from '../RepositoryDetailsDialog';
 import { RepositoryWarnings } from '../RepositoryWarnings';
 import { ReviewToolbar } from '../ReviewToolbar';
 import { useReviewViewPreferences } from '../session/useReviewViewPreferences';
-import { ConfirmDeletionDialog } from '../../workspace/ConfirmDeletionDialog';
-import { HelpDialog } from '../../workspace/HelpDialog';
-import { OpeningWorkspace } from '../../workspace/OpeningWorkspace';
-import { Welcome } from '../../workspace/Welcome';
-import { WorkspaceMenu } from '../../workspace/WorkspaceMenu';
 
 import { useWorkspace } from '../../workspace/WorkspaceProvider';
-import { mergeReview } from '../session/reviewSession';
-import { ReviewWorkbench } from './ReviewWorkbench';
 import { useReviewActions } from '../session/useReviewActions';
 import { useReviewData } from '../session/useReviewData';
 import { useReviewRetirement } from '../session/useReviewRetirement';
 import { useReviewView } from '../session/useReviewView';
+import { ReviewDialogs } from './ReviewDialogs';
+import { ReviewWorkbench } from './ReviewWorkbench';
+import { useReviewDialogs } from './useReviewDialogs';
 
 export function ReviewWorkspace() {
   const workspace = useWorkspace();
@@ -47,32 +36,21 @@ export function ReviewWorkspace() {
     setReviews,
     settings,
     setSettings,
-    loadIntegrations,
     integrationRevision,
     initializing,
     error,
     setError,
-    showAddProject,
     setShowAddProject,
     resolvedTheme,
     lifecycle,
     navigation,
   } = workspace;
-  const { selectedProjectId, selectedReviewId, showSettings, openSettings } = navigation;
-  const { showUpdates, updateBusyRef } = lifecycle;
+  const { selectedProjectId, selectedReviewId, showSettings } = navigation;
+  const { updateBusyRef } = lifecycle;
   const preferences = useReviewViewPreferences();
   const { showFiles, toggleFiles } = preferences;
-  const [showNewReview, setShowNewReview] = useState(false);
-  const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
-  const [showPullRequests, setShowPullRequests] = useState(false);
-  const [cleanupProject, setCleanupProject] = useState<Project | null>(null);
-  const [settingsProject, setSettingsProject] = useState<Project | null>(null);
-  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
   const [showFeedback, setShowFeedback] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
   const [showRepoDetails, setShowRepoDetails] = useState(false);
-  const [deleteReview, setDeleteReview] = useState<Review | null>(null);
-  const [removing, setRemoving] = useState(false);
   const resetActions = useRef<() => void>(() => {});
   const resetView = () => {
     resetActions.current();
@@ -87,17 +65,16 @@ export function ReviewWorkspace() {
     paused: showSettings || initializing,
     updateBusyRef,
     onContextChange: resetView,
+    onTargetChanged: (projectId, baseBranch) => {
+      setProjects((previous) =>
+        previous.map((project) =>
+          project.id === projectId ? { ...project, defaultBaseBranch: baseBranch } : project,
+        ),
+      );
+    },
     setError,
   });
-  const {
-    contexts,
-    deletedReviewIds,
-    selectedIdRef,
-    selectedProjectRef,
-    refreshing,
-    refresh,
-    setRemoteStates,
-  } = data;
+  const { isReviewRemoved, refreshing, refresh, updateRemoteState } = data;
   const sessionInitialized = useRef(false);
   useEffect(() => {
     if (initializing || sessionInitialized.current) return;
@@ -107,8 +84,6 @@ export function ReviewWorkspace() {
   useEffect(() => {
     resetView();
     setError(null);
-    setShowNewReview(false);
-    setShowPullRequests(false);
   }, [selectedProjectId, selectedReviewId]);
   const view = useReviewView({ workspace, data, preferences });
   const {
@@ -145,7 +120,6 @@ export function ReviewWorkspace() {
     files,
     selectedFile,
     historicalFiles,
-    setProjects,
     setError,
     viewPreferences: preferences,
   });
@@ -162,11 +136,11 @@ export function ReviewWorkspace() {
   } = actions;
 
   function activateReview(id: string | null) {
-    if (!id || !selectedProjectId || deletedReviewIds.current.has(id)) return;
+    if (!id || !selectedProjectId || isReviewRemoved(id)) return;
     void navigation.retireReview(id);
   }
   async function selectReview(id: string | null) {
-    if (!id || !selectedProjectId || deletedReviewIds.current.has(id)) return;
+    if (!id || !selectedProjectId || isReviewRemoved(id)) return;
     if (id === selectedReviewId) {
       try {
         await flushPendingComments();
@@ -177,7 +151,16 @@ export function ReviewWorkspace() {
       }
     } else await navigation.navigateReview(selectedProjectId, id);
   }
-  const selectProject = navigation.selectProject;
+  const dialogs = useReviewDialogs({ workspace, data, selectReview });
+  const {
+    setShowNewReview,
+    setShowPullRequests,
+    setCleanupProject,
+    setSettingsProject,
+    setIntegrationProject,
+    setShowHelp,
+    setDeleteReview,
+  } = dialogs;
   const {
     closingReviewId,
     closedReviewNotice,
@@ -197,64 +180,6 @@ export function ReviewWorkspace() {
     setJiraLinks,
     activateReview,
   });
-
-  async function projectCreated(created: Project) {
-    const state = await window.reviewAPI.getState();
-    setProjects(state.projects);
-    setReviews(state.reviews);
-    for (const item of state.reviews) contexts.current[item.id] = reviewContextKey(item);
-    await selectProject(created.id);
-    setShowAddProject(false);
-  }
-
-  function remoteOpened(created: Review) {
-    contexts.current[created.id] = reviewContextKey(created);
-    setReviews((previous) => mergeReview(previous, created));
-    void selectReview(created.id);
-    setShowPullRequests(false);
-  }
-
-  async function confirmDelete() {
-    if (!deleteReview || removing) return;
-    setRemoving(true);
-    const id = deleteReview.id;
-    try {
-      await flushPendingComments();
-      const state = await window.reviewAPI.deleteReview(id);
-      deletedReviewIds.current.add(id);
-      setProjects(state.projects);
-      setReviews(state.reviews);
-      if (selectedIdRef.current === id) {
-        const next = selectedProjectRef.current ? currentReviewId(selectedProjectRef.current) : null;
-        selectReview(next);
-      }
-      setDeleteReview(null);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setRemoving(false);
-    }
-  }
-
-  async function confirmDeleteProject() {
-    if (!deleteProject || removing) return;
-    setRemoving(true);
-    const id = deleteProject.id;
-    try {
-      await flushPendingComments();
-      const state = await window.reviewAPI.deleteProject(id);
-      for (const item of reviews) if (item.projectId === id) deletedReviewIds.current.add(item.id);
-      setProjects(state.projects);
-      setReviews(state.reviews);
-      localStorage.removeItem(`branchline.selectedReview.${id}`);
-      if (selectedProjectRef.current === id) void selectProject(state.projects[0]?.id || null);
-      setDeleteProject(null);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setRemoving(false);
-    }
-  }
 
   const copyButton = (inToolbar = false) => (
     <CopyFeedbackButton
@@ -347,8 +272,7 @@ export function ReviewWorkspace() {
                       loadingRepositories={remoteLoading ? loadingRepositories : undefined}
                       reviewLoading={remoteLoading}
                       onRemote={(state) => {
-                        if (!deletedReviewIds.current.has(review.id))
-                          setRemoteStates((previous) => ({ ...previous, [review.id]: state }));
+                        updateRemoteState(review.id, state);
                       }}
                       onChanged={remoteChanged}
                       onReanchor={beginReanchor}
@@ -406,7 +330,8 @@ export function ReviewWorkspace() {
                 <ReviewWorkbench
                   view={view}
                   actions={actions}
-                  data={data}
+                  reviewedVersions={data.getReviewedVersions(view.viewKey)}
+                  onOrderChange={(ids) => data.recordExplorerOrder(view.viewKey, ids)}
                   preferences={preferences}
                   theme={resolvedTheme}
                   showFeedback={showFeedback}
@@ -419,107 +344,12 @@ export function ReviewWorkspace() {
           )}
         </main>
       </div>
-      <div hidden={showUpdates}>
-        {showAddProject && (
-          <AddProjectDialog onClose={() => setShowAddProject(false)} onCreated={projectCreated} />
-        )}
-        {integrationProject && (
-          <ProjectIntegrationDialog
-            key={integrationProject.id}
-            project={integrationProject}
-            onClose={() => setIntegrationProject(null)}
-            onSaved={loadIntegrations}
-            onAccounts={() => {
-              setIntegrationProject(null);
-              void openSettings('bitbucket');
-            }}
-          />
-        )}
-        {cleanupProject && (
-          <ClosedReviewCleanup
-            key={cleanupProject.id}
-            project={cleanupProject}
-            reviews={reviews.filter((item) => item.projectId === cleanupProject.id && item.remote)}
-            onClose={() => {
-              setCleanupProject(null);
-              requestAnimationFrame(() =>
-                document.querySelector<HTMLButtonElement>('[aria-label="Workspace menu"]')?.focus(),
-              );
-            }}
-            onRemoved={closedReviewsRemoved}
-          />
-        )}
-        {showPullRequests && project && (
-          <PullRequestsDialog
-            key={project.id}
-            project={project}
-            onClose={() => setShowPullRequests(false)}
-            onOpened={remoteOpened}
-            onSettings={() => {
-              setShowPullRequests(false);
-              setIntegrationProject(project);
-            }}
-          />
-        )}
-        {showNewReview && project && (
-          <NewReviewDialog
-            key={project.id}
-            project={project}
-            onClose={() => setShowNewReview(false)}
-            onCreated={(created) => {
-              contexts.current[created.id] = reviewContextKey(created);
-              setReviews((previous) => mergeReview(previous, created));
-              setProjects((previous) =>
-                previous.map((item) =>
-                  item.id === created.projectId ? { ...item, defaultBaseBranch: created.baseBranch } : item,
-                ),
-              );
-              void selectReview(created.id);
-              setShowNewReview(false);
-            }}
-          />
-        )}
-        {settingsProject && (
-          <ProjectSettingsDialog
-            project={settingsProject}
-            currentTarget={
-              reviews.find((item) => item.projectId === settingsProject.id && item.kind === 'current')
-                ?.baseBranch || ''
-            }
-            onClose={() => setSettingsProject(null)}
-            onUpdated={(updated) => {
-              setProjects((previous) => previous.map((item) => (item.id === updated.id ? updated : item)));
-              setSettingsProject(null);
-            }}
-            onRemove={() => {
-              setDeleteProject(settingsProject);
-              setSettingsProject(null);
-            }}
-          />
-        )}
-        {deleteProject && (
-          <ConfirmDeletionDialog
-            target={{
-              project: deleteProject,
-              reviewCount: reviews.filter(
-                (item) => item.projectId === deleteProject.id && item.kind === 'saved',
-              ).length,
-            }}
-            removing={removing}
-            onClose={() => setDeleteProject(null)}
-            onConfirm={() => void confirmDeleteProject()}
-          />
-        )}
-        {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
-        {deleteReview && (
-          <ConfirmDeletionDialog
-            target={{ review: deleteReview }}
-            removing={removing}
-            onClose={() => setDeleteReview(null)}
-            onConfirm={() => void confirmDelete()}
-          />
-        )}
-      </div>
+      <ReviewDialogs
+        workspace={workspace}
+        dialogs={dialogs}
+        project={project}
+        onClosedReviewsRemoved={closedReviewsRemoved}
+      />
     </>
   );
 }

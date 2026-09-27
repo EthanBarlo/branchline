@@ -18,13 +18,13 @@ export function useReviewView({ workspace, data, preferences }: ReviewViewOption
   const {
     remoteStates,
     reviewMetadata,
-    deletedReviewIds,
+    isReviewRemoved,
     snapshots,
     remoteLoads,
     refreshing,
     selectedFiles,
-    knownApprovals,
-    setSelectedFiles,
+    getReviewedVersions,
+    selectFile,
   } = data;
   const { filter } = preferences;
   const [jiraLinks, setJiraLinks] = useState<Record<string, { key: string; url: string } | null>>({});
@@ -55,12 +55,10 @@ export function useReviewView({ workspace, data, preferences }: ReviewViewOption
     void window.reviewAPI
       .getJiraTicketLink(id)
       .then((link) => {
-        if (live && !deletedReviewIds.current.has(id))
-          setJiraLinks((previous) => ({ ...previous, [id]: link }));
+        if (live && !isReviewRemoved(id)) setJiraLinks((previous) => ({ ...previous, [id]: link }));
       })
       .catch(() => {
-        if (live && !deletedReviewIds.current.has(id))
-          setJiraLinks((previous) => ({ ...previous, [id]: null }));
+        if (live && !isReviewRemoved(id)) setJiraLinks((previous) => ({ ...previous, [id]: null }));
       });
     return () => {
       live = false;
@@ -130,14 +128,13 @@ export function useReviewView({ workspace, data, preferences }: ReviewViewOption
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
   const approved = Boolean(review && selectedFile && isApproved(review, selectedFile));
-  const priorApproval =
-    review && selectedFile ? knownApprovals.current[viewKey]?.[selectedFile.id] : undefined;
+  const priorApproval = review && selectedFile ? getReviewedVersions(viewKey)[selectedFile.id] : undefined;
   const staleApproval = Boolean(priorApproval && selectedFile && !approved);
 
   useEffect(() => {
     if (!review || filter !== 'unreviewed' || !selectedFile || !historicalFiles[selectedFile.id]) return;
     const nextId = nextPendingFile(pendingReviewFiles, review)?.id || '';
-    setSelectedFiles((previous) => ({ ...previous, [viewKey]: nextId }));
+    selectFile(review, nextId);
   }, [review, filter, selectedFile, historicalFiles, pendingReviewFiles, viewKey]);
 
   async function openJira() {

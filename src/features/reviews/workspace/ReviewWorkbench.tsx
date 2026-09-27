@@ -5,14 +5,14 @@ import { DiffWorkspace } from '../DiffWorkspace';
 import { FeedbackPanel } from '../FeedbackPanel';
 import { FileSidebar } from '../FileSidebar';
 import type { ReviewActions } from '../session/useReviewActions';
-import type { ReviewData } from '../session/useReviewData';
 import type { ReviewView } from '../session/useReviewView';
 import type { useReviewViewPreferences } from '../session/useReviewViewPreferences';
 
 type ReviewWorkbenchProps = {
   view: ReviewView;
   actions: ReviewActions;
-  data: ReviewData;
+  reviewedVersions: Readonly<Record<string, string>>;
+  onOrderChange: (ids: string[]) => void;
   preferences: ReturnType<typeof useReviewViewPreferences>;
   theme: ResolvedTheme;
   showFeedback: boolean;
@@ -24,7 +24,8 @@ type ReviewWorkbenchProps = {
 export function ReviewWorkbench({
   view,
   actions,
-  data,
+  reviewedVersions,
+  onOrderChange,
   preferences,
   theme,
   showFeedback,
@@ -80,7 +81,6 @@ export function ReviewWorkbench({
     resizingFiles,
     setResizingFiles,
   } = preferences;
-  const { knownApprovals, explorerOrder } = data;
   if (!review) return null;
 
   return (
@@ -95,7 +95,7 @@ export function ReviewWorkbench({
           files={files}
           selectedFileId={selectedFile?.id ?? null}
           historicalFiles={historicalFiles}
-          reviewedVersions={knownApprovals.current[viewKey] || {}}
+          reviewedVersions={reviewedVersions}
           pendingCount={pendingReviewFiles.length}
           approvedCount={approvedCount}
           additions={additions}
@@ -108,9 +108,7 @@ export function ReviewWorkbench({
           onQueryChange={setQuery}
           onSelectFile={selectFile}
           onReviewFiles={reviewFiles}
-          onOrderChange={(ids) => {
-            explorerOrder.current[viewKey] = ids;
-          }}
+          onOrderChange={onOrderChange}
           onNextUnreviewed={nextUnreviewed}
           onResizingChange={setResizingFiles}
         />

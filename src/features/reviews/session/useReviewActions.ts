@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DiffSide, Project, Review, ReviewFile } from '../../../../shared/types';
 import { reviewContextKey } from '../../../../shared/types';
 import { errorMessage } from '../../../lib/errorMessage';
 import { flushPendingComments } from '../diff/commentAutosave';
-import { approvalHistoryKey, isApproved, nextPendingFile, reviewViewKey } from './reviewSession';
+import { isApproved, nextPendingFile, reviewViewKey } from './reviewSession';
 import type { ReviewData } from './useReviewData';
 import type { useReviewViewPreferences } from './useReviewViewPreferences';
 
@@ -26,7 +26,6 @@ type ReviewActionsOptions = {
   files: ReviewFile[];
   selectedFile: ReviewFile | undefined;
   historicalFiles: Record<string, string>;
-  setProjects: Dispatch<SetStateAction<Project[]>>;
   setError: Dispatch<SetStateAction<string | null>>;
   viewPreferences: ReturnType<typeof useReviewViewPreferences>;
 };
@@ -38,33 +37,16 @@ export function useReviewActions({
   files,
   selectedFile,
   historicalFiles,
-  setProjects,
   setError,
   viewPreferences,
 }: ReviewActionsOptions) {
-  const [changingTarget, setChangingTarget] = useState(false);
   const [reanchorId, setReanchorId] = useState<string | null>(null);
   const [anchorRevision, setAnchorRevision] = useState(0);
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle');
   const [approvalBusy, setApprovalBusy] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { setQuery, setShowFiles, changeFilter } = viewPreferences;
-  const {
-    applyRefresh,
-    contexts,
-    deletedReviewIds,
-    explorerOrder,
-    knownApprovals,
-    latestFiles,
-    mounted,
-    mutate,
-    mutationVersions,
-    refresh,
-    selectedIdRef,
-    setSelectedFiles,
-    targetInFlight,
-    targetVersions,
-  } = data;
+  const { mutate, changingTarget, isCurrentContext, getExplorerOrder } = data;
   const viewKey = review ? reviewViewKey(review) : '';
   const approved = Boolean(review && selectedFile && isApproved(review, selectedFile));
   const pendingReviewFiles = files.filter((file) => !historicalFiles[file.id]);
@@ -79,35 +61,7 @@ export function useReviewActions({
   }, [setQuery]);
 
   async function changeCurrentTarget(target: string) {
-    if (!project || !review || review.kind !== 'current' || !target || targetInFlight.current.has(review.id))
-      return;
-    try {
-      await flushPendingComments();
-    } catch (reason) {
-      setError(errorMessage(reason));
-      return;
-    }
-    const id = review.id;
-    const projectId = project.id;
-    targetVersions.current[id] = (targetVersions.current[id] || 0) + 1;
-    targetInFlight.current.add(id);
-    setChangingTarget(true);
-    setError(null);
-    try {
-      const result = await window.reviewAPI.setCurrentTarget(projectId, target);
-      if (!mounted.current || deletedReviewIds.current.has(id)) return;
-      setProjects((previous) =>
-        previous.map((item) =>
-          item.id === projectId ? { ...item, defaultBaseBranch: result.review.baseBranch } : item,
-        ),
-      );
-      applyRefresh(id, result);
-    } catch (reason) {
-      if (selectedIdRef.current === id) setError(errorMessage(reason));
-    } finally {
-      targetInFlight.current.delete(id);
-      if (mounted.current) setChangingTarget(false);
-    }
+    if (project && review) await data.changeCurrentTarget(review, target);
   }
 
   async function addComment(selection: CommentSelection, body: string, commentId: string) {
@@ -168,10 +122,7 @@ export function useReviewActions({
   }
 
   async function remoteChanged() {
-    if (!review || deletedReviewIds.current.has(review.id)) return false;
-    mutationVersions.current[review.id] = (mutationVersions.current[review.id] || 0) + 1;
-    await refresh(review.id, true);
-    return !deletedReviewIds.current.has(review.id);
+    return review ? data.refreshAfterRemoteChange(review.id) : false;
   }
 
   async function reviewFiles(chosenFiles: ReviewFile[], markReviewed: boolean) {
@@ -182,43 +133,17 @@ export function useReviewActions({
       setError('Some selected files could not be loaded. Refresh them before marking them reviewed.');
       return;
     }
-    const chosenIds = new Set(chosenFiles.map((file) => file.id));
-    const activeId = selectedFile?.id;
-    // Retain the visible row order before reviewed rows disappear from the tree.
-    const order = explorerOrder.current[viewKey]?.slice();
     setApprovalBusy(true);
     setError(null);
     try {
-      await flushPendingComments();
-      const updated = await mutate((id, context) =>
-        window.reviewAPI.setApprovals(
-          id,
-          chosenFiles.map((file) => ({ fileId: file.id, fingerprint: file.fingerprint })),
-          markReviewed,
-          context,
-        ),
-      );
-      if (!markReviewed && knownApprovals.current[viewKey]) {
-        for (const id of chosenIds) delete knownApprovals.current[viewKey][id];
-        localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current));
-      }
-      if (
-        markReviewed &&
-        activeId &&
-        chosenIds.has(activeId) &&
-        mounted.current &&
-        selectedIdRef.current === review.id &&
-        contexts.current[review.id] === reviewContextKey(review)
-      ) {
-        const availableFiles = (latestFiles.current[viewKey] || files).filter(
-          (file) => !historicalFiles[file.id],
-        );
-        const nextId = nextPendingFile(availableFiles, updated, activeId, order)?.id || '';
-        // Keep any file the user chose while the approval was saving.
-        setSelectedFiles((previous) =>
-          previous[viewKey] === activeId ? { ...previous, [viewKey]: nextId } : previous,
-        );
-      }
+      await data.saveFileApprovals({
+        review,
+        files: chosenFiles,
+        reviewed: markReviewed,
+        activeFileId: selectedFile?.id,
+        availableFiles: files,
+        historicalFiles,
+      });
     } catch (reason) {
       setError(errorMessage(reason));
       throw reason;
@@ -244,12 +169,12 @@ export function useReviewActions({
     try {
       await flushPendingComments();
       await window.reviewAPI.copyFeedback(id, context);
-      if (selectedIdRef.current !== id || contexts.current[id] !== context) return;
+      if (!isCurrentContext(review)) return;
       setCopyState('copied');
       clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopyState('idle'), 2500);
     } catch (reason) {
-      if (selectedIdRef.current === id && contexts.current[id] === context) {
+      if (isCurrentContext(review)) {
         setError(errorMessage(reason));
         setCopyState('idle');
       }
@@ -260,8 +185,7 @@ export function useReviewActions({
     if (!review) return;
     try {
       await flushPendingComments();
-      if (selectedIdRef.current === review.id && contexts.current[review.id] === reviewContextKey(review))
-        setSelectedFiles((previous) => ({ ...previous, [viewKey]: id }));
+      data.selectFile(review, id);
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -269,12 +193,7 @@ export function useReviewActions({
 
   function nextUnreviewed() {
     if (!review) return;
-    const next = nextPendingFile(
-      pendingReviewFiles,
-      review,
-      selectedFile?.id,
-      explorerOrder.current[viewKey],
-    );
+    const next = nextPendingFile(pendingReviewFiles, review, selectedFile?.id, getExplorerOrder(viewKey));
     if (next) selectFile(next.id);
   }
 

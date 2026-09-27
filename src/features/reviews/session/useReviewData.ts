@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RemoteReviewLoadProgress, RemoteReviewState } from '../../../../shared/integrations';
 import type { Review, ReviewFile, ReviewRefresh, ReviewSnapshot } from '../../../../shared/types';
 import { reviewContextKey } from '../../../../shared/types';
 import { errorMessage } from '../../../lib/errorMessage';
+import { flushPendingComments } from '../diff/commentAutosave';
 import {
   approvalHistoryKey,
   mergeReview,
@@ -20,6 +21,7 @@ type ReviewDataOptions = {
   paused: boolean;
   updateBusyRef: RefObject<boolean>;
   onContextChange: () => void;
+  onTargetChanged: (projectId: string, baseBranch: string) => void;
   setError: Dispatch<SetStateAction<string | null>>;
 };
 
@@ -31,6 +33,7 @@ export function useReviewData({
   paused,
   updateBusyRef,
   onContextChange,
+  onTargetChanged,
   setError,
 }: ReviewDataOptions) {
   const [snapshots, setSnapshots] = useState<Record<string, ReviewSnapshot>>({});
@@ -39,6 +42,7 @@ export function useReviewData({
   >({});
   const [selectedFiles, setSelectedFiles] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
+  const [changingTarget, setChangingTarget] = useState(false);
   const [remoteStates, setRemoteStates] = useState<Record<string, RemoteReviewState>>({});
   const [remoteLoads, setRemoteLoads] = useState<Record<string, RemoteReviewLoadProgress>>({});
   const selectedIdRef = useRef(selectedReviewId);
@@ -59,11 +63,13 @@ export function useReviewData({
   const retireClosedReview = useRef<(result: ReviewRefresh) => Promise<boolean>>(async () => false);
   const mounted = useRef(true);
   const contextChangeRef = useRef(onContextChange);
+  const targetChangeRef = useRef(onTargetChanged);
 
   selectedIdRef.current = selectedReviewId;
   selectedProjectRef.current = selectedProjectId;
   latestReviews.current = reviews;
   contextChangeRef.current = onContextChange;
+  targetChangeRef.current = onTargetChanged;
 
   useEffect(() => {
     mounted.current = true;
@@ -286,31 +292,185 @@ export function useReviewData({
     }
   }, []);
 
+  const isMounted = useCallback(() => mounted.current, []);
+  const isReviewRemoved = useCallback((id: string) => deletedReviewIds.current.has(id), []);
+  const getSelection = useCallback(
+    () => ({ reviewId: selectedIdRef.current, projectId: selectedProjectRef.current }),
+    [],
+  );
+  const isCurrentContext = useCallback(
+    (review: Review) =>
+      selectedIdRef.current === review.id && contexts.current[review.id] === reviewContextKey(review),
+    [],
+  );
+  const getReviewedVersions = useCallback(
+    (viewKey: string): Readonly<Record<string, string>> => knownApprovals.current[viewKey] || {},
+    [],
+  );
+  const getExplorerOrder = useCallback((viewKey: string) => explorerOrder.current[viewKey]?.slice(), []);
+  const recordExplorerOrder = useCallback((viewKey: string, ids: string[]) => {
+    explorerOrder.current[viewKey] = [...ids];
+  }, []);
+  const selectFile = useCallback(
+    (review: Review, fileId: string) => {
+      if (!isCurrentContext(review)) return;
+      const viewKey = reviewViewKey(review);
+      setSelectedFiles((previous) => ({ ...previous, [viewKey]: fileId }));
+    },
+    [isCurrentContext],
+  );
+  const updateRemoteState = useCallback((id: string, state: RemoteReviewState) => {
+    if (!deletedReviewIds.current.has(id)) setRemoteStates((previous) => ({ ...previous, [id]: state }));
+  }, []);
+  const registerReview = useCallback(
+    (review: Review) => {
+      contexts.current[review.id] = reviewContextKey(review);
+      setReviews((previous) => mergeReview(previous, review));
+    },
+    [setReviews],
+  );
+  const registerReviews = useCallback(
+    (loaded: Review[]) => {
+      for (const review of loaded) contexts.current[review.id] = reviewContextKey(review);
+      setReviews(loaded);
+    },
+    [setReviews],
+  );
+  const markReviewsDeleted = useCallback((ids: Iterable<string>) => {
+    for (const id of ids) deletedReviewIds.current.add(id);
+  }, []);
+  const reconcileRemovedReviews = useCallback(
+    (remaining: Review[], confirmedIds: Iterable<string>) => {
+      const savedIds = new Set(remaining.map((review) => review.id));
+      const removed = new Set([
+        ...confirmedIds,
+        ...latestReviews.current.filter((review) => !savedIds.has(review.id)).map((review) => review.id),
+      ]);
+      markReviewsDeleted(removed);
+      if (!mounted.current) return null;
+      latestReviews.current = remaining;
+      setReviews(remaining);
+      forgetReviews(removed);
+      return removed;
+    },
+    [forgetReviews, markReviewsDeleted, setReviews],
+  );
+  const onReviewRefreshed = useCallback((handler: (result: ReviewRefresh) => Promise<boolean>) => {
+    retireClosedReview.current = handler;
+    return () => {
+      if (retireClosedReview.current === handler) retireClosedReview.current = async () => false;
+    };
+  }, []);
+
+  async function changeCurrentTarget(review: Review, target: string) {
+    if (review.kind !== 'current' || !target || targetInFlight.current.has(review.id)) return;
+    try {
+      await flushPendingComments();
+    } catch (reason) {
+      setError(errorMessage(reason));
+      return;
+    }
+    const id = review.id;
+    targetVersions.current[id] = (targetVersions.current[id] || 0) + 1;
+    targetInFlight.current.add(id);
+    setChangingTarget(true);
+    setError(null);
+    try {
+      const result = await window.reviewAPI.setCurrentTarget(review.projectId, target);
+      if (!mounted.current || deletedReviewIds.current.has(id)) return;
+      targetChangeRef.current(review.projectId, result.review.baseBranch);
+      applyRefresh(id, result);
+    } catch (reason) {
+      if (selectedIdRef.current === id) setError(errorMessage(reason));
+    } finally {
+      targetInFlight.current.delete(id);
+      if (mounted.current) setChangingTarget(false);
+    }
+  }
+
+  async function refreshAfterRemoteChange(id: string) {
+    if (deletedReviewIds.current.has(id)) return false;
+    mutationVersions.current[id] = (mutationVersions.current[id] || 0) + 1;
+    await refresh(id, true);
+    return !deletedReviewIds.current.has(id);
+  }
+
+  async function saveFileApprovals({
+    review,
+    files,
+    reviewed,
+    activeFileId,
+    availableFiles,
+    historicalFiles,
+  }: {
+    review: Review;
+    files: ReviewFile[];
+    reviewed: boolean;
+    activeFileId?: string;
+    availableFiles: ReviewFile[];
+    historicalFiles: Record<string, string>;
+  }) {
+    const viewKey = reviewViewKey(review);
+    const chosenIds = new Set(files.map((file) => file.id));
+    // Capture row order before reviewed rows disappear from the tree.
+    const order = explorerOrder.current[viewKey]?.slice();
+    await flushPendingComments();
+    const updated = await mutate((id, context) =>
+      window.reviewAPI.setApprovals(
+        id,
+        files.map((file) => ({ fileId: file.id, fingerprint: file.fingerprint })),
+        reviewed,
+        context,
+      ),
+    );
+    if (!reviewed && knownApprovals.current[viewKey]) {
+      for (const id of chosenIds) delete knownApprovals.current[viewKey][id];
+      localStorage.setItem(approvalHistoryKey, JSON.stringify(knownApprovals.current));
+    }
+    if (
+      reviewed &&
+      activeFileId &&
+      chosenIds.has(activeFileId) &&
+      mounted.current &&
+      isCurrentContext(review)
+    ) {
+      const available = (latestFiles.current[viewKey] || availableFiles).filter(
+        (file) => !historicalFiles[file.id],
+      );
+      const nextId = nextPendingFile(available, updated, activeFileId, order)?.id || '';
+      // Keep any file the user chose while the approval was saving.
+      setSelectedFiles((previous) =>
+        previous[viewKey] === activeFileId ? { ...previous, [viewKey]: nextId } : previous,
+      );
+    }
+  }
+
   return {
     snapshots,
     reviewMetadata,
     selectedFiles,
-    setSelectedFiles,
     refreshing,
-    setRefreshing,
+    changingTarget,
     remoteStates,
-    setRemoteStates,
     remoteLoads,
-    selectedIdRef,
-    selectedProjectRef,
-    deletedReviewIds,
-    targetInFlight,
-    targetVersions,
-    contexts,
-    mutationVersions,
-    latestFiles,
-    explorerOrder,
-    knownApprovals,
-    latestReviews,
-    retireClosedReview,
-    mounted,
+    isMounted,
+    isReviewRemoved,
+    getSelection,
+    isCurrentContext,
+    getReviewedVersions,
+    getExplorerOrder,
+    recordExplorerOrder,
+    selectFile,
+    updateRemoteState,
+    registerReview,
+    registerReviews,
+    markReviewsDeleted,
+    reconcileRemovedReviews,
+    onReviewRefreshed,
+    changeCurrentTarget,
+    refreshAfterRemoteChange,
+    saveFileApprovals,
     initializeReviews,
-    applyRefresh,
     refresh,
     mutate,
     forgetReviews,
