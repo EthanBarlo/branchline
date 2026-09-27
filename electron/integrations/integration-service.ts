@@ -1,3 +1,6 @@
+import { JiraTicketService } from './jira/jira-ticket-service';
+import { ClosedReviewService } from './bitbucket/closed-review-service';
+import { validateIntegrationLink } from './integration-links';
 import type { NewComment, Review, ReviewSnapshot, ReviewRefresh } from '../../shared/types';
 import { currentReviewId, reviewContextKey } from '../../shared/types';
 import type {
@@ -7,7 +10,6 @@ import type {
   ConnectionInput,
   IntegrationState,
   ProjectIntegration,
-  PullRequest,
   PullRequestFilter,
   PullRequestRef,
   ReanchorInput,
@@ -17,7 +19,6 @@ import type {
   RemoteSnapshotResult,
 } from '../../shared/integrations';
 import { isMergeComplete } from '../../shared/integrations';
-import { extractJiraTicketKey, jiraTicketUrl } from '../../shared/jira';
 import { BitbucketClient } from './bitbucket/bitbucket-client';
 import { ConnectionManager, type ConnectionCredentials } from './connection-manager';
 import { IntegrationStore } from './integration-store';
@@ -31,7 +32,6 @@ import { PublicationService } from './bitbucket/publication-service';
 import { MergeService } from './bitbucket/merge-service';
 import { BranchReviewService } from './bitbucket/branch-review-service';
 import { inspectRepo } from '../git/repository';
-import type { JiraBrowserTarget } from './jira/jira-browser';
 
 export interface IntegrationDependencies {
   client?: (connectionId: string) => BitbucketClient;
@@ -44,8 +44,6 @@ export interface IntegrationDependencies {
 
 export class IntegrationService {
   private pending = new Map<string, Promise<unknown>>();
-  private ticketChanges = new Map<string, Promise<unknown>>();
-  private legacyTicketBranches = new Map<string, string>();
   private localRefreshes = new Map<string, Set<Promise<unknown>>>();
   private connectionChange: Promise<unknown> | null = null;
   private snapshots = new Map<string, ReviewSnapshot>();
@@ -60,6 +58,8 @@ export class IntegrationService {
   private publication: PublicationService;
   private merger: MergeService;
   private branches: BranchReviewService;
+  private jira: JiraTicketService;
+  private closedReviews: ClosedReviewService;
   private readonly client: (id: string) => BitbucketClient;
   constructor(
     private readonly reviews: ReviewStore,
@@ -69,14 +69,6 @@ export class IntegrationService {
     pointers: PointerService,
     private readonly dependencies: IntegrationDependencies = {},
   ) {
-    for (const review of reviews.getState().reviews) {
-      if (
-        review.kind === 'current' &&
-        state.ticket(review.id) !== undefined &&
-        state.ticketBranch(review.id) === undefined
-      )
-        this.legacyTicketBranches.set(review.id, review.featureBranch);
-    }
     this.client =
       dependencies.client ??
       ((id) => {
@@ -89,6 +81,19 @@ export class IntegrationService {
         }
         return client;
       });
+    this.jira = new JiraTicketService(
+      reviews,
+      state,
+      connections,
+      (id, operation) => this.trackLocalRefresh(id, operation),
+      dependencies.inspect,
+    );
+    this.closedReviews = new ClosedReviewService(
+      reviews,
+      state,
+      this.client,
+      (id) => this.closedReviewRemovals.get(id)?.check.name,
+    );
     this.branches = new BranchReviewService(reviews, state, this.client, (id) => this.snapshots.get(id));
     this.publication = new PublicationService(
       reviews,
@@ -148,17 +153,6 @@ export class IntegrationService {
     };
     void operation.then(cleanup, cleanup);
     return operation;
-  }
-  private serialTicket<T>(id: string, fn: () => Promise<T>): Promise<T> {
-    return this.trackLocalRefresh(id, () => {
-      const operation = (this.ticketChanges.get(id) ?? Promise.resolve()).catch(() => undefined).then(fn);
-      this.ticketChanges.set(id, operation);
-      const cleanup = () => {
-        if (this.ticketChanges.get(id) === operation) this.ticketChanges.delete(id);
-      };
-      void operation.then(cleanup, cleanup);
-      return operation;
-    });
   }
   get busy(): boolean {
     return this.pending.size > 0 || this.localRefreshes.size > 0 || this.connectionChange !== null;
@@ -615,18 +609,18 @@ export class IntegrationService {
   setCurrentTarget(projectId: string, target: string) {
     const id = currentReviewId(projectId);
     return this.trackLocalRefresh(id, async () => {
-      await this.reconcileCurrentTicket(id);
+      await this.jira.reconcileCurrentTicket(id);
       const result = await this.reviewService.setCurrentTarget(projectId, target);
-      await this.reconcileCurrentTicket(id);
+      await this.jira.reconcileCurrentTicket(id);
       return result;
     });
   }
   async refreshReview(id: string) {
     if (!this.reviews.getReview(id).remote)
       return this.trackLocalRefresh(id, async () => {
-        await this.reconcileCurrentTicket(id);
+        await this.jira.reconcileCurrentTicket(id);
         const result = await this.reviewService.refreshReview(id);
-        await this.reconcileCurrentTicket(id);
+        await this.jira.reconcileCurrentTicket(id);
         return result;
       });
     const existing = this.remoteRefreshes.get(id);
@@ -685,19 +679,17 @@ export class IntegrationService {
         binding?.pullRequests.length &&
         binding.pullRequests.every((pr) => ['MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state))
       ) {
-        result.closedReview = await this.serial(id, () => this.inspectClosedReview(id, true));
+        result.closedReview = await this.serial(id, () => this.closedReviews.inspect(id, true));
       }
       const steps =
-        this.loadProgress
-          .get(id)
-          ?.repositories.map((step) => ({
-            ...step,
-            phase: result.snapshot.repos.some(
-              (repo) => repo.relativePath === step.repository.relativePath && repo.error,
-            )
-              ? ('failed' as const)
-              : ('ready' as const),
-          })) ?? [];
+        this.loadProgress.get(id)?.repositories.map((step) => ({
+          ...step,
+          phase: result.snapshot.repos.some(
+            (repo) => repo.relativePath === step.repository.relativePath && repo.error,
+          )
+            ? ('failed' as const)
+            : ('ready' as const),
+        })) ?? [];
       this.emitLoad(id, steps, true, result);
       return result;
     });
@@ -794,46 +786,6 @@ export class IntegrationService {
       return this.removeReview(id);
     });
   }
-  private closedReviewCheck(id: string): ClosedReviewCheck {
-    const review = this.reviews.getState().reviews.find((review) => review.id === id),
-      binding = this.state.review(id);
-    const commentIds = new Set([
-      ...(review?.comments.map((comment) => comment.id) ?? []),
-      ...Object.keys(binding?.publications ?? {}),
-    ]);
-    const unpublishedComments = [...commentIds].filter((commentId) => {
-      const comment = review?.comments.find((comment) => comment.id === commentId),
-        publication = binding?.publications[commentId];
-      if (!publication) return !!comment;
-      if (publication.state !== 'synced')
-        return (
-          !!comment ||
-          !!publication.remoteId ||
-          ['sending', 'unknown', 'conflict'].includes(publication.state)
-        );
-      const acknowledged = publication.acknowledged;
-      return comment
-        ? !acknowledged ||
-            acknowledged.deleted ||
-            comment.body !== acknowledged.body ||
-            comment.resolved !== acknowledged.resolved
-        : !!publication.remoteId && !acknowledged?.deleted;
-    }).length;
-    return {
-      reviewId: id,
-      name: review?.name ?? this.closedReviewRemovals.get(id)?.check.name ?? 'Review unavailable',
-      status: 'unavailable',
-      unpublishedComments,
-      pullRequests:
-        binding?.pullRequests.map((pr) => ({
-          repositoryPath: pr.repository.relativePath,
-          repoSlug: pr.repository.repoSlug,
-          id: pr.id,
-          url: pr.url,
-          state: 'UNCHECKED',
-        })) ?? [],
-    };
-  }
   private closedReviewBusyReason(id: string): string | undefined {
     const review = this.reviews.getState().reviews.find((review) => review.id === id);
     if (this.connectionChange) return 'Wait for the connection change to finish, then check again.';
@@ -842,266 +794,16 @@ export class IntegrationService {
     if (review && this.pending.has(`project:${review.projectId}`))
       return 'Wait for project integration settings to finish, then check again.';
   }
-  private async inspectClosedReview(id: string, automatic = false): Promise<ClosedReviewCheck> {
-    const result = this.closedReviewCheck(id),
-      review = this.reviews.getState().reviews.find((review) => review.id === id),
-      binding = this.state.review(id);
-    const blocked = (reason: string): ClosedReviewCheck => ({ ...result, status: 'blocked', reason });
-    if (!review) return { ...result, reason: 'This review is no longer saved in Branchline.' };
-    if (!review.remote || review.kind === 'current')
-      return blocked('Only saved Bitbucket reviews can be removed by this check.');
-    if (!binding?.pullRequests.length)
-      return blocked(
-        'This review has missing Bitbucket metadata. Open it to recover its repository links before removing it.',
-      );
-    const operation = binding.operation;
-    const unfinishedOperation =
-      operation &&
-      (operation.state !== 'complete' || (operation.action === 'merge' && !isMergeComplete(binding)));
-    if (
-      operation?.state === 'running' ||
-      operation?.items.some((item) => item.pointerState && item.pointerState !== 'ready')
-    ) {
-      return blocked(
-        'This review has an unfinished approval, merge or branch cleanup. Open the review and resume or reconcile that operation first.',
-      );
-    }
-    let client: BitbucketClient;
-    try {
-      client = this.client(binding.connectionId);
-    } catch (error) {
-      return {
-        ...result,
-        reason: `Reconnect this review’s original Bitbucket account and check again. ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-    const failures: string[] = [];
-    const freshPRs = new Map<string, PullRequest>();
-    await mapConcurrent(binding.pullRequests, 4, async (saved, index) => {
-      const item = result.pullRequests[index];
-      try {
-        const fresh = await client.getPullRequest(saved.repository, saved.id);
-        if (
-          fresh.id !== saved.id ||
-          fresh.repository.relativePath !== saved.repository.relativePath ||
-          fresh.repository.workspace.toLowerCase() !== saved.repository.workspace.toLowerCase() ||
-          fresh.repository.repoSlug.toLowerCase() !== saved.repository.repoSlug.toLowerCase() ||
-          (saved.repository.uuid && fresh.repository.uuid && saved.repository.uuid !== fresh.repository.uuid)
-        )
-          throw new Error('Bitbucket returned a different repository or PR identity.');
-        if (
-          fresh.sourceBranch !== saved.sourceBranch ||
-          fresh.targetBranch !== saved.targetBranch ||
-          fresh.unsupportedReason
-        )
-          throw new Error('The pull request branch comparison changed. Reopen and review its current scope.');
-        item.state = fresh.state;
-        freshPRs.set(saved.repository.relativePath, fresh);
-        if (!['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(fresh.state))
-          failures.push(
-            `${item.repoSlug} #${item.id}: Bitbucket returned an unrecognized PR state (${fresh.state || 'empty'}).`,
-          );
-      } catch (error) {
-        item.state = 'UNAVAILABLE';
-        failures.push(
-          `${item.repoSlug} #${item.id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    });
-    if (failures.length)
-      return {
-        ...result,
-        reason: `${failures.join(' ')} This review was kept; check the account’s access and try again.`,
-      };
-    if (result.pullRequests.some((pr) => pr.state === 'OPEN'))
-      return { ...result, status: 'open', reason: 'At least one PR in this review is still open.' };
-    const unfinished: string[] = [];
-    const rows = [...(binding.repositories ?? [])];
-    if (binding.repositories || automatic)
-      for (const pr of binding.pullRequests) {
-        if (!rows.some((row) => row.repository.relativePath === pr.repository.relativePath))
-          rows.push({
-            repository: pr.repository,
-            sourceBranch: pr.sourceBranch,
-            targetBranch: pr.targetBranch,
-            sourceHash: pr.sourceHash,
-            targetHash: pr.targetHash,
-            mergeBaseHash: pr.mergeBaseHash,
-            status: 'pull-request',
-            prId: pr.id,
-          });
-      }
-    const absentSources = new Set<string>();
-    await mapConcurrent(rows, 4, async (row) => {
-      const path = row.repository.relativePath,
-        label = path === '.' ? row.repository.repoSlug : path;
-      try {
-        await client.getRepository(row.repository);
-        const linked = freshPRs.get(path);
-        if (row.prId && (!linked || linked.id !== row.prId))
-          throw new Error('The saved PR link is incomplete. Refresh this review to recover it.');
-        if (
-          linked &&
-          (linked.repository.workspace.toLowerCase() !== row.repository.workspace.toLowerCase() ||
-            linked.repository.repoSlug.toLowerCase() !== row.repository.repoSlug.toLowerCase() ||
-            linked.sourceBranch !== row.sourceBranch ||
-            linked.targetBranch !== row.targetBranch)
-        )
-          throw new Error(
-            'The saved repository comparison no longer matches its PR. Reopen the review to recover its scope.',
-          );
-        const candidates = await client.findPullRequests(row.repository, row.sourceBranch);
-        const current = await mapConcurrent(candidates, 4, async (candidate) => {
-          const pr = await client.getPullRequest(row.repository, candidate.id);
-          if (
-            pr.id !== candidate.id ||
-            pr.repository.relativePath !== path ||
-            pr.repository.workspace.toLowerCase() !== row.repository.workspace.toLowerCase() ||
-            pr.repository.repoSlug.toLowerCase() !== row.repository.repoSlug.toLowerCase() ||
-            (row.repository.uuid && pr.repository.uuid && row.repository.uuid !== pr.repository.uuid) ||
-            pr.sourceBranch !== row.sourceBranch ||
-            pr.unsupportedReason ||
-            !['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state)
-          )
-            throw new Error(
-              'The branch PR lookup returned an unverified identity or state. Refresh to retry.',
-            );
-          return pr;
-        });
-        if (current.some((pr) => pr.state === 'OPEN')) {
-          unfinished.push(
-            `${label}: a PR for this branch is still open. Refresh or open that PR before removing this group.`,
-          );
-          return;
-        }
-        const source = await client.getBranch(row.repository, row.sourceBranch);
-        if (!source) absentSources.add(path);
-        if (source && row.sourceHash && source.hash !== row.sourceHash) {
-          unfinished.push(
-            `${label}: the source branch contains a different revision. Refresh and review the new work.`,
-          );
-          return;
-        }
-        if (linked) {
-          if (row.creation) {
-            unfinished.push(`${label}: PR creation needs attention. Refresh to reconcile it.`);
-            return;
-          }
-          if (source && row.cleanup && !['deleted', 'skipped'].includes(row.cleanup.state))
-            unfinished.push(`${label}: branch cleanup is unfinished. Resume the operation first.`);
-          return;
-        }
-        const capturedHead = row.sourceHash ?? row.creation?.sourceHash;
-        const hadChanges =
-          row.status === 'changes' ||
-          !!row.creation ||
-          (!!capturedHead && capturedHead !== row.mergeBaseHash);
-        if (hadChanges && capturedHead) {
-          const closed = (
-            await client.findPullRequests(row.repository, row.sourceBranch, [
-              'MERGED',
-              'DECLINED',
-              'SUPERSEDED',
-            ])
-          ).filter(
-            (pr) =>
-              pr.sourceBranch === row.sourceBranch &&
-              pr.targetBranch === row.targetBranch &&
-              pr.sourceHash === capturedHead &&
-              !pr.unsupportedReason,
-          );
-          if (closed.length === 1) {
-            const confirmed = await client.getPullRequest(row.repository, closed[0].id);
-            if (
-              confirmed.id !== closed[0].id ||
-              confirmed.repository.relativePath !== path ||
-              confirmed.repository.workspace.toLowerCase() !== row.repository.workspace.toLowerCase() ||
-              confirmed.repository.repoSlug.toLowerCase() !== row.repository.repoSlug.toLowerCase() ||
-              (row.repository.uuid &&
-                confirmed.repository.uuid &&
-                row.repository.uuid !== confirmed.repository.uuid) ||
-              confirmed.sourceHash !== capturedHead ||
-              confirmed.sourceBranch !== row.sourceBranch ||
-              confirmed.targetBranch !== row.targetBranch ||
-              confirmed.unsupportedReason ||
-              !['MERGED', 'DECLINED', 'SUPERSEDED'].includes(confirmed.state)
-            )
-              throw new Error('The matching closed PR changed while checking it. Refresh to retry.');
-            result.pullRequests.push({
-              repositoryPath: path,
-              repoSlug: row.repository.repoSlug,
-              id: confirmed.id,
-              url: confirmed.url,
-              state: confirmed.state,
-            });
-            if (source && row.cleanup && !['deleted', 'skipped'].includes(row.cleanup.state))
-              unfinished.push(`${label}: branch cleanup is unfinished. Resume the operation first.`);
-            return;
-          }
-          if (closed.length > 1) {
-            unfinished.push(
-              `${label}: multiple closed PRs match this work. Open the review to reconcile its PR links.`,
-            );
-            return;
-          }
-        }
-        if (row.creation) {
-          unfinished.push(
-            `${label}: PR creation is still unconfirmed. Reconcile it before removing the review.`,
-          );
-          return;
-        }
-        // Missing refs can retire a captured empty comparison, but never prove
-        // that previously unique commits were merged.
-        if (!source && !hadChanges) return;
-        const target = await client.getBranch(row.repository, row.targetBranch);
-        const head = source?.hash ?? capturedHead;
-        if (target && head && (await client.mergeBase(row.repository, head, target.hash)) === head) {
-          if (source && row.cleanup && !['deleted', 'skipped'].includes(row.cleanup.state))
-            unfinished.push(`${label}: branch cleanup is unfinished. Resume the operation first.`);
-          return;
-        }
-        unfinished.push(
-          `${label}: ${!source ? 'the source branch is missing, but its captured changes have not been confirmed merged' : !target ? `target branch “${row.targetBranch}” is missing, so its changes cannot be verified` : 'the branch still contains changes without a closed PR'}. This review was kept.`,
-        );
-      } catch (error) {
-        failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    });
-    if (failures.length)
-      return { ...result, reason: `${failures.join(' ')} This review was kept; refresh to retry.` };
-    if (
-      unfinishedOperation &&
-      (!rows.length ||
-        absentSources.size !== rows.length ||
-        operation.items.some(
-          (item) =>
-            !result.pullRequests.some(
-              (pr) => `${pr.repositoryPath}#${pr.id}` === item.prKey && pr.state === 'MERGED',
-            ),
-        ))
-    ) {
-      return blocked(
-        'This review has an unfinished approval, merge or branch cleanup. Open the review and resume or reconcile that operation first.',
-      );
-    }
-    if (unfinished.length) return blocked(unfinished.join(' '));
-    if (automatic && result.unpublishedComments)
-      return blocked(
-        'This review is closed in Bitbucket, but unpublished feedback is still saved in Branchline. Remove or publish that feedback, or use Clean up closed Bitbucket reviews to remove it explicitly.',
-      );
-    return { ...result, status: 'closed' };
-  }
   async checkClosedReview(id: string): Promise<ClosedReviewCheck> {
     if (typeof id !== 'string' || !id || ['__proto__', 'prototype', 'constructor'].includes(id))
       throw new Error('Choose a saved review to check.');
     const reason = this.closedReviewBusyReason(id);
-    if (reason) return { ...this.closedReviewCheck(id), status: 'blocked', reason };
+    if (reason) return { ...this.closedReviews.summary(id), status: 'blocked', reason };
     try {
-      return await this.serial(id, () => this.inspectClosedReview(id));
+      return await this.serial(id, () => this.closedReviews.inspect(id));
     } catch (error) {
       return {
-        ...this.closedReviewCheck(id),
+        ...this.closedReviews.summary(id),
         reason: error instanceof Error ? error.message : String(error),
       };
     }
@@ -1134,7 +836,7 @@ export class IntegrationService {
         receipt = this.closedReviewRemovals.get(id);
       if ((review && review.projectId !== projectId) || (receipt && receipt.projectId !== projectId)) {
         retained.push({
-          ...this.closedReviewCheck(id),
+          ...this.closedReviews.summary(id),
           status: 'blocked',
           reason: 'This review belongs to another project. Check it from that project’s review list.',
         });
@@ -1142,10 +844,10 @@ export class IntegrationService {
       }
       const reason = this.closedReviewBusyReason(id);
       if (reason) {
-        retained.push({ ...this.closedReviewCheck(id), status: 'blocked', reason });
+        retained.push({ ...this.closedReviews.summary(id), status: 'blocked', reason });
         return;
       }
-      let checked = this.closedReviewCheck(id);
+      let checked = this.closedReviews.summary(id);
       try {
         await this.serial(id, async () => {
           const saved = this.reviews.getState().reviews.find((review) => review.id === id);
@@ -1173,7 +875,7 @@ export class IntegrationService {
             });
             return;
           }
-          checked = await this.inspectClosedReview(id, options.automatic === true);
+          checked = await this.closedReviews.inspect(id, options.automatic === true);
           if (checked.status !== 'closed') {
             retained.push(checked);
             return;
@@ -1209,140 +911,23 @@ export class IntegrationService {
         await this.completeMergedReview(review.id);
     }
   }
-  async getJiraTicketSuggestions(id: string, query: string) {
-    const review = this.reviews.getReview(id);
-    const connectionId = this.state.project(review.projectId).jiraConnectionId;
-    if (!connectionId) throw new Error('Choose a Jira connection in Project integrations to search tickets.');
-    const result = await this.connections.getIssueSuggestions(connectionId, query);
-    if (this.state.project(review.projectId).jiraConnectionId !== connectionId)
-      throw new Error('The Jira connection changed. Search again.');
-    return result;
+  getJiraTicketSuggestions(id: string, query: string) {
+    return this.jira.getJiraTicketSuggestions(id, query);
   }
-  private currentTicket(id: string) {
-    return this.serialTicket(id, async () => {
-      const review = this.reviews.getReview(id);
-      const branch = (await (this.dependencies.inspect ?? inspectRepo)(review.repoPath)).currentBranch ?? '';
-      let key = this.state.ticket(id);
-      if (key !== undefined) {
-        // Older selections belong to the last checkout saved with Current.
-        const selectedBranch =
-          this.state.ticketBranch(id) ?? this.legacyTicketBranches.get(id) ?? review.featureBranch;
-        if (selectedBranch !== branch) {
-          await this.state.setTicket(id, '');
-          key = undefined;
-        } else if (this.state.ticketBranch(id) === undefined) await this.state.setTicket(id, key, branch);
-        this.legacyTicketBranches.delete(id);
-      }
-      return { key, branch };
-    });
+  setReviewTicket(id: string, key: string | null, expectedBranch?: string | null) {
+    return this.jira.setReviewTicket(id, key, expectedBranch);
   }
-  private async reconcileCurrentTicket(id: string): Promise<void> {
-    if (this.reviews.getReview(id).kind === 'current' && this.state.ticket(id) !== undefined)
-      await this.currentTicket(id);
+  getJiraTicketLink(id: string) {
+    return this.jira.getJiraTicketLink(id);
   }
-  private async jiraTicketKey(review: Review): Promise<string | null> {
-    const { key, branch } =
-      review.kind === 'current'
-        ? await this.currentTicket(review.id)
-        : { key: this.state.ticket(review.id), branch: review.featureBranch };
-    return key === undefined ? extractJiraTicketKey(branch) : key;
-  }
-  async setReviewTicket(id: string, key: string | null, expectedBranch?: string | null) {
-    const review = this.reviews.getReview(id);
-    if (
-      key !== null &&
-      (typeof key !== 'string' || (key.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key.trim())))
-    )
-      throw new Error('Enter a Jira issue key such as APP-123.');
-    if (
-      expectedBranch !== undefined &&
-      expectedBranch !== null &&
-      (typeof expectedBranch !== 'string' || expectedBranch.length > 1024 || expectedBranch.includes('\0'))
-    )
-      throw new Error('The Jira ticket branch context is invalid.');
-    const value = key === null ? null : key.trim().toUpperCase();
-    if (review.kind !== 'current') {
-      if (expectedBranch !== undefined)
-        throw new Error('A Jira ticket branch context is only valid for the Current review.');
-      await this.state.setTicket(id, value);
-      return;
-    }
-    await this.serialTicket(id, async () => {
-      const current = this.reviews.getReview(id);
-      const branch = (await (this.dependencies.inspect ?? inspectRepo)(current.repoPath)).currentBranch ?? '';
-      if (expectedBranch !== undefined && (expectedBranch ?? '') !== branch)
-        throw new Error('The checked-out branch changed. Reopen Jira before changing its ticket.');
-      await this.state.setTicket(id, value, branch);
-      this.legacyTicketBranches.delete(id);
-    });
-  }
-  /** Browser navigation uses saved site metadata, so it remains available during a merge or after token expiry. */
-  async getJiraTicketLink(id: string): Promise<{ key: string; url: string } | null> {
-    const review = this.reviews.getReview(id);
-    const project = this.state.project(review.projectId);
-    const connection = project.jiraConnectionId
-      ? this.connections
-          .list()
-          .find((value) => value.id === project.jiraConnectionId && value.kind === 'jira')
-      : undefined;
-    if (project.jiraConnectionId && !connection?.siteUrl)
-      throw new Error(
-        'The project’s Jira account is unavailable. Choose its Jira connection in Project integrations.',
-      );
-    const baseUrl = connection?.siteUrl || this.reviews.getSettings().jiraBaseUrl;
-    if (!baseUrl) return null;
-    const key = await this.jiraTicketKey(review);
-    return key ? { key: key.toUpperCase(), url: jiraTicketUrl(baseUrl, key) } : null;
-  }
-  async getJiraBrowserTarget(id: string): Promise<JiraBrowserTarget> {
-    const review = this.reviews.getReview(id);
-    const connectionId = this.state.project(review.projectId).jiraConnectionId;
-    const connection = this.connections
-      .list()
-      .find((value) => value.id === connectionId && value.kind === 'jira');
-    if (!connection?.siteUrl)
-      throw new Error('Choose a Jira connection in Project integrations before opening Jira in Branchline.');
-    const siteUrl = this.validateLink(connection.siteUrl);
-    const link = await this.getJiraTicketLink(id);
-    if (!link) throw new Error('Enter a Jira ticket key to open it in Branchline.');
-    if (
-      this.state.project(review.projectId).jiraConnectionId !== connectionId ||
-      new URL(link.url).origin !== new URL(siteUrl).origin
-    ) {
-      throw new Error('The project’s Jira connection changed. Open the ticket again.');
-    }
-    return {
-      connectionId: connection.id,
-      siteUrl,
-      url: this.validateLink(link.url),
-      key: link.key,
-      accountLabel: `${connection.displayName || connection.label} (${connection.email})`,
-    };
+  getJiraBrowserTarget(id: string) {
+    return this.jira.getJiraBrowserTarget(id);
   }
   getJiraIssue(id: string, override?: string) {
-    return this.trackLocalRefresh(id, async () => {
-      const review = this.reviews.getReview(id);
-      const settings = this.state.project(review.projectId);
-      if (!settings.jiraConnectionId) throw new Error('Choose a Jira connection in project integrations.');
-      const detected = await this.jiraTicketKey(review);
-      const key = override || detected;
-      if (!key || !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(key))
-        throw new Error('Enter a Jira ticket key to show its details.');
-      return this.connections.getIssue(settings.jiraConnectionId, key.toUpperCase());
-    });
+    return this.jira.getJiraIssue(id, override);
   }
   validateLink(value: string): string {
-    if (typeof value !== 'string' || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value))
-      throw new Error('Choose a valid HTTPS integration link.');
-    let url: URL;
-    try {
-      url = new URL(value);
-    } catch {
-      throw new Error('Choose a valid HTTPS integration link.');
-    }
-    if (url.protocol !== 'https:' || url.username || url.password)
-      throw new Error('Choose a valid HTTPS integration link without embedded credentials.');
-    return url.href;
+    return validateIntegrationLink(value);
   }
   deleteReview(id: string) {
     return this.serial(id, async () => {
@@ -1372,7 +957,7 @@ export class IntegrationService {
     this.snapshots.delete(id);
     this.loadProgress.delete(id);
     this.failedLoads.delete(id);
-    this.legacyTicketBranches.delete(id);
+    this.jira.forgetReview(id);
   }
   async deleteProject(id: string) {
     if (this.busy) throw new Error('Wait for current integration work before removing a project.');
