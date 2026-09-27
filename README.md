@@ -24,6 +24,16 @@ npm start
 
 React component styles use StyleX. Define new component rules with `stylex.create` beside the component and apply them with `stylex.props`. Shared visual roles and sizing constants live in `src/tokens.stylex.ts`; `src/appThemes.ts` supplies the dark palette. The selected theme is applied to the document before React starts. Renderer styles live with their components in `src/features` and `src/ui`. Semantic DOM classes remain where desktop tests and integrations use them. `src/styles.css` contains only global reset and browser or Electron rules. `npm run lint:styles` checks StyleX rules; `npm run format:check` checks component formatting. Both run during `npm run build`.
 
+## Renderer architecture
+
+Navigation uses TanStack Router with routes in `src/routes` and a generated `src/routeTree.gen.ts`. Run `npm run routes:generate` after adding routes; development and build commands also generate the tree. Keep styles and implementation in their feature folders, with route files declaring destinations and layouts.
+
+`App.tsx` mounts the router. `AppShell` owns application chrome and navigation guards; `WorkspaceProvider` loads shared projects, reviews and settings; `WorkspaceLayout` keeps the review editor mounted while Settings is visible. Current and saved-review destinations select the review through route parameters. Settings sections use `/settings/$section`, with the return workspace stored in history state. Transient dialogs and file selection remain feature state.
+
+Review data, actions, display derivation and retirement live in separate review hooks. Electron close/update handling lives in `useAppLifecycle`. The memory history adapter guards Back/Forward as well as new destinations, so navigation waits for pending comment saves and stays in place on failure. Memory navigation preserves Electron's trusted document URL. Use Alt+Left/Right or, on macOS, Command+[/] for history. Startup restores the last project and opens its Current review.
+
+Run `npm run test:desktop:routing` to exercise history, Settings state preservation and save failures against the built desktop app.
+
 ## App updates
 
 Installed macOS builds check GitHub Releases shortly after startup and every six hours, including when you return after a check becomes overdue. **Updates** beside the app name opens the update dialog; **Check for Updates…** is also in the native application menu. Download when convenient, continue reviewing while it downloads, then choose **Restart to update**. Branchline saves pending comments and finishes accepted review writes before restarting. Saving failures leave the workspace open for retry. Choosing **Later**, closing the dialog or quitting normally does not install an update.

@@ -1,5 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
-import { ArrowDownToLine, ArrowLeft, FileText, GitPullRequest, Sun, Ticket } from 'lucide-react';
+import { useBlocker } from '@tanstack/react-router';
+import { ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSettings } from '../../../shared/types';
 import type { UpdateState } from '../../../shared/updates';
@@ -10,6 +11,7 @@ import { DiagnosticSettings } from './DiagnosticSettings';
 import { JiraLinkSettings } from './JiraLinkSettings';
 import { JiraViewSettings } from './JiraViewSettings';
 import { UpdateDetails } from './UpdateControls';
+import { settingsSections as sections, type SettingsSection } from './settingsSections';
 
 const styles = stylex.create({
   scroll: { flex: '1', minWidth: 0, overflow: 'auto', overscrollBehavior: 'contain' },
@@ -137,17 +139,9 @@ const styles = stylex.create({
   },
 });
 
-export type SettingsSection = 'appearance' | 'jira' | 'bitbucket' | 'updates' | 'diagnostics';
-const sections = [
-  { id: 'appearance', label: 'Appearance', icon: Sun },
-  { id: 'jira', label: 'Jira', icon: Ticket },
-  { id: 'bitbucket', label: 'Bitbucket', icon: GitPullRequest },
-  { id: 'updates', label: 'Updates', icon: ArrowDownToLine },
-  { id: 'diagnostics', label: 'Diagnostics', icon: FileText },
-] as const;
-
 export function SettingsView({
-  initialSection = 'appearance',
+  section,
+  onSectionChange,
   showLegacyLinks = false,
   settings,
   ticket,
@@ -158,7 +152,8 @@ export function SettingsView({
   updateBridgeError,
   onUpdateAction,
 }: {
-  initialSection?: SettingsSection;
+  section: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
   showLegacyLinks?: boolean;
   settings: AppSettings;
   ticket: string | null;
@@ -169,7 +164,6 @@ export function SettingsView({
   updateBridgeError: string | null;
   onUpdateAction: (action: 'check' | 'download' | 'install') => void;
 }) {
-  const [section, setSection] = useState<SettingsSection>(initialSection);
   const [busy, setBusy] = useState({
     appearance: false,
     jira: false,
@@ -196,13 +190,16 @@ export function SettingsView({
     [],
   );
   const saving = Object.values(busy).some(Boolean);
+  const blockWhileSaving = useCallback(() => saving, [saving]);
+  useBlocker({ shouldBlockFn: blockWhileSaving, enableBeforeUnload: false });
   const scrollStyle = stylex.props(styles.scroll);
   useEffect(() => {
-    document.getElementById(`settings-tab-${initialSection}`)?.focus();
-  }, [initialSection]);
-  function select(next: SettingsSection) {
-    setSection(next);
+    document.getElementById(`settings-tab-${section}`)?.focus();
     scroll.current?.scrollTo({ top: 0 });
+  }, [section]);
+  function select(next: SettingsSection) {
+    if (saving || next === section) return;
+    onSectionChange(next);
   }
 
   return (
@@ -250,7 +247,6 @@ export function SettingsView({
                 if (next === null) return;
                 event.preventDefault();
                 select(sections[next].id);
-                document.getElementById(`settings-tab-${sections[next].id}`)?.focus();
               }}
             >
               <Icon size={16} />

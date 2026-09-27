@@ -7,7 +7,7 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc --noEmit && npm run lint:styles && npm run format:check && vite build && node scripts/build-electron.mjs",
+    "build": "npm run routes:generate && tsc --noEmit && npm run lint:styles && npm run format:check && vite build && node scripts/build-electron.mjs",
     "start": "electron .",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs",
     "test:desktop": "node scripts/smoke.mjs",
@@ -15,7 +15,7 @@
     "test:desktop:jira": "node scripts/smoke-jira.mjs",
     "test:desktop:integrations": "node scripts/smoke-integrations.mjs",
     "test:desktop:integration-backend": "node scripts/smoke-integration-backend.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run routes:generate && tsc --noEmit",
     "lint:styles": "eslint src electron/jira-browser-chrome.ts --ext .ts,.tsx",
     "package": "npm run build && node scripts/package-local.mjs",
     "dist": "npm run build && electron-builder",
@@ -23,12 +23,15 @@
     "release:verify": "node scripts/verify-release.mjs",
     "test:desktop:jira-browser": "node scripts/smoke-jira-browser.mjs",
     "format": "prettier --write src",
-    "format:check": "prettier --check src"
+    "format:check": "prettier --check src",
+    "routes:generate": "node scripts/generate-routes.mjs",
+    "test:desktop:routing": "node scripts/smoke-routing.mjs"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.1",
     "@pierre/trees": "1.0.0-beta.6",
     "@stylexjs/stylex": "^0.19.1",
+    "@tanstack/react-router": "^1.170.39",
     "electron-log": "5.4.3",
     "electron-updater": "6.8.9",
     "lucide-react": "^0.577.0",
@@ -38,6 +41,8 @@
   "devDependencies": {
     "@stylexjs/eslint-plugin": "^0.19.1",
     "@stylexjs/unplugin": "^0.19.1",
+    "@tanstack/router-generator": "^1.167.38",
+    "@tanstack/router-plugin": "^1.168.40",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
