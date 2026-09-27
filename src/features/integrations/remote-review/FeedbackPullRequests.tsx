@@ -3,7 +3,7 @@ import { ExternalLink, GitPullRequest } from 'lucide-react';
 import type { PullRequest } from '../../../../shared/integrations';
 import { pullRequestKey } from '../../../../shared/integrations';
 import { colors, spacing, typeScale } from '../../../theme/tokens.stylex';
-import { IntegrationLink } from '../IntegrationPrimitives';
+import { IntegrationLink } from '../IntegrationLink';
 
 export function FeedbackPullRequests({ pullRequests }: { pullRequests: PullRequest[] }) {
   if (!pullRequests.length) return null;

@@ -6,7 +6,8 @@ import { colors, fonts, radii, spacing, typeScale } from '../../../theme/tokens.
 import { Button } from '../../../ui/Button';
 import { DialogFooter, DialogIntroduction } from '../../../ui/Dialog';
 import { Spinner, spinStyle } from '../../../ui/Spinner';
-import { IntegrationDialog, IntegrationLink } from '../IntegrationPrimitives';
+import { IntegrationDialog } from '../IntegrationDialog';
+import { IntegrationLink } from '../IntegrationLink';
 
 import { branchStatus, loadStatus, repositoryRows } from '../RemoteRepositoryStatus';
 export function BranchReviewRepositories({
