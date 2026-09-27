@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import type { RemoteRepositoryLoad } from '../../../shared/integrations';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { spinStyle } from '../../ui/Spinner';
 
 import { loadStatus } from './RemoteRepositoryStatus';

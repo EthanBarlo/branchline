@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ProviderError, ProviderHttp } from '../electron/connection-manager';
-import { configureIntegrationDiagnostics, flushIntegrationDiagnostics, getIntegrationDiagnosticsPath, IntegrationDiagnostics, safeProviderEndpoint } from '../electron/integration-diagnostics';
+import { ProviderError, ProviderHttp } from '../electron/integrations/connection-manager';
+import { configureIntegrationDiagnostics, flushIntegrationDiagnostics, getIntegrationDiagnosticsPath, IntegrationDiagnostics, safeProviderEndpoint } from '../electron/integrations/integration-diagnostics';
 
 const bitbucket = 'https://api.bitbucket.org';
 const requestId = '12345678-1234-1234-1234-123456789012';

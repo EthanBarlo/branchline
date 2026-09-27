@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rename, rm, symlink } from 'node:fs/promises
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { buildSnapshot, inspectRepo } from '../electron/git';
+import { buildSnapshot, inspectRepo } from '../electron/git/repository';
 import type { ReviewConfig } from '../shared/types';
 
 const fixtures: string[] = [];

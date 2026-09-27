@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { BranchReviewRepository, MergeOperation, PullRequest } from '../../../shared/integrations';
 import { pullRequestKey } from '../../../shared/integrations';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { spinStyle } from '../../ui/Spinner';
 import { IntegrationLink, Problem } from './IntegrationPrimitives';
 import { repositoryMergeProgress } from './mergeProgress';

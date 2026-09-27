@@ -13,7 +13,7 @@ import {
 import type { ReactNode } from 'react';
 import type { RepoInspection, Review, ReviewSnapshot } from '../../../shared/types';
 import { currentReviewId } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 import { Select } from '../../ui/Select';
 import { Spinner } from '../../ui/Spinner';

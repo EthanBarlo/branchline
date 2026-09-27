@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { TriangleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 
 export function IntegrationError({
   children,

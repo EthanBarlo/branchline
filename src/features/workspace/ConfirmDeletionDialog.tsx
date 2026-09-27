@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { Trash2 } from 'lucide-react';
 import type { Project, Review } from '../../../shared/types';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { Dialog, DialogFooter } from '../../ui/Dialog';
 import { Spinner } from '../../ui/Spinner';

@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex';
-import { colors, typeScale } from '../../tokens.stylex';
+import { colors, typeScale } from '../../theme/tokens.stylex';
 import { Spinner } from '../../ui/Spinner';
 
 export function OpeningWorkspace({ projectName }: { projectName?: string }) {

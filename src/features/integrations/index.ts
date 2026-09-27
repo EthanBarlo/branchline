@@ -5,4 +5,4 @@ export { ProjectIntegrationDialog } from './ProjectIntegrationDialog';
 export { PublicationStatus } from './PublicationStatus';
 export { PullRequestsDialog } from './PullRequestsDialog';
 export { RemoteLoadRepositories } from './RemoteLoadRepositories';
-export { RemoteReviewControls } from './RemoteReviewControls';
+export { RemoteReviewControls } from './remote-review/RemoteReviewControls';

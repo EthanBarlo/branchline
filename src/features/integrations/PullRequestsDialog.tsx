@@ -4,11 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequest, PullRequestFilter } from '../../../shared/integrations';
 import { pullRequestKey } from '../../../shared/integrations';
 import type { Project, Review } from '../../../shared/types';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button, IconButton } from '../../ui/Button';
 import { DialogFooter, DialogNote } from '../../ui/Dialog';
 import { Spinner, spinStyle } from '../../ui/Spinner';
-import { flushPendingComments } from '../reviews/commentAutosave';
+import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import { IntegrationDialog, IntegrationLink, Problem, message } from './IntegrationPrimitives';
 
 export function PullRequestsDialog({

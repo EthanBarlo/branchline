@@ -1,11 +1,11 @@
 import * as stylex from '@stylexjs/stylex';
 import { useRef } from 'react';
 import { Navigate, Outlet, useBlocker } from '@tanstack/react-router';
-import { flushPendingComments } from '../reviews/commentAutosave';
+import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import { ErrorBanner } from '../reviews/ErrorBanner';
 import { UpdateDetails } from '../settings/UpdateControls';
 import { Dialog } from '../../ui/Dialog';
-import { errorMessage } from '../../ui/errorMessage';
+import { errorMessage } from '../../lib/errorMessage';
 import { AppChrome } from './AppChrome';
 import { WorkspaceLock } from './WorkspaceLock';
 import { WorkspaceProvider, useWorkspace } from './WorkspaceProvider';

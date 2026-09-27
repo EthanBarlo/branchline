@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { ArrowDownToLine, Check, RefreshCw, RotateCw, TriangleAlert } from 'lucide-react';
 import type { UpdateState } from '../../../shared/updates';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { Spinner } from '../../ui/Spinner';
 import { ReleaseNotes } from './ReleaseNotes';

@@ -8,7 +8,7 @@ import {
   GitFork,
   RefreshCw,
 } from 'lucide-react';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { Dialog as Modal } from '../../ui/Dialog';
 

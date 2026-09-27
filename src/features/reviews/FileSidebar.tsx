@@ -2,10 +2,10 @@ import * as stylex from '@stylexjs/stylex';
 import { ArrowRight, CircleCheck, Search, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Review, ReviewFile } from '../../../shared/types';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 import { Select } from '../../ui/Select';
-import { ReviewTree } from './ReviewTree';
+import { ReviewTree } from './tree/ReviewTree';
 
 export type FileFilter = 'all' | 'unreviewed' | 'commented';
 

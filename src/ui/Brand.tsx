@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { GitCompareArrows } from 'lucide-react';
-import { colors, spacing } from '../tokens.stylex';
+import { colors, spacing } from '../theme/tokens.stylex';
 
 const styles = stylex.create({
   brand: {

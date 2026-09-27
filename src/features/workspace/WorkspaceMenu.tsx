@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { GitPullRequest, HelpCircle, Layers3, MoreHorizontal, Settings2, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { colors, radii, typeScale } from '../../tokens.stylex';
+import { colors, radii, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 
 const styles = stylex.create({

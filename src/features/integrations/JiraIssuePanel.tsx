@@ -3,12 +3,12 @@ import { ExternalLink, RefreshCw, Ticket, TriangleAlert } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { JiraIssue } from '../../../shared/integrations';
 import type { AppSettings, Review } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button, IconButton } from '../../ui/Button';
 import { DialogFooter } from '../../ui/Dialog';
 import { TextInput } from '../../ui/Field';
 import { Spinner, spinStyle } from '../../ui/Spinner';
-import { JiraBrowserDialog } from '../jira/JiraBrowserDialog';
+import { JiraBrowserDialog } from '../jira/browser/JiraBrowserDialog';
 import { IntegrationDialog, IntegrationLink, Problem, message } from './IntegrationPrimitives';
 
 function safeUrl(value: unknown): string | undefined {

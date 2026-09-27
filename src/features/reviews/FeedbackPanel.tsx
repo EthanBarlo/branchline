@@ -3,12 +3,12 @@ import { ArrowDownLeft, Check, FileCode2, MessageSquare, Trash2, X } from 'lucid
 import { useState } from 'react';
 import type { RemoteReviewState } from '../../../shared/integrations';
 import type { Review, ReviewFile } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
-import { errorMessage } from '../../ui/errorMessage';
+import { errorMessage } from '../../lib/errorMessage';
 import { Spinner } from '../../ui/Spinner';
 import { PublicationStatus } from '../integrations/PublicationStatus';
-import { flushPendingComments } from './commentAutosave';
+import { flushPendingComments } from './diff/commentAutosave';
 import { fileLocation } from './fileLocation';
 
 const panelIn = stylex.keyframes({

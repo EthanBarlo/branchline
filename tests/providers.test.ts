@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { ConnectionManager, ProviderHttp, type ConnectionCredentials, type SecureStorage } from '../electron/connection-manager';
-import { BitbucketClient } from '../electron/bitbucket-client';
-import { buildRemoteRepositorySnapshot, buildRemoteSnapshot } from '../electron/remote-snapshot';
-import { discoverRepositories, parseBitbucketRemote, validateRepositoryMappings } from '../electron/repository-mapping';
+import { ConnectionManager, ProviderHttp, type ConnectionCredentials, type SecureStorage } from '../electron/integrations/connection-manager';
+import { BitbucketClient } from '../electron/integrations/bitbucket/bitbucket-client';
+import { buildRemoteRepositorySnapshot, buildRemoteSnapshot } from '../electron/integrations/bitbucket/remote-snapshot';
+import { discoverRepositories, parseBitbucketRemote, validateRepositoryMappings } from '../electron/integrations/repository-mapping';
 import type { BranchReviewRepository, RepositoryMapping } from '../shared/integrations';
 
 const S = 'a'.repeat(40), D = 'b'.repeat(40), M = 'c'.repeat(40), CHILD = 'd'.repeat(40);

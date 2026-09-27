@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { GitFork } from 'lucide-react';
 import type { ReviewSnapshot } from '../../../shared/types';
-import { colors, fonts, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Dialog, DialogBody } from '../../ui/Dialog';
 import { repositoryName } from '../projects/repositoryName';
 

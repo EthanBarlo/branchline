@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { PointerService, type PointerPrepareInput } from '../electron/pointer-service';
+import { PointerService, type PointerPrepareInput } from '../electron/git/pointer-service';
 
 const fixtures: string[] = [];
 const identity = { name: 'Pointer Test', email: 'pointers@example.com' };

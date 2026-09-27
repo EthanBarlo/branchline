@@ -22,7 +22,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve('index.html'),
-        jiraBrowser: resolve('electron/jira-browser.html'),
+        jiraBrowser: resolve('src/jira-browser/jira-browser.html'),
       },
     },
   },

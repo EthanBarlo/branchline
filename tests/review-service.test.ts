@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ReviewService } from '../electron/review-service';
-import { ReviewStore } from '../electron/store';
+import { ReviewService } from '../electron/reviews/review-service';
+import { ReviewStore } from '../electron/reviews/review-store';
 import { currentReviewId, reviewContextKey } from '../shared/types';
 import type { NewComment, ReviewConfig, ReviewFile, ReviewSnapshot } from '../shared/types';
 

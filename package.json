@@ -16,7 +16,7 @@
     "test:desktop:integrations": "node scripts/smoke-integrations.mjs",
     "test:desktop:integration-backend": "node scripts/smoke-integration-backend.mjs",
     "typecheck": "npm run routes:generate && tsc --noEmit",
-    "lint:styles": "eslint src electron/jira-browser-chrome.ts --ext .ts,.tsx",
+    "lint:styles": "eslint src --ext .ts,.tsx",
     "package": "npm run build && node scripts/package-local.mjs",
     "dist": "npm run build && electron-builder",
     "test:desktop:updates": "node scripts/smoke-updates.mjs",

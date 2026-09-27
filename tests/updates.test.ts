@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { UpdateService, UPDATE_INTERVAL, newerStable, releaseNotesToText } from '../electron/update-service';
-import { InstallGate } from '../electron/install-gate';
-import { isTrustedReviewSender } from '../electron/ipc-trust';
-import { validateInstallLocation } from '../electron/install-location';
-import { createMacUpdateInstaller, installMacUpdate } from '../electron/mac-install';
+import { UpdateService, UPDATE_INTERVAL, newerStable, releaseNotesToText } from '../electron/updates/update-service';
+import { InstallGate } from '../electron/application/install-gate';
+import { isTrustedReviewSender } from '../electron/ipc/ipc-trust';
+import { validateInstallLocation } from '../electron/updates/install-location';
+import { createMacUpdateInstaller, installMacUpdate } from '../electron/updates/mac-install';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void;

@@ -2,10 +2,10 @@ import * as stylex from '@stylexjs/stylex';
 import { Check, FolderGit2, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import type { Project } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { DialogBody, DialogFooter, Dialog as Modal } from '../../ui/Dialog';
-import { errorMessage } from '../../ui/errorMessage';
+import { errorMessage } from '../../lib/errorMessage';
 import { FieldLabel, FormError, TextInput } from '../../ui/Field';
 import { Spinner } from '../../ui/Spinner';
 

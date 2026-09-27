@@ -3,9 +3,9 @@ import { Check, ChevronDown } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { jiraTicketUrl, normalizeJiraBaseUrl } from '../../../shared/jira';
 import type { AppSettings } from '../../../shared/types';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
-import { errorMessage as message } from '../../ui/errorMessage';
+import { errorMessage as message } from '../../lib/errorMessage';
 import { FormError } from '../../ui/Field';
 import { Spinner } from '../../ui/Spinner';
 

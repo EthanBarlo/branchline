@@ -1,8 +1,8 @@
 import * as stylex from '@stylexjs/stylex';
 import { useState, type ReactNode } from 'react';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
-import { errorMessage } from '../../ui/errorMessage';
+import { errorMessage } from '../../lib/errorMessage';
 
 export function IntegrationLink({
   url,

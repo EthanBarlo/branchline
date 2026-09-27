@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import type { CommentPublication } from '../../../shared/integrations';
 import type { ReviewComment } from '../../../shared/types';
-import { colors, typeScale } from '../../tokens.stylex';
+import { colors, typeScale } from '../../theme/tokens.stylex';
 
 export function PublicationStatus({
   publication,

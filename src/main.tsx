@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles.css';
-import { applyTheme, readBootTheme, resolveTheme } from './theme';
+import { applyTheme, readBootTheme, resolveTheme } from './theme/theme';
 
 applyTheme(resolveTheme(readBootTheme(), window.matchMedia('(prefers-color-scheme: dark)').matches));
 

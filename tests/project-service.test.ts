@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ProjectService } from '../electron/project-service';
-import { ReviewStore } from '../electron/store';
+import { ProjectService } from '../electron/projects/project-service';
+import { ReviewStore } from '../electron/reviews/review-store';
 import type { RepoInspection } from '../shared/types';
 
 test('a project starts without a target and saved reviews explicitly pin a branch', async () => {

@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JiraService } from '../electron/jira-service';
-import { ReviewStore } from '../electron/store';
+import { JiraService } from '../electron/integrations/jira/jira-service';
+import { ReviewStore } from '../electron/reviews/review-store';
 import { currentReviewId } from '../shared/types';
 
 test('Jira links use the fresh Current checkout and the saved review branch independently', async () => {

@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { ChevronDown, TriangleAlert } from 'lucide-react';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 
 export function RepositoryWarnings({ warnings }: { warnings: string[] }) {
   if (!warnings.length) return null;

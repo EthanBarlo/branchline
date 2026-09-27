@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isJiraBrowserURL, jiraBrowserPartition, validateJiraBrowserTarget } from '../electron/jira-browser-policy';
+import { isJiraBrowserURL, jiraBrowserPartition, validateJiraBrowserTarget } from '../electron/integrations/jira/jira-browser-policy';
 
 const target = { connectionId: 'jira-account-one', siteUrl: 'https://jira.example.test', url: 'https://jira.example.test/browse/APP-123', key: 'APP-123', accountLabel: 'Work account' };
 

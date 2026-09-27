@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex';
 import { FolderGit2, Plus, Settings2 } from 'lucide-react';
 import type { Project } from '../../../shared/types';
 import type { UpdateState } from '../../../shared/updates';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 import { UpdateButton } from '../settings/UpdateControls';
 

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
 import type { AppSettings } from '../../../shared/types';
-import { applyTheme, rememberTheme, resolveTheme } from '../../theme';
+import { applyTheme, rememberTheme, resolveTheme } from '../../theme/theme';
 
 export function useAppearance(theme: AppSettings['theme']) {
   const [systemDark, setSystemDark] = useState(

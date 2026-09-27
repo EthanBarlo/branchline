@@ -9,7 +9,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import type { BranchReviewRepository, PullRequest, RemoteRepositoryLoad } from '../../../shared/integrations';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 
 export function repositoryRows(
   pullRequests: PullRequest[],

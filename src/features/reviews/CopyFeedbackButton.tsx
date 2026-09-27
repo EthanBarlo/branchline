@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { CheckCheck, Clipboard } from 'lucide-react';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { Spinner } from '../../ui/Spinner';
 

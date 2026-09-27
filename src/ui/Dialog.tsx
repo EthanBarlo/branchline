@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex';
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, type HTMLAttributes, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { colors, radii, spacing, typeScale } from '../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../theme/tokens.stylex';
 
 const fadeIn = stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } });
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConnectionManager, ProviderError, type SecureStorage } from '../electron/connection-manager';
+import { ConnectionManager, ProviderError, type SecureStorage } from '../electron/integrations/connection-manager';
 
 const storage: SecureStorage = { isEncryptionAvailable: () => false, encryptString: () => { throw new Error('Session only'); }, decryptString: () => { throw new Error('Session only'); } };
 const json = (value: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } });

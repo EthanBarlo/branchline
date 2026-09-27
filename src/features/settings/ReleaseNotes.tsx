@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex';
 import { ChevronRight } from 'lucide-react';
 import { useMemo } from 'react';
 import { parseReleaseNotes } from '../../../shared/release-notes';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 
 const styles = stylex.create({
   content: {

@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { ArrowRight, ChevronDown, GitFork } from 'lucide-react';
 import type { ReviewSnapshot } from '../../../shared/types';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 
 type PointerChange = NonNullable<ReviewSnapshot['repos'][number]['pointers']>[number] & {
   repositoryPath: string;

@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import type { UpdateState } from '../../../shared/updates';
-import { colors, typeScale } from '../../tokens.stylex';
+import { colors, typeScale } from '../../theme/tokens.stylex';
 import { Spinner } from '../../ui/Spinner';
 
 export function WorkspaceLock({

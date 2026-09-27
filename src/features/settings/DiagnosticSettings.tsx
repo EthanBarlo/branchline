@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex';
 import { FolderOpen } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { IntegrationDiagnosticsInfo } from '../../../shared/integrations';
-import { colors, fonts, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, spacing, typeScale } from '../../theme/tokens.stylex';
 import { FormError } from '../../ui/Field';
 import { Spinner } from '../../ui/Spinner';
 

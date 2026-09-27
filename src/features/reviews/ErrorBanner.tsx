@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { TriangleAlert, X } from 'lucide-react';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 
 export function ErrorBanner({

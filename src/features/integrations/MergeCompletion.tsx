@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex';
 import { CircleCheck, ExternalLink } from 'lucide-react';
 import { useState } from 'react';
 import type { RemoteReviewState } from '../../../shared/integrations';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { DialogFooter } from '../../ui/Dialog';
 import { Spinner } from '../../ui/Spinner';

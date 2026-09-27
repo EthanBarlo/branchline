@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex';
-import { colors, typeScale } from '../../tokens.stylex';
+import { colors, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 
 export function ReanchorBanner({ onCancel }: { onCancel: () => void }) {

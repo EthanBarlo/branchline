@@ -3,11 +3,11 @@ import { CheckCheck, Circle, CircleCheck, FileCode2, RefreshCw } from 'lucide-re
 import type { ComponentProps } from 'react';
 import type { RemoteRepositoryLoad } from '../../../shared/integrations';
 import type { ReviewFile, ReviewSnapshot } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { Spinner } from '../../ui/Spinner';
 import { RemoteLoadRepositories } from '../integrations/RemoteLoadRepositories';
-import { DiffViewer } from './DiffViewer';
+import { DiffViewer } from './diff/DiffViewer';
 import { fileLocation } from './fileLocation';
 
 interface DiffWorkspaceProps {

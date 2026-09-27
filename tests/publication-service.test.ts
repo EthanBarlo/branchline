@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InlinePayload, PullRequest, RemoteComment } from '../shared/integrations';
 import type { ReviewFile, ReviewSnapshot } from '../shared/types';
-import type { BitbucketClient } from '../electron/bitbucket-client';
-import { PublicationService, inlinePayload } from '../electron/publication-service';
-import { ReviewStore } from '../electron/store';
-import { IntegrationStore } from '../electron/integration-store';
+import type { BitbucketClient } from '../electron/integrations/bitbucket/bitbucket-client';
+import { PublicationService, inlinePayload } from '../electron/integrations/bitbucket/publication-service';
+import { ReviewStore } from '../electron/reviews/review-store';
+import { IntegrationStore } from '../electron/integrations/integration-store';
 
 const hash = (value: string) => value.repeat(40);
 const basePR: PullRequest = { id: 7, repository: { relativePath: '.', workspace: 'team', repoSlug: 'app' }, title: 'Feature', url: 'https://bitbucket.org/team/app/pull-requests/7', sourceBranch: 'APP-123-feature', targetBranch: 'main', sourceHash: hash('a'), targetHash: hash('b'), author: { id: 'author', name: 'Author' }, reviewers: [], participants: [], state: 'OPEN', draft: false, mergeStrategies: ['merge_commit'] };

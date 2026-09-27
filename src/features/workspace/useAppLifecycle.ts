@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { UpdateAction, UpdateState } from '../../../shared/updates';
 import { updatesBusy } from '../../../shared/updates';
-import { errorMessage } from '../../ui/errorMessage';
-import { flushPendingComments } from '../reviews/commentAutosave';
+import { errorMessage } from '../../lib/errorMessage';
+import { flushPendingComments } from '../reviews/diff/commentAutosave';
 
 export function useAppLifecycle(onError: (message: string) => void) {
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);

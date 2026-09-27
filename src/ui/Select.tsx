@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { colors, fonts, radii, spacing, typeScale } from '../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../theme/tokens.stylex';
 
 const spin = stylex.keyframes({ to: { transform: 'rotate(360deg)' } });
 

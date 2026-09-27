@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { FolderOpen } from 'lucide-react';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Brand } from '../../ui/Brand';
 import { Button } from '../../ui/Button';
 

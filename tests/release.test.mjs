@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { load } from 'js-yaml';
-import { createMacUpdateInstaller, installMacUpdate } from '../electron/mac-install.ts';
+import { createMacUpdateInstaller, installMacUpdate } from '../electron/updates/mac-install.ts';
 import { validateReleaseVersion, verifyUpdateMetadata } from '../scripts/release-utils.mjs';
 
 function deferred() {

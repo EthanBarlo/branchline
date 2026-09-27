@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { forwardRef, type ButtonHTMLAttributes } from 'react';
-import { colors, radii, spacing, typeScale } from '../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../theme/tokens.stylex';
 
 const styles = stylex.create({
   button: {

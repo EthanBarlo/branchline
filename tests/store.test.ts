@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { formatFeedback, ReviewStore } from '../electron/store';
+import { formatFeedback, ReviewStore } from '../electron/reviews/review-store';
 import type { NewComment, ReviewSnapshot, ReviewFile } from '../shared/types';
 import { currentReviewId, reviewContextKey } from '../shared/types';
 

@@ -2,8 +2,8 @@ import * as stylex from '@stylexjs/stylex';
 import { Check, Monitor, Moon, Sun, TriangleAlert } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { AppSettings } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
-import { errorMessage as message } from '../../ui/errorMessage';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
+import { errorMessage as message } from '../../lib/errorMessage';
 import { Spinner } from '../../ui/Spinner';
 
 const themes = [

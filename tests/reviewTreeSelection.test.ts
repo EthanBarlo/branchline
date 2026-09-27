@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { FileTree } from '@pierre/trees';
 import type { ReviewFile } from '../shared/types';
-import { reviewFilePath } from "../src/features/reviews/reviewFileOrder";
-import { selectedReviewFiles } from "../src/features/reviews/reviewTreeSelection";
+import { reviewFilePath } from "../src/features/reviews/tree/reviewFileOrder";
+import { selectedReviewFiles } from "../src/features/reviews/tree/reviewTreeSelection";
 
 function file(path: string, repoRelativePath = '.'): ReviewFile {
   return { id: `${repoRelativePath}/${path}`, repoRelativePath, path, status: 'M', additions: 1, deletions: 1, oldContent: 'before', newContent: 'after', binary: false, fingerprint: `version:${path}`, baseCommit: 'base', headCommit: 'head', source: 'committed' };

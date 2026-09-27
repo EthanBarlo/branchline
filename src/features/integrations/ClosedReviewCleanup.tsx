@@ -12,11 +12,11 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClosedReviewCheck, ClosedReviewCleanupResult } from '../../../shared/integrations';
 import type { Project, Review } from '../../../shared/types';
-import { colors, fonts, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { DialogFooter, DialogIntroduction } from '../../ui/Dialog';
 import { Spinner, spinStyle } from '../../ui/Spinner';
-import { flushPendingComments } from '../reviews/commentAutosave';
+import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import { IntegrationDialog, IntegrationError, IntegrationLink } from './IntegrationPrimitives';
 
 type CleanupRow = {

@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { CircleCheck, TriangleAlert, X } from 'lucide-react';
-import { colors, spacing, typeScale } from '../../tokens.stylex';
+import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
 import { IconButton } from '../../ui/Button';
 
 export function ClosedReviewNotice({

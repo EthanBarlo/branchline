@@ -3,7 +3,7 @@ import { Check, Plus, RefreshCw, Settings2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { IntegrationState, ProjectIntegration } from '../../../shared/integrations';
 import type { Project } from '../../../shared/types';
-import { colors, radii, spacing, typeScale } from '../../tokens.stylex';
+import { colors, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button, IconButton } from '../../ui/Button';
 import { DialogFooter, DialogIntroduction } from '../../ui/Dialog';
 import { TextInput } from '../../ui/Field';

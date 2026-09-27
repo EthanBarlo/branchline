@@ -4,7 +4,7 @@ import stylex from '@stylexjs/eslint-plugin';
 export default [
   { ignores: ['src/routeTree.gen.ts'] },
   {
-    files: ['src/**/*.{ts,tsx}', 'electron/jira-browser-chrome.ts'],
+    files: ['src/**/*.{ts,tsx}', 'src/jira-browser/chrome.ts'],
     languageOptions: { parser, parserOptions: { ecmaFeatures: { jsx: true } } },
     plugins: { '@stylexjs': stylex },
     rules: {

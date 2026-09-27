@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AppSettings, Project, Review } from '../../../shared/types';
 import type { IntegrationState } from '../../../shared/integrations';
-import { readBootTheme } from '../../theme';
-import { errorMessage } from '../../ui/errorMessage';
+import { readBootTheme } from '../../theme/theme';
+import { errorMessage } from '../../lib/errorMessage';
 import { useAppearance } from './useAppearance';
 import { useAppLifecycle } from './useAppLifecycle';
 import { useWorkspaceNavigation } from './useWorkspaceNavigation';

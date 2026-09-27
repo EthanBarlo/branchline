@@ -1,0 +1,760 @@
+import {
+  FileTree as FileTreeModel,
+  prepareFileTreeInput,
+  themeToTreeStyles,
+  type ContextMenuOpenContext,
+} from '@pierre/trees';
+import { FileTree, useFileTree } from '@pierre/trees/react';
+import * as stylex from '@stylexjs/stylex';
+import { Check, CheckCheck, RotateCcw, Search, X } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
+import type { ReviewComment, ReviewFile } from '../../../../shared/types';
+import { colors, fonts, radii, spacing, typeScale } from '../../../theme/tokens.stylex';
+import { Spinner } from '../../../ui/Spinner';
+import { reviewFilePath } from './reviewFileOrder';
+import { selectedReviewFiles } from './reviewTreeSelection';
+
+interface ReviewTreeProps {
+  theme: 'light' | 'dark';
+  files: ReviewFile[];
+  selectedFileId: string | null;
+  approvals: Record<string, string>;
+  reviewedVersions: Record<string, string>;
+  historicalFiles?: Record<string, string>;
+  comments: ReviewComment[];
+  onSelect: (id: string) => void;
+  onReviewFiles: (files: ReviewFile[], approved: boolean) => Promise<void>;
+  reviewBusy: boolean;
+  loading?: boolean;
+  onOrderChange: (fileIds: string[]) => void;
+  filter: 'all' | 'unreviewed' | 'commented';
+  query: string;
+}
+
+const treeThemeColors = {
+  'sideBar.background': 'var(--branchline-panel)',
+  'sideBar.foreground': 'var(--branchline-text-default)',
+  'list.hoverBackground': 'var(--branchline-raised)',
+  'list.activeSelectionBackground': 'var(--branchline-border)',
+  'list.activeSelectionForeground': 'var(--branchline-text)',
+  'list.inactiveSelectionBackground': 'var(--branchline-raised)',
+  'list.inactiveSelectionForeground': 'var(--branchline-text)',
+  focusBorder: 'var(--branchline-focus)',
+};
+
+const darkTreeTheme = themeToTreeStyles({
+  type: 'dark',
+  bg: 'var(--branchline-panel)',
+  fg: 'var(--branchline-text-default)',
+  colors: {
+    ...treeThemeColors,
+    'gitDecoration.addedResourceForeground': '#99d79b',
+    'gitDecoration.modifiedResourceForeground': '#d5ba7f',
+    'gitDecoration.deletedResourceForeground': '#df9991',
+    'gitDecoration.renamedResourceForeground': '#91bed2',
+  },
+});
+
+const lightTreeTheme = themeToTreeStyles({
+  type: 'light',
+  bg: 'var(--branchline-panel)',
+  fg: 'var(--branchline-text-default)',
+  colors: {
+    ...treeThemeColors,
+    'gitDecoration.addedResourceForeground': '#267338',
+    'gitDecoration.modifiedResourceForeground': '#966400',
+    'gitDecoration.deletedResourceForeground': '#b44437',
+    'gitDecoration.renamedResourceForeground': '#256d91',
+  },
+});
+
+const rowDecorationColors = {
+  historical: 'var(--branchline-success-text)',
+  reviewed: 'var(--branchline-text-emphasis)',
+  changed: 'var(--branchline-warning-strong)',
+  pending: 'var(--branchline-text-quiet)',
+  count: 'var(--branchline-muted)',
+};
+
+const gitStatuses = { A: 'added', M: 'modified', D: 'deleted', R: 'renamed', T: 'modified' } as const;
+
+const styles = stylex.create({
+  fileTree: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: '1',
+    minHeight: 0,
+    height: '100%',
+    width: '100%',
+    overflow: 'hidden',
+  },
+  treeHost: {
+    display: 'block',
+    flex: '1',
+    minHeight: 0,
+    width: '100%',
+    height: 'auto',
+  },
+  empty: {
+    display: 'flex',
+    flex: '1',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+    minHeight: 0,
+    paddingBlock: '20px',
+    paddingInline: spacing.xxl,
+    boxSizing: 'border-box',
+    textAlign: 'center',
+    color: colors.textFaint,
+  },
+  emptyTitle: {
+    marginTop: 14,
+    fontSize: typeScale.body,
+    fontWeight: 500,
+    color: colors.textSecondary,
+  },
+  emptyDescription: {
+    marginTop: '7px',
+    marginRight: '0',
+    marginBottom: '0',
+    marginLeft: '0',
+    maxWidth: 190,
+    fontSize: typeScale.compact,
+    lineHeight: 1.7,
+    color: colors.textMuted,
+  },
+  selectionActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    minHeight: 31,
+    paddingBlock: '3px',
+    paddingInline: spacing.md,
+    borderTopWidth: '1px',
+    borderTopStyle: 'solid',
+    borderTopColor: colors.interactive,
+    borderBottomWidth: '1px',
+    borderBottomStyle: 'solid',
+    borderBottomColor: colors.hover,
+    backgroundColor: colors.surface,
+    color: colors.textTertiary,
+    fontSize: typeScale.small,
+  },
+  selectionCount: {
+    marginRight: 'auto',
+    whiteSpace: 'nowrap',
+  },
+  selectionButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    minHeight: 23,
+    paddingBlock: '3px',
+    paddingInline: '5px',
+    borderWidth: 0,
+    borderRadius: radii.sm,
+    backgroundColor: {
+      default: 'transparent',
+      ':hover:not(:disabled)': colors.hover,
+    },
+    color: {
+      default: colors.textDefault,
+      ':hover:not(:disabled)': colors.textStrong,
+    },
+    font: 'inherit',
+    whiteSpace: 'nowrap',
+    opacity: { default: 1, ':disabled': 0.35 },
+    outline: { default: 'none', ':focus-visible': `2px solid ${colors.focus}` },
+    outlineOffset: { default: 0, ':focus-visible': 1 },
+  },
+  actionError: {
+    display: 'flex',
+    gap: spacing.sm,
+    paddingBlock: '7px',
+    paddingInline: '9px',
+    backgroundColor: colors.dangerSurface,
+    color: colors.dangerText,
+    fontSize: typeScale.small,
+    lineHeight: 1.5,
+  },
+  actionErrorText: {
+    flex: '1',
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+  },
+  actionErrorDismiss: {
+    alignSelf: 'flex-start',
+    display: 'flex',
+    borderWidth: 0,
+    padding: spacing.xxs,
+    backgroundColor: 'transparent',
+    color: 'inherit',
+  },
+  menu: {
+    position: 'fixed',
+    zIndex: 210,
+    width: 208,
+    padding: 5,
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: colors.borderSelected,
+    borderRadius: radii.lg,
+    backgroundColor: colors.surface,
+    color: colors.textDefault,
+    boxShadow: `0 8px 28px ${colors.shadow}, 0 1px 0 ${colors.insetHighlight} inset`,
+    fontFamily: fonts.body,
+    fontSize: typeScale.compact,
+  },
+  menuLabel: {
+    paddingTop: '6px',
+    paddingRight: '8px',
+    paddingBottom: '7px',
+    paddingLeft: '8px',
+    color: colors.textQuiet,
+    fontSize: typeScale.small,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  menuButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: spacing.md,
+    width: '100%',
+    minHeight: 31,
+    paddingBlock: spacing.sm,
+    paddingInline: spacing.md,
+    borderWidth: 0,
+    borderRadius: radii.sm,
+    backgroundColor: {
+      default: 'transparent',
+      ':hover:not(:disabled)': colors.hover,
+      ':focus-visible': colors.hover,
+    },
+    color: {
+      default: 'inherit',
+      ':hover:not(:disabled)': colors.textStrong,
+      ':focus-visible': colors.textStrong,
+    },
+    textAlign: 'left',
+    font: 'inherit',
+    outline: { default: 'none', ':focus-visible': 'none' },
+    opacity: { default: 1, ':disabled': 0.35 },
+    cursor: { default: 'auto', ':disabled': 'default' },
+  },
+  menuIcon: {
+    color: colors.textSubtle,
+    flexShrink: 0,
+  },
+});
+
+function directoryPaths(paths: readonly string[]): string[] {
+  const directories = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let depth = 1; depth < parts.length; depth++) directories.add(`${parts.slice(0, depth).join('/')}/`);
+  }
+  return [...directories];
+}
+
+function samePaths(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+
+export function ReviewTree(props: ReviewTreeProps) {
+  const [selection, setSelection] = useState<readonly string[]>([]);
+  const [operationBusy, setOperationBusy] = useState(false);
+  const [error, setError] = useState('');
+  const modelRef = useRef<FileTreeModel | null>(null);
+  const selecting = useRef(false);
+  const mounted = useRef(true);
+  const selectionRequest = useRef(0);
+  const selectionAnchor = useRef<string | null>(null);
+  const lastOrder = useRef<string[] | null>(null);
+  const expansion = useRef(new Map<string, boolean>());
+  const previousDirectories = useRef<string[]>([]);
+  const commentCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const comment of props.comments)
+      if (!comment.resolved) counts.set(comment.fileId, (counts.get(comment.fileId) ?? 0) + 1);
+    return counts;
+  }, [props.comments]);
+  const query = props.query.trim().toLowerCase();
+  const visibleFiles = useMemo(
+    () =>
+      props.files.filter((file) => {
+        if (
+          props.filter === 'unreviewed' &&
+          (props.historicalFiles?.[file.id] || props.approvals[file.id] === file.fingerprint)
+        )
+          return false;
+        if (props.filter === 'commented' && !commentCounts.has(file.id)) return false;
+        return !query || reviewFilePath(file).toLowerCase().includes(query);
+      }),
+    [props.files, props.filter, props.approvals, props.historicalFiles, commentCounts, query],
+  );
+  const byPath = useMemo(
+    () => new Map(visibleFiles.map((file) => [reviewFilePath(file), file])),
+    [visibleFiles],
+  );
+  const pathsKey = JSON.stringify([...byPath.keys()]);
+  const paths = useMemo(() => [...byPath.keys()], [pathsKey]);
+  const preparedInput = useMemo(() => prepareFileTreeInput(paths), [paths]);
+  const directories = useMemo(() => directoryPaths(paths), [paths]);
+  const selectedFile = visibleFiles.find((file) => file.id === props.selectedFileId);
+  const activePath = selectedFile ? reviewFilePath(selectedFile) : null;
+  const latest = useRef({ props, byPath, commentCounts });
+  latest.current = { props, byPath, commentCounts };
+
+  function syncProjection() {
+    const tree = modelRef.current;
+    if (!tree || !mounted.current) return;
+    tree
+      .getFileTreeContainer()
+      ?.shadowRoot?.querySelector('[role="tree"]')
+      ?.setAttribute('aria-multiselectable', 'true');
+    const rows = tree.getVisibleRows(0, tree.getVisibleCount() - 1);
+    const ids = rows.flatMap((row) => {
+      const file = row.kind === 'file' ? latest.current.byPath.get(row.path) : undefined;
+      return file ? [file.id] : [];
+    });
+    if (lastOrder.current === null || !samePaths(ids, lastOrder.current)) {
+      lastOrder.current = ids;
+      latest.current.props.onOrderChange(ids);
+    }
+    const selected = tree.getSelectedPaths();
+    setSelection((previous) => (samePaths(previous, selected) ? previous : [...selected]));
+  }
+
+  function selectOnly(path: string) {
+    const tree = modelRef.current;
+    if (!tree) return;
+    selectionAnchor.current = path;
+    selecting.current = true;
+    try {
+      for (const selected of tree.getSelectedPaths())
+        if (selected !== path) tree.getItem(selected)?.deselect();
+      tree.getItem(path)?.select();
+    } finally {
+      selecting.current = false;
+    }
+    syncProjection();
+  }
+
+  const { model } = useFileTree({
+    preparedInput,
+    initialExpansion: 'closed',
+    initialExpandedPaths: directories,
+    initialSelectedPaths: activePath ? [activePath] : [],
+    flattenEmptyDirectories: true,
+    icons: { set: 'standard', colored: false },
+    density: 'default',
+    composition: {
+      contextMenu: {
+        enabled: true,
+        triggerMode: 'right-click',
+        onOpen: (item) => {
+          const tree = modelRef.current;
+          if (!tree || tree.getSelectedPaths().includes(item.path)) return;
+          selectOnly(item.path);
+          const file = latest.current.byPath.get(item.path);
+          if (file && file.id !== latest.current.props.selectedFileId) latest.current.props.onSelect(file.id);
+        },
+      },
+    },
+    onSelectionChange: () => {
+      if (selecting.current) return;
+      const request = ++selectionRequest.current;
+      // Pierre updates focus after selection. Read the endpoint after the
+      // pointer/keyboard handler completes, including upward Shift ranges.
+      queueMicrotask(() => {
+        if (!mounted.current || request !== selectionRequest.current) return;
+        const tree = modelRef.current;
+        if (!tree) return;
+        const selected = tree.getSelectedPaths();
+        const focused = tree.getFocusedPath();
+        const path =
+          focused && selected.includes(focused) && latest.current.byPath.has(focused)
+            ? focused
+            : [...selected].reverse().find((item) => latest.current.byPath.has(item));
+        const file = path ? latest.current.byPath.get(path) : undefined;
+        if (file && file.id !== latest.current.props.selectedFileId) latest.current.props.onSelect(file.id);
+      });
+    },
+    renderRowDecoration: ({ item }) => {
+      const file = latest.current.byPath.get(item.path);
+      if (!file) return null;
+      const reviewed = latest.current.props.approvals[file.id] === file.fingerprint;
+      const changed = !reviewed && Boolean(latest.current.props.reviewedVersions[file.id]);
+      const count = latest.current.commentCounts.get(file.id) ?? 0;
+      const historical = latest.current.props.historicalFiles?.[file.id];
+      const state = historical || (reviewed ? 'Reviewed' : changed ? 'Changed' : 'Unreviewed');
+      const decoration = rowDecorationColors;
+      return {
+        text: `${state}${count ? ` · ${count}` : ''}`,
+        parts: [
+          {
+            text: `${historical ? '' : reviewed ? '✓ ' : changed ? '↻ ' : ''}${state}`,
+            color: historical
+              ? decoration.historical
+              : reviewed
+                ? decoration.reviewed
+                : changed
+                  ? decoration.changed
+                  : decoration.pending,
+          },
+          ...(count ? [{ text: ` · ${count}`, color: decoration.count }] : []),
+        ],
+        title: [
+          historical || (changed ? 'Needs re-review' : state),
+          count ? `${count} open comment${count === 1 ? '' : 's'}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      };
+    },
+  });
+  modelRef.current = model;
+
+  useEffect(() => {
+    mounted.current = true;
+    const unsubscribe = model.subscribe(syncProjection);
+    syncProjection();
+    return () => {
+      mounted.current = false;
+      selectionRequest.current++;
+      unsubscribe();
+    };
+  }, [model]);
+
+  useEffect(() => {
+    for (const path of previousDirectories.current) {
+      const item = model.getItem(path);
+      if (item && 'isExpanded' in item) expansion.current.set(path, item.isExpanded());
+    }
+    const initialExpandedPaths = directories.filter((path) => expansion.current.get(path) !== false);
+    selecting.current = true;
+    try {
+      model.resetPaths({ preparedInput, initialExpandedPaths });
+    } finally {
+      selecting.current = false;
+    }
+    previousDirectories.current = directories;
+    syncProjection();
+  }, [model, preparedInput, directories]);
+
+  useEffect(() => {
+    model.setGitStatus(
+      visibleFiles.map((file) => ({ path: reviewFilePath(file), status: gitStatuses[file.status] })),
+    );
+    const host = model.getFileTreeContainer();
+    if (host) model.render({ fileTreeContainer: host });
+    syncProjection();
+  }, [
+    model,
+    visibleFiles,
+    props.approvals,
+    props.reviewedVersions,
+    props.historicalFiles,
+    props.theme,
+    commentCounts,
+  ]);
+
+  useEffect(() => {
+    if (!activePath) return;
+    if (selectionAnchor.current === null) selectionAnchor.current = activePath;
+    // An App update that echoes a Shift-click endpoint must retain the range.
+    // External selection (next file, feedback link) selects and reveals one file.
+    if (!model.getSelectedPaths().includes(activePath)) selectOnly(activePath);
+    const parts = activePath.split('/');
+    selecting.current = true;
+    try {
+      for (let depth = 1; depth < parts.length; depth++) {
+        const directory = model.getItem(`${parts.slice(0, depth).join('/')}/`);
+        if (directory && 'expand' in directory) directory.expand();
+      }
+      model.scrollToPath(activePath, { offset: 'nearest', focus: false });
+    } finally {
+      selecting.current = false;
+    }
+    syncProjection();
+  }, [model, activePath]);
+
+  const selectedFiles = selectedReviewFiles(selection, byPath).filter(
+    (file) => !props.historicalFiles?.[file.id],
+  );
+  const selectedDirectory = selection.some((path) => path.endsWith('/'));
+  const busy = operationBusy || props.reviewBusy;
+  const allReviewed =
+    selectedFiles.length > 0 && selectedFiles.every((file) => props.approvals[file.id] === file.fingerprint);
+  const noneReviewed = selectedFiles.every((file) => props.approvals[file.id] !== file.fingerprint);
+
+  async function reviewFiles(files: ReviewFile[], approved: boolean) {
+    files = files.filter((file) => !latest.current.props.historicalFiles?.[file.id]);
+    if (busy || files.length === 0) return;
+    setOperationBusy(true);
+    setError('');
+    try {
+      await latest.current.props.onReviewFiles(files, approved);
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (mounted.current) setOperationBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className={`review-file-tree review-file-tree-with-actions ${stylex.props(styles.fileTree).className}`}
+      onClickCapture={(event) => {
+        if (event.button !== 0) return;
+        const row = event.nativeEvent
+          .composedPath()
+          .find(
+            (node): node is HTMLElement => node instanceof HTMLElement && node.dataset.itemPath !== undefined,
+          );
+        const path = row?.dataset.itemPath;
+        if (!path) return;
+        if (!event.shiftKey) {
+          selectionAnchor.current = path;
+          return;
+        }
+        // Public item.select() does not reset Pierre's private range anchor.
+        // Keep Shift-click anchored to the active file after App-driven navigation.
+        const rows = model.getVisibleRows(0, model.getVisibleCount() - 1);
+        const end = rows.findIndex((item) => item.path === path);
+        if (end < 0) return;
+        const foundStart = rows.findIndex((item) => item.path === selectionAnchor.current);
+        const start = foundStart < 0 ? end : foundStart;
+        if (foundStart < 0) selectionAnchor.current = path;
+        const range = rows.slice(Math.min(start, end), Math.max(start, end) + 1);
+        const next = new Set(event.metaKey || event.ctrlKey ? model.getSelectedPaths() : []);
+        for (const item of range) next.add(item.path);
+        event.preventDefault();
+        event.stopPropagation();
+        selecting.current = true;
+        try {
+          for (const selected of model.getSelectedPaths())
+            if (!next.has(selected)) model.getItem(selected)?.deselect();
+          for (const selected of next) model.getItem(selected)?.select();
+          model.focusPath(path);
+        } finally {
+          selecting.current = false;
+        }
+        syncProjection();
+        const endpointOrder = end >= start ? [...range].reverse() : range;
+        const endpoint = endpointOrder.find((item) => byPath.has(item.path));
+        const file = endpoint ? byPath.get(endpoint.path) : undefined;
+        if (file && file.id !== props.selectedFileId) props.onSelect(file.id);
+      }}
+    >
+      {selectedFiles.length > 0 && (selectedFiles.length > 1 || selectedDirectory) && (
+        <div
+          className={`tree-selection-actions ${stylex.props(styles.selectionActions).className}`}
+          role="group"
+          aria-label="Selected file actions"
+        >
+          <span {...stylex.props(styles.selectionCount)} aria-live="polite">
+            {selectedFiles.length} selected
+          </span>
+          <button
+            {...stylex.props(styles.selectionButton)}
+            type="button"
+            aria-label="Mark selected files reviewed"
+            title="Mark selected files reviewed"
+            disabled={busy || allReviewed}
+            onClick={() => void reviewFiles(selectedFiles, true)}
+          >
+            {busy ? <Spinner size={12} /> : <Check size={12} />}
+            <span>Mark reviewed</span>
+          </button>
+          <button
+            {...stylex.props(styles.selectionButton)}
+            type="button"
+            aria-label="Mark selected files unreviewed"
+            title="Mark selected files unreviewed"
+            disabled={busy || noneReviewed}
+            onClick={() => void reviewFiles(selectedFiles, false)}
+          >
+            <RotateCcw size={12} />
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className={`tree-action-error ${stylex.props(styles.actionError).className}`} role="alert">
+          <span {...stylex.props(styles.actionErrorText)}>{error}</span>
+          <button
+            {...stylex.props(styles.actionErrorDismiss)}
+            type="button"
+            aria-label="Dismiss file review error"
+            onClick={() => setError('')}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
+      {visibleFiles.length === 0 ? (
+        <div className={`review-tree-empty ${stylex.props(styles.empty).className}`}>
+          {props.loading && !query ? (
+            <Spinner size={24} />
+          ) : props.filter === 'unreviewed' && !query ? (
+            <CheckCheck size={24} />
+          ) : (
+            <Search size={24} />
+          )}
+          <strong {...stylex.props(styles.emptyTitle)}>
+            {props.loading && !query
+              ? 'Loading files…'
+              : props.filter === 'unreviewed' && !query
+                ? 'All caught up'
+                : 'No matching files'}
+          </strong>
+          <p {...stylex.props(styles.emptyDescription)}>
+            {props.loading && !query
+              ? 'More repositories are still being checked.'
+              : props.filter === 'unreviewed' && !query
+                ? Object.keys(props.historicalFiles || {}).length
+                  ? 'No files need further review. Completed PR files remain under All files.'
+                  : 'Every changed file has been reviewed.'
+                : props.filter === 'commented' && !query
+                  ? 'Files with open comments will appear here.'
+                  : 'Try a different search or filter.'}
+          </p>
+        </div>
+      ) : (
+        <FileTree
+          model={model}
+          className={`review-tree-host ${stylex.props(styles.treeHost).className}`}
+          style={
+            {
+              ...(props.theme === 'light' ? lightTreeTheme : darkTreeTheme),
+              '--trees-font-family': 'var(--branchline-body-font)',
+              '--trees-font-size': '12px',
+            } as CSSProperties
+          }
+          aria-label="Changed files"
+          renderContextMenu={(item, context) => {
+            const paths = model.getSelectedPaths();
+            const targetPaths = paths.includes(item.path) ? paths : [item.path];
+            const targets = selectedReviewFiles(targetPaths, byPath).filter(
+              (file) => !props.historicalFiles?.[file.id],
+            );
+            return (
+              <TreeReviewMenu
+                context={context}
+                files={targets}
+                includesDirectory={targetPaths.some((path) => path.endsWith('/'))}
+                approvals={props.approvals}
+                busy={busy}
+                onReview={reviewFiles}
+              />
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function TreeReviewMenu({
+  context,
+  files,
+  includesDirectory,
+  approvals,
+  busy,
+  onReview,
+}: {
+  context: ContextMenuOpenContext;
+  files: ReviewFile[];
+  includesDirectory: boolean;
+  approvals: Record<string, string>;
+  busy: boolean;
+  onReview: (files: ReviewFile[], approved: boolean) => Promise<void>;
+}) {
+  const menu = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: context.anchorRect.left, top: context.anchorRect.top });
+  const allReviewed = files.length > 0 && files.every((file) => approvals[file.id] === file.fingerprint);
+  const noneReviewed = files.every((file) => approvals[file.id] !== file.fingerprint);
+  useLayoutEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    setPosition({
+      left: Math.max(8, Math.min(context.anchorRect.left, window.innerWidth - rect.width - 8)),
+      top: Math.max(8, Math.min(context.anchorRect.top, window.innerHeight - rect.height - 8)),
+    });
+    element.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }, [context]);
+  const perform = (approved: boolean) => {
+    context.close({ restoreFocus: false });
+    void onReview(files, approved);
+  };
+  return createPortal(
+    <div
+      ref={menu}
+      className={`tree-review-menu ${stylex.props(styles.menu).className}`}
+      data-file-tree-context-menu-root="true"
+      role="menu"
+      aria-label="File review actions"
+      style={{ ...position, WebkitAppRegion: 'no-drag' } as CSSProperties}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' || event.key === 'Tab') {
+          event.preventDefault();
+          event.stopPropagation();
+          context.close();
+          return;
+        }
+        const options = [
+          ...(menu.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || []),
+        ];
+        const current = options.indexOf(document.activeElement as HTMLButtonElement);
+        const next =
+          event.key === 'ArrowDown'
+            ? (current + 1) % options.length
+            : event.key === 'ArrowUp'
+              ? (current - 1 + options.length) % options.length
+              : event.key === 'Home'
+                ? 0
+                : event.key === 'End'
+                  ? options.length - 1
+                  : null;
+        if (next !== null && options.length) {
+          event.preventDefault();
+          event.stopPropagation();
+          options[next]?.focus();
+        }
+      }}
+    >
+      <div className={`tree-review-menu-label ${stylex.props(styles.menuLabel).className}`}>
+        {files.length === 1 && !includesDirectory
+          ? files[0].path.split('/').at(-1)
+          : `${files.length} file${files.length === 1 ? '' : 's'} selected`}
+      </div>
+      <button
+        {...stylex.props(styles.menuButton)}
+        type="button"
+        role="menuitem"
+        disabled={busy || !files.length || allReviewed}
+        onClick={() => perform(true)}
+      >
+        <Check size={14} className={stylex.props(styles.menuIcon).className} />
+        Mark reviewed
+      </button>
+      <button
+        {...stylex.props(styles.menuButton)}
+        type="button"
+        role="menuitem"
+        disabled={busy || !files.length || noneReviewed}
+        onClick={() => perform(false)}
+      >
+        <RotateCcw size={14} className={stylex.props(styles.menuIcon).className} />
+        Mark unreviewed
+      </button>
+    </div>,
+    document.body,
+  );
+}
