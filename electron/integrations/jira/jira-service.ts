@@ -12,8 +12,10 @@ export class JiraService {
 
   async openJiraTicket(reviewId: string): Promise<void> {
     const review = this.store.getReview(reviewId);
-    const branch = review.kind === 'current' ? (await this.inspect(review.repoPath)).currentBranch : review.featureBranch;
-    if (!branch) throw new Error('The current checkout is detached. Switch to a branch containing a Jira ticket key.');
+    const branch =
+      review.kind === 'current' ? (await this.inspect(review.repoPath)).currentBranch : review.featureBranch;
+    if (!branch)
+      throw new Error('The current checkout is detached. Switch to a branch containing a Jira ticket key.');
     const key = extractJiraTicketKey(branch);
     if (!key) throw new Error('The reviewed branch does not contain a Jira ticket key.');
     const url = jiraTicketUrl(this.store.getSettings().jiraBaseUrl, key);

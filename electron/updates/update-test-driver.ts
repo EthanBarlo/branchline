@@ -19,25 +19,38 @@ export class UpdateTestDriver extends EventEmitter {
   version = '99.0.0';
   releaseNotes = 'A better Branchline.\n\n• Faster reviews\n• Reliable updates';
   private authorization?: { resolve: () => void; reject: (error: Error) => void };
-  constructor(private quit: () => void) { super(); }
+  constructor(private quit: () => void) {
+    super();
+  }
   async checkForUpdates() {
     this.checks++;
-    if (this.failCheckOnce) { this.failCheckOnce = false; throw new Error('Offline'); }
+    if (this.failCheckOnce) {
+      this.failCheckOnce = false;
+      throw new Error('Offline');
+    }
     this.emit('update-available', { version: this.version, releaseNotes: this.releaseNotes });
   }
   async downloadUpdate() {
     this.downloads++;
     this.emit('download-progress', { percent: 42 });
-    await new Promise(resolve => setTimeout(resolve, 500));
-    if (this.failDownloadOnce) { this.failDownloadOnce = false; throw new Error('Download interrupted'); }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (this.failDownloadOnce) {
+      this.failDownloadOnce = false;
+      throw new Error('Download interrupted');
+    }
     this.emit('update-downloaded', { version: this.version });
   }
   async install() {
-    if (this.failInstallOnce) { this.failInstallOnce = false; throw new Error('Native staging failed; please retry.'); }
+    if (this.failInstallOnce) {
+      this.failInstallOnce = false;
+      throw new Error('Native staging failed; please retry.');
+    }
     if (this.pauseForAuthorization) {
       this.authorizationRequests++;
       this.authorizationPending = true;
-      await new Promise<void>((resolve, reject) => { this.authorization = { resolve, reject }; });
+      await new Promise<void>((resolve, reject) => {
+        this.authorization = { resolve, reject };
+      });
     }
     this.installs++;
     setImmediate(this.quit);
@@ -48,6 +61,9 @@ export class UpdateTestDriver extends EventEmitter {
     this.authorization = undefined;
     this.authorizationPending = false;
     if (result === 'allow') authorization.resolve();
-    else authorization.reject(new Error(result === 'cancel' ? 'Authorization cancelled (-60006)' : 'Authorization denied (-60005)'));
+    else
+      authorization.reject(
+        new Error(result === 'cancel' ? 'Authorization cancelled (-60006)' : 'Authorization denied (-60005)'),
+      );
   }
 }

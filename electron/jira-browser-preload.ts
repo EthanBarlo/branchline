@@ -16,7 +16,9 @@ interface JiraBrowserState {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  const text = (id: string, value: string) => { document.getElementById(id)!.textContent = value; };
+  const text = (id: string, value: string) => {
+    document.getElementById(id)!.textContent = value;
+  };
   const header = document.querySelector('header')!;
   const options = document.querySelector<HTMLButtonElement>('[data-action="menu"]')!;
   let lastHeight = 0;
@@ -50,7 +52,7 @@ window.addEventListener('DOMContentLoaded', () => {
       });
     });
   }
-  document.addEventListener('keydown', event => {
+  document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') void ipcRenderer.invoke('jira-browser:action', 'close').catch(() => {});
     if (event.key !== 'Tab') return;
     const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];

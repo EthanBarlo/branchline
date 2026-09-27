@@ -17,7 +17,12 @@ export function jiraBrowserURL(value: string): URL {
 }
 
 export function isJiraBrowserURL(value: string): boolean {
-  try { jiraBrowserURL(value); return true; } catch { return false; }
+  try {
+    jiraBrowserURL(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function jiraBrowserPartition(connectionId: string): string {

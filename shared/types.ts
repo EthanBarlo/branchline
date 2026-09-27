@@ -96,7 +96,8 @@ export interface Review extends ReviewConfig {
 }
 
 export const currentReviewId = (projectId: string): string => `current:${projectId}`;
-export const reviewContextKey = (review: Pick<Review, 'featureBranch' | 'baseBranch'>): string => JSON.stringify([review.featureBranch, review.baseBranch]);
+export const reviewContextKey = (review: Pick<Review, 'featureBranch' | 'baseBranch'>): string =>
+  JSON.stringify([review.featureBranch, review.baseBranch]);
 
 export interface ReviewRefresh {
   review: Review;
@@ -111,7 +112,11 @@ export interface AppSettings {
   jiraTicketView?: 'website' | 'summary';
   theme: 'system' | 'light' | 'dark';
 }
-export interface AppState { projects: Project[]; reviews: Review[]; settings: AppSettings }
+export interface AppState {
+  projects: Project[];
+  reviews: Review[];
+  settings: AppSettings;
+}
 export interface RepoInspection {
   rootPath: string;
   name: string;
@@ -126,13 +131,19 @@ export interface NewReview {
   featureBranch?: string;
   includeWorkingTree?: boolean;
 }
-export interface NewProject { repoPath: string; name?: string }
+export interface NewProject {
+  repoPath: string;
+  name?: string;
+}
 export type NewComment = Omit<ReviewComment, 'id' | 'createdAt' | 'resolved'> & {
   /** A stable client UUID makes retries of the initial autosave idempotent. */
   id?: string;
 };
 
-export interface FileApproval { fileId: string; fingerprint: string }
+export interface FileApproval {
+  fileId: string;
+  fingerprint: string;
+}
 
 export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
   onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
@@ -149,14 +160,32 @@ export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
   deleteReview(id: string): Promise<AppState>;
   refreshReview(id: string): Promise<ReviewRefresh>;
   setCurrentTarget(projectId: string, target: string): Promise<ReviewRefresh>;
-  setApproval(reviewId: string, fileId: string, fingerprint: string, approved: boolean, contextKey?: string): Promise<Review>;
-  setApprovals(reviewId: string, files: FileApproval[], approved: boolean, contextKey?: string): Promise<Review>;
+  setApproval(
+    reviewId: string,
+    fileId: string,
+    fingerprint: string,
+    approved: boolean,
+    contextKey?: string,
+  ): Promise<Review>;
+  setApprovals(
+    reviewId: string,
+    files: FileApproval[],
+    approved: boolean,
+    contextKey?: string,
+  ): Promise<Review>;
   addComment(reviewId: string, input: NewComment, contextKey?: string): Promise<Review>;
-  updateComment(reviewId: string, commentId: string, changes: { body?: string; resolved?: boolean }, contextKey?: string): Promise<Review>;
+  updateComment(
+    reviewId: string,
+    commentId: string,
+    changes: { body?: string; resolved?: boolean },
+    contextKey?: string,
+  ): Promise<Review>;
   deleteComment(reviewId: string, commentId: string, contextKey?: string): Promise<Review>;
   copyFeedback(reviewId: string, contextKey?: string): Promise<string>;
 }
 
 declare global {
-  interface Window { reviewAPI: ReviewAPI }
+  interface Window {
+    reviewAPI: ReviewAPI;
+  }
 }

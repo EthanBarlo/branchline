@@ -57,7 +57,9 @@ export class JiraBrowser {
       if (viewer.closing || this.closingAll) return;
       try {
         switch (action) {
-          case 'state': this.publish(viewer); break;
+          case 'state':
+            this.publish(viewer);
+            break;
           case 'back':
             if (viewer.contents.navigationHistory.canGoBack()) viewer.contents.navigationHistory.goBack();
             break;
@@ -66,16 +68,30 @@ export class JiraBrowser {
             if (viewer.contents.getURL()) viewer.contents.reload();
             else this.navigate(viewer);
             break;
-          case 'external': await shell.openExternal(viewer.target.url); break;
-          case 'clear-ticket':
-            if (!viewer.window.webContents.isDestroyed()) viewer.window.webContents.send('review:jira-browser-clear-ticket', viewer.id);
+          case 'external':
+            await shell.openExternal(viewer.target.url);
             break;
-          case 'close': await this.closeViewer(viewer); break;
-          case 'menu': this.showMenu(viewer); break;
-          case 'focus-page': viewer.contents.focus(); break;
-          case 'focus-host': viewer.window.webContents.focus(); break;
-          case 'reset': await this.resetSignIn(viewer); break;
-          default: throw new Error('Unknown Jira browser control.');
+          case 'clear-ticket':
+            if (!viewer.window.webContents.isDestroyed())
+              viewer.window.webContents.send('review:jira-browser-clear-ticket', viewer.id);
+            break;
+          case 'close':
+            await this.closeViewer(viewer);
+            break;
+          case 'menu':
+            this.showMenu(viewer);
+            break;
+          case 'focus-page':
+            viewer.contents.focus();
+            break;
+          case 'focus-host':
+            viewer.window.webContents.focus();
+            break;
+          case 'reset':
+            await this.resetSignIn(viewer);
+            break;
+          default:
+            throw new Error('Unknown Jira browser control.');
         }
       } catch (error) {
         this.reportActionError(viewer, error);
@@ -84,7 +100,12 @@ export class JiraBrowser {
     });
     ipcMain.handle(resizeChannel, (event, height: unknown) => {
       const viewer = this.trustedViewer(event);
-      if (typeof height !== 'number' || !Number.isInteger(height) || height < minimumToolbarHeight || height > maximumToolbarHeight) {
+      if (
+        typeof height !== 'number' ||
+        !Number.isInteger(height) ||
+        height < minimumToolbarHeight ||
+        height > maximumToolbarHeight
+      ) {
         throw new Error('The Jira toolbar height is invalid.');
       }
       if (viewer.closing || this.closingAll) return;
@@ -94,32 +115,43 @@ export class JiraBrowser {
   }
 
   private trustedViewer(event: IpcMainInvokeEvent): Viewer {
-    const viewer = [...this.viewers].find(item => item.chrome === event.sender);
-    if (!viewer || viewer.window.isDestroyed() || viewer.chrome.isDestroyed()
-      || event.senderFrame !== viewer.chrome.mainFrame || event.senderFrame?.url !== chromeURL) {
+    const viewer = [...this.viewers].find((item) => item.chrome === event.sender);
+    if (
+      !viewer ||
+      viewer.window.isDestroyed() ||
+      viewer.chrome.isDestroyed() ||
+      event.senderFrame !== viewer.chrome.mainFrame ||
+      event.senderFrame?.url !== chromeURL
+    ) {
       throw new Error('Only the Jira window toolbar can use these controls.');
     }
     return viewer;
   }
 
   private validateBounds(bounds: JiraBrowserBounds): void {
-    if (!bounds || !['x', 'y', 'width', 'height'].every(key => {
-      const value = bounds[key as keyof JiraBrowserBounds];
-      return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100000;
-    }) || bounds.width < 1 || bounds.height < 1) throw new Error('The Jira modal bounds are invalid.');
+    if (
+      !bounds ||
+      !['x', 'y', 'width', 'height'].every((key) => {
+        const value = bounds[key as keyof JiraBrowserBounds];
+        return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100000;
+      }) ||
+      bounds.width < 1 ||
+      bounds.height < 1
+    )
+      throw new Error('The Jira modal bounds are invalid.');
   }
 
   resizeEmbedded(id: string, bounds: JiraBrowserBounds): void {
     this.validateBounds(bounds);
     if (this.resettingBounds.has(id)) this.resettingBounds.set(id, { ...bounds });
-    const viewer = [...this.viewers].find(item => item.id === id);
+    const viewer = [...this.viewers].find((item) => item.id === id);
     if (!viewer) return;
     viewer.bounds = { ...bounds };
     this.resize(viewer);
   }
 
   focusEmbedded(id: string): void {
-    const viewer = [...this.viewers].find(item => item.id === id);
+    const viewer = [...this.viewers].find((item) => item.id === id);
     if (viewer && !viewer.closing && !viewer.chrome.isDestroyed()) viewer.chrome.focus();
   }
 
@@ -133,7 +165,7 @@ export class JiraBrowser {
 
   async closeEmbedded(id: string): Promise<boolean> {
     await Promise.allSettled([...this.queues.values()]);
-    const viewer = [...this.viewers].find(item => item.id === id);
+    const viewer = [...this.viewers].find((item) => item.id === id);
     return viewer ? this.closeViewer(viewer) : Promise.resolve(true);
   }
 
@@ -160,16 +192,24 @@ export class JiraBrowser {
     if (!this.viewers.has(viewer) || viewer.closing || this.closingAll || viewer.window.isDestroyed()) return;
     let currentOrigin = 'Opening Jira…';
     if (!viewer.contents.isDestroyed()) {
-      try { currentOrigin = new URL(viewer.contents.getURL()).origin; } catch { /* Before first navigation. */ }
+      try {
+        currentOrigin = new URL(viewer.contents.getURL()).origin;
+      } catch {
+        /* Before first navigation. */
+      }
     }
     const menu = Menu.buildFromTemplate([
       { label: `Connection: ${viewer.target.accountLabel}`, enabled: false },
       { label: `Site: ${new URL(viewer.target.siteUrl).host}`, enabled: false },
       { label: `Viewing: ${currentOrigin}`, enabled: false },
       { type: 'separator' },
-      { id: 'jira-reset-sign-in', label: 'Reset sign-in…', click: () => {
-        void this.resetSignIn(viewer).catch(error => this.reportActionError(viewer, error));
-      } },
+      {
+        id: 'jira-reset-sign-in',
+        label: 'Reset sign-in…',
+        click: () => {
+          void this.resetSignIn(viewer).catch((error) => this.reportActionError(viewer, error));
+        },
+      },
     ]);
     menu.popup({ window: viewer.window });
   }
@@ -177,34 +217,52 @@ export class JiraBrowser {
   private async resetSignIn(viewer: Viewer): Promise<void> {
     if (!this.viewers.has(viewer) || viewer.closing || this.closingAll || viewer.window.isDestroyed()) return;
     const answer = await dialog.showMessageBox(viewer.window, {
-      type: 'question', title: 'Reset Jira sign-in?',
+      type: 'question',
+      title: 'Reset Jira sign-in?',
       message: 'Close this Jira page and clear this connection’s website sign-in?',
       detail: 'Your API token and saved reviews stay unchanged. You will need to sign in to Jira again.',
-      buttons: ['Cancel', 'Reset sign-in'], defaultId: 0, cancelId: 0,
+      buttons: ['Cancel', 'Reset sign-in'],
+      defaultId: 0,
+      cancelId: 0,
     });
-    if (answer.response !== 1 || !this.viewers.has(viewer) || viewer.closing || this.closingAll || viewer.window.isDestroyed()) return;
+    if (
+      answer.response !== 1 ||
+      !this.viewers.has(viewer) ||
+      viewer.closing ||
+      this.closingAll ||
+      viewer.window.isDestroyed()
+    )
+      return;
     await this.serialize(viewer.target.connectionId, async () => {
       // Disconnect may have removed this viewer while the confirmation was open.
-      if (!this.viewers.has(viewer) || viewer.closing || this.closingAll || viewer.window.isDestroyed()) return;
+      if (!this.viewers.has(viewer) || viewer.closing || this.closingAll || viewer.window.isDestroyed())
+        return;
       const parent = viewer.window;
       const { id, target, bounds } = viewer;
       this.resettingBounds.set(id, bounds);
       try {
-        if (!await this.closeViewer(viewer, false)) return;
+        if (!(await this.closeViewer(viewer, false))) return;
         await this.clearSession(target.connectionId);
-        if (!this.closingAll && !parent.isDestroyed()) await this.createViewer(target, parent, this.resettingBounds.get(id) || bounds, id);
+        if (!this.closingAll && !parent.isDestroyed())
+          await this.createViewer(target, parent, this.resettingBounds.get(id) || bounds, id);
         else if (!parent.isDestroyed()) parent.webContents.send('review:jira-browser-closed', id);
       } catch (error) {
         if (!parent.isDestroyed()) parent.webContents.send('review:jira-browser-closed', id);
         throw error;
-      } finally { this.resettingBounds.delete(id); }
+      } finally {
+        this.resettingBounds.delete(id);
+      }
     });
   }
 
   private serialize<T>(id: string, work: () => Promise<T>): Promise<T> {
     const pending = (this.queues.get(id) ?? Promise.resolve()).catch(() => {}).then(work);
     this.queues.set(id, pending);
-    void pending.finally(() => { if (this.queues.get(id) === pending) this.queues.delete(id); }).catch(() => {});
+    void pending
+      .finally(() => {
+        if (this.queues.get(id) === pending) this.queues.delete(id);
+      })
+      .catch(() => {});
     return pending;
   }
 
@@ -215,12 +273,14 @@ export class JiraBrowser {
     isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     isolated.setPermissionCheckHandler(() => false);
     isolated.setDevicePermissionHandler(() => false);
-    isolated.on('will-download', event => {
+    isolated.on('will-download', (event) => {
       event.preventDefault();
-      for (const viewer of this.viewers) if (viewer.target.connectionId === id) {
-        viewer.message = 'To download attachments, choose Open in browser. Downloads are disabled in this preview.';
-        this.publish(viewer);
-      }
+      for (const viewer of this.viewers)
+        if (viewer.target.connectionId === id) {
+          viewer.message =
+            'To download attachments, choose Open in browser. Downloads are disabled in this preview.';
+          this.publish(viewer);
+        }
     });
     this.sessions.set(id, isolated);
     return isolated;
@@ -232,32 +292,68 @@ export class JiraBrowser {
     return this.serialize(target.connectionId, () => this.createViewer(target, parent, bounds));
   }
 
-  private async createViewer(target: JiraBrowserTarget, parent: BrowserWindow, bounds: JiraBrowserBounds, id: string = randomUUID()): Promise<string> {
+  private async createViewer(
+    target: JiraBrowserTarget,
+    parent: BrowserWindow,
+    bounds: JiraBrowserBounds,
+    id: string = randomUUID(),
+  ): Promise<string> {
     if (this.closingAll) throw new Error('Branchline is closing. Reopen Jira after closing has finished.');
     if (parent.isDestroyed()) throw new Error('The Branchline window has closed.');
     for (const existing of this.viewers) {
       if (existing.window !== parent) continue;
-      if (existing.target.connectionId === target.connectionId && existing.target.url === target.url && !existing.closing) {
+      if (
+        existing.target.connectionId === target.connectionId &&
+        existing.target.url === target.url &&
+        !existing.closing
+      ) {
         this.resizeEmbedded(existing.id, bounds);
         existing.chrome.focus();
         return existing.id;
       }
-      if (!await this.closeViewer(existing)) throw new Error('Finish editing or close the current Jira ticket first.');
+      if (!(await this.closeViewer(existing)))
+        throw new Error('Finish editing or close the current Jira ticket first.');
     }
-    const chromeView = new WebContentsView({ webPreferences: {
-      preload: join(__dirname, 'jira-browser-preload.cjs'),
-      additionalArguments: [`--branchline-jira-theme=${this.theme()}`],
-      nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
-    } });
-    const view = new WebContentsView({ webPreferences: {
-      session: this.connectionSession(target.connectionId), nodeIntegration: false, contextIsolation: true, sandbox: true,
-      webSecurity: true, allowRunningInsecureContent: false, navigateOnDragDrop: false,
-    } });
+    const chromeView = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, 'jira-browser-preload.cjs'),
+        additionalArguments: [`--branchline-jira-theme=${this.theme()}`],
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+    const view = new WebContentsView({
+      webPreferences: {
+        session: this.connectionSession(target.connectionId),
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        navigateOnDragDrop: false,
+      },
+    });
     const contents = view.webContents;
     const chrome = chromeView.webContents;
     const owner = parent.webContents;
-    const viewer: Viewer = { id, target: { ...target }, window: parent, bounds: { ...bounds }, chromeView,
-      view, contents, chrome, toolbarHeight: minimumToolbarHeight, popups: new Map(), error: '', message: '', closing: false, dispose: () => {} };
+    const viewer: Viewer = {
+      id,
+      target: { ...target },
+      window: parent,
+      bounds: { ...bounds },
+      chromeView,
+      view,
+      contents,
+      chrome,
+      toolbarHeight: minimumToolbarHeight,
+      popups: new Map(),
+      error: '',
+      message: '',
+      closing: false,
+      dispose: () => {},
+    };
     this.viewers.add(viewer);
     parent.contentView.addChildView(chromeView);
     parent.contentView.addChildView(view);
@@ -284,17 +380,21 @@ export class JiraBrowser {
     };
     this.resize(viewer);
     chrome.setWindowOpenHandler(() => ({ action: 'deny' }));
-    chrome.on('will-navigate', event => event.preventDefault());
-    chrome.on('will-frame-navigate', event => event.preventDefault());
+    chrome.on('will-navigate', (event) => event.preventDefault());
+    chrome.on('will-frame-navigate', (event) => event.preventDefault());
     this.configureRemote(viewer, contents, parent);
     try {
       await chrome.loadURL(chromeURL);
-      if (parent.isDestroyed() || chrome.isDestroyed()) throw new Error('The Jira modal closed before it was ready.');
+      if (parent.isDestroyed() || chrome.isDestroyed())
+        throw new Error('The Jira modal closed before it was ready.');
       this.publish(viewer);
       chrome.focus();
       this.navigate(viewer);
       return id;
-    } catch (error) { this.destroyViewer(viewer); throw error; }
+    } catch (error) {
+      this.destroyViewer(viewer);
+      throw error;
+    }
   }
 
   private destroyViewer(viewer: Viewer, notify = true): void {
@@ -314,8 +414,9 @@ export class JiraBrowser {
   }
 
   private navigate(viewer: Viewer) {
-    void viewer.contents.loadURL(viewer.target.url).catch(error => {
-      if (viewer.window.isDestroyed() || viewer.contents.isDestroyed() || error?.code === 'ERR_ABORTED') return;
+    void viewer.contents.loadURL(viewer.target.url).catch((error) => {
+      if (viewer.window.isDestroyed() || viewer.contents.isDestroyed() || error?.code === 'ERR_ABORTED')
+        return;
       viewer.error = 'Jira could not be loaded. Reload, or choose Open in browser to continue.';
       this.publish(viewer);
     });
@@ -323,10 +424,11 @@ export class JiraBrowser {
 
   private configureRemote(viewer: Viewer, contents: WebContents, host: BrowserWindow) {
     const blockedLink = () => {
-      viewer.error = 'That link cannot open here. This preview only supports HTTPS websites. Use Open in browser if sign-in requires another app.';
+      viewer.error =
+        'That link cannot open here. This preview only supports HTTPS websites. Use Open in browser if sign-in requires another app.';
       this.publish(viewer);
     };
-    contents.on('will-attach-webview', event => event.preventDefault());
+    contents.on('will-attach-webview', (event) => event.preventDefault());
     contents.on('will-navigate', (event, url) => {
       if (!isJiraBrowserURL(url)) {
         event.preventDefault();
@@ -334,47 +436,79 @@ export class JiraBrowser {
       }
     });
     contents.on('will-redirect', (event, url) => {
-      if (!isJiraBrowserURL(url)) { event.preventDefault(); blockedLink(); }
+      if (!isJiraBrowserURL(url)) {
+        event.preventDefault();
+        blockedLink();
+      }
     });
-    contents.on('will-frame-navigate', event => {
-      if (event.isMainFrame && !isJiraBrowserURL(event.url)) { event.preventDefault(); blockedLink(); }
+    contents.on('will-frame-navigate', (event) => {
+      if (event.isMainFrame && !isJiraBrowserURL(event.url)) {
+        event.preventDefault();
+        blockedLink();
+      }
     });
-    contents.on('will-prevent-unload', event => {
+    contents.on('will-prevent-unload', (event) => {
       const response = dialog.showMessageBoxSync(host, {
-        type: 'warning', title: 'Leave Jira?', message: 'Jira may have unsaved changes.',
+        type: 'warning',
+        title: 'Leave Jira?',
+        message: 'Jira may have unsaved changes.',
         detail: 'Stay to finish editing, or leave and discard any unsaved changes.',
-        buttons: ['Stay', 'Leave'], defaultId: 0, cancelId: 0,
+        buttons: ['Stay', 'Leave'],
+        defaultId: 0,
+        cancelId: 0,
       });
       if (response === 1) event.preventDefault();
       else this.pendingClosures.get(contents)?.(false);
     });
     contents.setWindowOpenHandler(({ url }) => {
       if (!isJiraBrowserURL(url)) {
-        viewer.error = 'This sign-in popup cannot open here. Choose Open in browser to continue in your normal browser.';
+        viewer.error =
+          'This sign-in popup cannot open here. Choose Open in browser to continue in your normal browser.';
         this.publish(viewer);
         return { action: 'deny' };
       }
-      return { action: 'allow', overrideBrowserWindowOptions: {
-        parent: host, width: 850, height: 750, autoHideMenuBar: true,
-        webPreferences: {
-          session: contents.session, nodeIntegration: false, contextIsolation: true, sandbox: true,
-          webSecurity: true, allowRunningInsecureContent: false, navigateOnDragDrop: false,
-          preload: undefined,
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          parent: host,
+          width: 850,
+          height: 750,
+          autoHideMenuBar: true,
+          webPreferences: {
+            session: contents.session,
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            webSecurity: true,
+            allowRunningInsecureContent: false,
+            navigateOnDragDrop: false,
+            preload: undefined,
+          },
         },
-      } };
+      };
     });
-    contents.on('did-create-window', popup => {
+    contents.on('did-create-window', (popup) => {
       const popupContents = popup.webContents;
       viewer.popups.set(popup, popupContents);
       this.configureRemote(viewer, popupContents, popup);
       popup.once('closed', () => viewer.popups.delete(popup));
       const title = () => {
-        try { popup.setTitle(`${new URL(popupContents.getURL()).origin} · Jira sign-in`); } catch { /* Initial blank page. */ }
+        try {
+          popup.setTitle(`${new URL(popupContents.getURL()).origin} · Jira sign-in`);
+        } catch {
+          /* Initial blank page. */
+        }
       };
-      popupContents.on('page-title-updated', event => { event.preventDefault(); title(); });
+      popupContents.on('page-title-updated', (event) => {
+        event.preventDefault();
+        title();
+      });
       popupContents.on('did-navigate', title);
     });
-    contents.on('did-start-loading', () => { viewer.error = ''; this.publish(viewer); });
+    contents.on('did-start-loading', () => {
+      viewer.error = '';
+      this.publish(viewer);
+    });
     contents.on('did-stop-loading', () => this.publish(viewer));
     contents.on('did-navigate', () => this.publish(viewer));
     contents.on('did-navigate-in-page', () => this.publish(viewer));
@@ -393,12 +527,23 @@ export class JiraBrowser {
     if (viewer.window.isDestroyed() || viewer.chrome.isDestroyed()) return;
     const contents = viewer.contents;
     let currentOrigin = '';
-    if (!contents.isDestroyed()) { try { currentOrigin = new URL(contents.getURL()).origin; } catch { /* Before first navigation. */ } }
+    if (!contents.isDestroyed()) {
+      try {
+        currentOrigin = new URL(contents.getURL()).origin;
+      } catch {
+        /* Before first navigation. */
+      }
+    }
     viewer.chrome.send(stateChannel, {
-      key: viewer.target.key, accountLabel: viewer.target.accountLabel, site: new URL(viewer.target.siteUrl).host,
-      currentOrigin, loading: !contents.isDestroyed() && contents.isLoading(),
+      key: viewer.target.key,
+      accountLabel: viewer.target.accountLabel,
+      site: new URL(viewer.target.siteUrl).host,
+      currentOrigin,
+      loading: !contents.isDestroyed() && contents.isLoading(),
       canGoBack: !contents.isDestroyed() && contents.navigationHistory.canGoBack(),
-      error: viewer.error, message: viewer.message, theme: this.theme(),
+      error: viewer.error,
+      message: viewer.message,
+      theme: this.theme(),
     });
   }
 
@@ -407,7 +552,11 @@ export class JiraBrowser {
     if (viewer.closePromise) return viewer.closePromise;
     const pending = this.finishClose(viewer, notify);
     viewer.closePromise = pending;
-    void pending.finally(() => { if (viewer.closePromise === pending) viewer.closePromise = undefined; }).catch(() => {});
+    void pending
+      .finally(() => {
+        if (viewer.closePromise === pending) viewer.closePromise = undefined;
+      })
+      .catch(() => {});
     return pending;
   }
 
@@ -416,8 +565,12 @@ export class JiraBrowser {
     try {
       for (const [popup, popupContents] of viewer.popups) {
         if (popup.isDestroyed()) continue;
-        const closed = await new Promise<boolean>(resolve => {
-          const finish = (value: boolean) => { popup.removeListener('closed', onClosed); this.pendingClosures.delete(popupContents); resolve(value); };
+        const closed = await new Promise<boolean>((resolve) => {
+          const finish = (value: boolean) => {
+            popup.removeListener('closed', onClosed);
+            this.pendingClosures.delete(popupContents);
+            resolve(value);
+          };
           const onClosed = () => finish(true);
           popup.once('closed', onClosed);
           this.pendingClosures.set(popupContents, finish);
@@ -427,8 +580,12 @@ export class JiraBrowser {
       }
       const contents = viewer.contents;
       if (!contents.isDestroyed()) {
-        const closed = await new Promise<boolean>(resolve => {
-          const finish = (value: boolean) => { contents.removeListener('destroyed', destroyed); this.pendingClosures.delete(contents); resolve(value); };
+        const closed = await new Promise<boolean>((resolve) => {
+          const finish = (value: boolean) => {
+            contents.removeListener('destroyed', destroyed);
+            this.pendingClosures.delete(contents);
+            resolve(value);
+          };
           const destroyed = () => finish(true);
           this.pendingClosures.set(contents, finish);
           contents.once('destroyed', destroyed);
@@ -438,7 +595,9 @@ export class JiraBrowser {
       }
       this.destroyViewer(viewer, notify);
       return true;
-    } finally { viewer.closing = false; }
+    } finally {
+      viewer.closing = false;
+    }
   }
 
   async clearConnection(connectionId: string): Promise<void> {
@@ -447,9 +606,12 @@ export class JiraBrowser {
   }
 
   private async clearSession(connectionId: string): Promise<void> {
-    for (const viewer of [...this.viewers]) if (viewer.target.connectionId === connectionId && !await this.closeViewer(viewer)) {
-      throw new Error('Jira is still open with unsaved changes. Finish editing or close the ticket before resetting this connection.');
-    }
+    for (const viewer of [...this.viewers])
+      if (viewer.target.connectionId === connectionId && !(await this.closeViewer(viewer))) {
+        throw new Error(
+          'Jira is still open with unsaved changes. Finish editing or close the ticket before resetting this connection.',
+        );
+      }
     const isolated = this.connectionSession(connectionId);
     await isolated.clearStorageData();
     await isolated.clearCache();
@@ -462,7 +624,7 @@ export class JiraBrowser {
   }
 
   hasOpenWindows(): boolean {
-    return this.queues.size > 0 || [...this.viewers].some(viewer => !viewer.window.isDestroyed());
+    return this.queues.size > 0 || [...this.viewers].some((viewer) => !viewer.window.isDestroyed());
   }
 
   reloadFocused(): boolean {
@@ -475,7 +637,10 @@ export class JiraBrowser {
         return true;
       }
       const popupContents = focused ? viewer.popups.get(focused) : undefined;
-      if (popupContents && !popupContents.isDestroyed()) { popupContents.reload(); return true; }
+      if (popupContents && !popupContents.isDestroyed()) {
+        popupContents.reload();
+        return true;
+      }
     }
     return false;
   }
@@ -485,14 +650,16 @@ export class JiraBrowser {
     this.closingAll = true;
     const pending = (async () => {
       await Promise.allSettled([...this.queues.values()]);
-      for (const viewer of [...this.viewers]) if (!await this.closeViewer(viewer)) return false;
+      for (const viewer of [...this.viewers]) if (!(await this.closeViewer(viewer))) return false;
       return true;
     })();
     this.closePreparation = pending;
-    void pending.finally(() => {
-      this.closingAll = false;
-      if (this.closePreparation === pending) this.closePreparation = null;
-    }).catch(() => {});
+    void pending
+      .finally(() => {
+        this.closingAll = false;
+        if (this.closePreparation === pending) this.closePreparation = null;
+      })
+      .catch(() => {});
     return pending;
   }
 }

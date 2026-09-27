@@ -1,4 +1,5 @@
-export type UpdatePhase = 'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'preparing' | 'installing';
+export type UpdatePhase =
+  'disabled' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'preparing' | 'installing';
 export type UpdateAction = 'check' | 'download' | 'install';
 
 export interface UpdateState {
@@ -13,7 +14,8 @@ export interface UpdateState {
   error: { action: UpdateAction; message: string } | null;
 }
 
-export const updatesBusy = (state: UpdateState | null): boolean => state?.phase === 'preparing' || state?.phase === 'installing';
+export const updatesBusy = (state: UpdateState | null): boolean =>
+  state?.phase === 'preparing' || state?.phase === 'installing';
 
 export interface UpdateAPI {
   getUpdateState(): Promise<UpdateState>;

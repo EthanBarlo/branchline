@@ -2,7 +2,14 @@ import { buildSnapshot, inspectRepo } from '../git/repository';
 import { validBranch } from '../projects/project-service';
 import { formatFeedback, ReviewStore, validateApprovalFiles } from './review-store';
 import { currentReviewId, reviewContextKey } from '../../shared/types';
-import type { FileApproval, NewComment, RepoInspection, Review, ReviewRefresh, ReviewSnapshot } from '../../shared/types';
+import type {
+  FileApproval,
+  NewComment,
+  RepoInspection,
+  Review,
+  ReviewRefresh,
+  ReviewSnapshot,
+} from '../../shared/types';
 
 /** Serializes feedback and snapshot commits; expensive local comparisons run outside that queue. */
 export class ReviewService {
@@ -25,19 +32,29 @@ export class ReviewService {
     if (this.deleting.has(id)) return Promise.reject(new Error('This review is being removed.'));
     const task = (this.pending.get(id) ?? Promise.resolve()).catch(() => undefined).then(action);
     this.pending.set(id, task);
-    const cleanup = () => { if (this.pending.get(id) === task) this.pending.delete(id); };
+    const cleanup = () => {
+      if (this.pending.get(id) === task) this.pending.delete(id);
+    };
     void task.then(cleanup, cleanup);
     return task;
   }
 
   private empty(review: Review, inspection: RepoInspection, warnings: string[] = []): ReviewRefresh {
     const snapshot: ReviewSnapshot = {
-      reviewId: review.id, files: [], repos: [], warnings,
-      refreshedAt: new Date().toISOString(), fingerprint: `pending:${reviewContextKey(review)}`,
+      reviewId: review.id,
+      files: [],
+      repos: [],
+      warnings,
+      refreshedAt: new Date().toISOString(),
+      fingerprint: `pending:${reviewContextKey(review)}`,
     };
     this.snapshots.set(review.id, snapshot);
     const result = { review, snapshot, inspection, requiresTarget: !review.baseBranch };
-    this.completed.set(review.id, { generation: this.generations.get(review.id) ?? 0, sequence: this.scanSequences.get(review.id) ?? 0, result });
+    this.completed.set(review.id, {
+      generation: this.generations.get(review.id) ?? 0,
+      sequence: this.scanSequences.get(review.id) ?? 0,
+      result,
+    });
     return result;
   }
 
@@ -64,14 +81,18 @@ export class ReviewService {
   acceptRemoteSnapshot(id: string, snapshot: ReviewSnapshot, contextKey: string): Promise<ReviewRefresh> {
     return this.enqueue(id, async () => {
       const previous = this.store.getReview(id);
-      if (!previous.remote || reviewContextKey(previous) !== contextKey) throw new Error('The remote review changed while its repositories were loading.');
+      if (!previous.remote || reviewContextKey(previous) !== contextKey)
+        throw new Error('The remote review changed while its repositories were loading.');
       const review = await this.store.reconcileApprovals(id, snapshot, contextKey);
       this.snapshots.set(id, snapshot);
       return { review, snapshot };
     });
   }
 
-  private async refreshLocal(id: string, active: { generation: number; promise: Promise<ReviewRefresh> }): Promise<ReviewRefresh> {
+  private async refreshLocal(
+    id: string,
+    active: { generation: number; promise: Promise<ReviewRefresh> },
+  ): Promise<ReviewRefresh> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const prepared = await this.enqueue(id, async () => {
         let review = this.store.getReview(id);
@@ -80,7 +101,13 @@ export class ReviewService {
           inspection = await this.inspect(review.repoPath);
           review = await this.currentContext(review, inspection);
           if (!review.baseBranch || !inspection.currentBranch) {
-            return { result: this.empty(review, inspection, inspection.currentBranch ? [] : ['HEAD is detached. Check out a branch to review Current.']) };
+            return {
+              result: this.empty(
+                review,
+                inspection,
+                inspection.currentBranch ? [] : ['HEAD is detached. Check out a branch to review Current.'],
+              ),
+            };
           }
         }
         const generation = this.generations.get(id) ?? 0;
@@ -97,11 +124,15 @@ export class ReviewService {
       // This may read many repositories and files. Comments and file markers can
       // continue saving against the displayed snapshot while the reads run.
       let snapshot: ReviewSnapshot;
-      try { snapshot = await this.snapshot(captured); }
-      catch (error) {
+      try {
+        snapshot = await this.snapshot(captured);
+      } catch (error) {
         // A superseded comparison is obsolete even when its old Git reads
         // failed. Otherwise retain the last good cache.
-        if (!this.deleting.has(id) && (generation !== (this.generations.get(id) ?? 0) || sequence !== this.scanSequences.get(id))) {
+        if (
+          !this.deleting.has(id) &&
+          (generation !== (this.generations.get(id) ?? 0) || sequence !== this.scanSequences.get(id))
+        ) {
           const replacement = this.replacementRefresh(id, active);
           if (replacement) return replacement;
           continue;
@@ -110,8 +141,12 @@ export class ReviewService {
       }
       const result = await this.enqueue(id, async () => {
         let review = this.store.getReview(id);
-        if (generation !== (this.generations.get(id) ?? 0) || sequence !== this.scanSequences.get(id)
-          || reviewContextKey(review) !== reviewContextKey(captured)) return null;
+        if (
+          generation !== (this.generations.get(id) ?? 0) ||
+          sequence !== this.scanSequences.get(id) ||
+          reviewContextKey(review) !== reviewContextKey(captured)
+        )
+          return null;
         let inspection: RepoInspection | undefined;
         if (review.kind === 'current') {
           inspection = await this.inspect(review.repoPath);
@@ -134,11 +169,16 @@ export class ReviewService {
       let review = this.store.getReview(id);
       const inspection = await this.inspect(review.repoPath);
       review = await this.currentContext(review, inspection);
-      return this.empty(review, inspection, ['The checked-out branch or target is changing. Current will retry on the next refresh.']);
+      return this.empty(review, inspection, [
+        'The checked-out branch or target is changing. Current will retry on the next refresh.',
+      ]);
     });
   }
 
-  private replacementRefresh(id: string, previous: { generation: number; promise: Promise<ReviewRefresh> }): Promise<ReviewRefresh> | ReviewRefresh | undefined {
+  private replacementRefresh(
+    id: string,
+    previous: { generation: number; promise: Promise<ReviewRefresh> },
+  ): Promise<ReviewRefresh> | ReviewRefresh | undefined {
     const generation = this.generations.get(id) ?? 0;
     const newer = this.refreshing.get(id);
     if (newer && newer !== previous && newer.generation === generation) return newer.promise;
@@ -182,7 +222,9 @@ export class ReviewService {
 
   private checkContext(review: Review, expected?: string): void {
     if ((review.kind === 'current' || expected !== undefined) && expected !== reviewContextKey(review)) {
-      throw new Error('The current branch or target changed. Refresh before saving feedback for this comparison.');
+      throw new Error(
+        'The current branch or target changed. Refresh before saving feedback for this comparison.',
+      );
     }
     if (review.kind === 'current' && (!review.featureBranch || !review.baseBranch)) {
       throw new Error('Choose a target and check out a branch before reviewing Current.');
@@ -192,12 +234,19 @@ export class ReviewService {
   private async prepareMutation(id: string, expected?: string): Promise<Review> {
     let review = this.store.getReview(id);
     // Detect branch switches even if the renderer's next poll has not run yet.
-    if (review.kind === 'current') review = await this.currentContext(review, await this.inspect(review.repoPath));
+    if (review.kind === 'current')
+      review = await this.currentContext(review, await this.inspect(review.repoPath));
     this.checkContext(review, expected);
     return review;
   }
 
-  setApproval(id: string, fileId: string, fingerprint: string, approved: boolean, contextKey?: string): Promise<Review> {
+  setApproval(
+    id: string,
+    fileId: string,
+    fingerprint: string,
+    approved: boolean,
+    contextKey?: string,
+  ): Promise<Review> {
     return this.setApprovals(id, [{ fileId, fingerprint }], approved, contextKey);
   }
 
@@ -208,12 +257,18 @@ export class ReviewService {
       // A marker describes the version already displayed. Background/open/manual
       // refreshes reconcile it if the agent or remote author changes that file.
       const snapshot = this.snapshots.get(id);
-      if (approved && !snapshot) throw new Error(`Open or refresh this ${review.remote ? 'PR ' : ''}review before marking files reviewed.`);
+      if (approved && !snapshot)
+        throw new Error(
+          `Open or refresh this ${review.remote ? 'PR ' : ''}review before marking files reviewed.`,
+        );
       if (approved && snapshot) {
-        const versions = new Map(snapshot.files.map(file => [file.id, file]));
-        if (selected.some(file => versions.get(file.fileId)?.unavailable)) throw new Error('This file could not be loaded. Refresh it before marking it reviewed.');
-        if (selected.some(file => versions.get(file.fileId)?.fingerprint !== file.fingerprint)) {
-          throw new Error('A selected file changed or left this comparison. Refresh and review its latest changes first.');
+        const versions = new Map(snapshot.files.map((file) => [file.id, file]));
+        if (selected.some((file) => versions.get(file.fileId)?.unavailable))
+          throw new Error('This file could not be loaded. Refresh it before marking it reviewed.');
+        if (selected.some((file) => versions.get(file.fileId)?.fingerprint !== file.fingerprint)) {
+          throw new Error(
+            'A selected file changed or left this comparison. Refresh and review its latest changes first.',
+          );
         }
       }
       return this.store.setApprovals(id, selected, approved, contextKey ?? reviewContextKey(review));
@@ -223,14 +278,19 @@ export class ReviewService {
   addComment(id: string, input: NewComment, contextKey?: string): Promise<Review> {
     return this.enqueue(id, async () => {
       await this.prepareMutation(id, contextKey);
-      const file = this.snapshots.get(id)?.files.find(file => file.id === input.fileId);
+      const file = this.snapshots.get(id)?.files.find((file) => file.id === input.fileId);
       // A draft may retain an older file version within the same comparison.
       if (!file && !input.fingerprint) throw new Error('Select a file to comment on.');
       return this.store.addComment(id, input, contextKey);
     });
   }
 
-  updateComment(id: string, commentId: string, changes: { body?: string; resolved?: boolean }, contextKey?: string): Promise<Review> {
+  updateComment(
+    id: string,
+    commentId: string,
+    changes: { body?: string; resolved?: boolean },
+    contextKey?: string,
+  ): Promise<Review> {
     return this.enqueue(id, async () => {
       await this.prepareMutation(id, contextKey);
       return this.store.updateComment(id, commentId, changes, contextKey);
@@ -262,22 +322,32 @@ export class ReviewService {
       this.generations.delete(id);
       this.scanSequences.delete(id);
       return state;
-    } finally { this.deleting.delete(id); }
+    } finally {
+      this.deleting.delete(id);
+    }
   }
 
   async deleteProject(projectId: string) {
-    const ids = this.store.getState().reviews.filter(review => review.projectId === projectId).map(review => review.id);
-    ids.forEach(id => { this.deleting.add(id); this.invalidateSnapshot(id); });
+    const ids = this.store
+      .getState()
+      .reviews.filter((review) => review.projectId === projectId)
+      .map((review) => review.id);
+    ids.forEach((id) => {
+      this.deleting.add(id);
+      this.invalidateSnapshot(id);
+    });
     try {
-      await Promise.allSettled(ids.flatMap(id => [...(this.scans.get(id) ?? []), this.pending.get(id)]));
+      await Promise.allSettled(ids.flatMap((id) => [...(this.scans.get(id) ?? []), this.pending.get(id)]));
       const state = await this.store.deleteProject(projectId);
-      ids.forEach(id => {
+      ids.forEach((id) => {
         this.snapshots.delete(id);
         this.completed.delete(id);
         this.generations.delete(id);
         this.scanSequences.delete(id);
       });
       return state;
-    } finally { ids.forEach(id => this.deleting.delete(id)); }
+    } finally {
+      ids.forEach((id) => this.deleting.delete(id));
+    }
   }
 }
