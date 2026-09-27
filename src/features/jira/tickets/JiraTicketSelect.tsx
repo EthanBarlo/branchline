@@ -1,15 +1,10 @@
 import * as stylex from '@stylexjs/stylex';
 import { ChevronDown, Clock3, Search, TriangleAlert } from 'lucide-react';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import type { JiraTicketOption, JiraTicketSuggestions } from '../../../../shared/integrations';
+import type { JiraTicketOption } from '../../../../shared/integrations';
 import { colors, fonts, radii, spacing, typeScale } from '../../../theme/tokens.stylex';
 import { Spinner } from '../../../ui/Spinner';
-
-const emptySuggestions = (): JiraTicketSuggestions => ({ recent: [], matches: [] });
-const message = (error: unknown) =>
-  error instanceof Error
-    ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
-    : String(error);
+import { useJiraTicketSuggestions } from './useJiraTicketSuggestions';
 
 const styles = stylex.create({
   select: { position: 'relative', width: '100%', minWidth: 0 },
@@ -147,52 +142,11 @@ export function JiraTicketSelect({
   const hintId = useId();
   const input = useRef<HTMLInputElement>(null);
   const container = useRef<HTMLDivElement>(null);
-  const request = useRef(0);
   const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const [suggestions, setSuggestions] = useState<JiraTicketSuggestions>(emptySuggestions);
-  const [active, setActive] = useState(-1);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
   const [placement, setPlacement] = useState({ above: false, maxHeight: 320 });
-  const options = [...suggestions.recent, ...suggestions.matches];
   const expanded = open && !disabled;
-
-  useEffect(() => {
-    const generation = ++request.current;
-    setSuggestions(emptySuggestions());
-    setActive(-1);
-    setError('');
-    if (!expanded) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    const timer = setTimeout(
-      () => {
-        void window.reviewAPI
-          .getJiraTicketSuggestions(reviewId, query.trim())
-          .then((result) => {
-            if (request.current === generation) {
-              setSuggestions(result);
-              const searchingByTitle = !!query.trim() && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/i.test(query.trim());
-              setActive(searchingByTitle && result.recent.length + result.matches.length > 0 ? 0 : -1);
-            }
-          })
-          .catch((reason) => {
-            if (request.current === generation) setError(message(reason));
-          })
-          .finally(() => {
-            if (request.current === generation) setLoading(false);
-          });
-      },
-      query.trim() ? 250 : 0,
-    );
-    return () => {
-      clearTimeout(timer);
-      request.current++;
-    };
-  }, [expanded, query, reviewId]);
+  const suggestionsState = useJiraTicketSuggestions(reviewId, expanded);
+  const { query, suggestions, active, setActive, loading, error, options } = suggestionsState;
 
   useEffect(() => {
     if (!expanded) return;
@@ -229,17 +183,13 @@ export function JiraTicketSelect({
 
   function showRecent() {
     if (disabled || expanded) return;
-    setQuery('');
+    suggestionsState.showRecent();
     setOpen(true);
-    setActive(-1);
-    setSuggestions(emptySuggestions());
-    setError('');
     input.current?.select();
   }
   function choose(option: JiraTicketOption) {
-    request.current++;
+    suggestionsState.cancel();
     setOpen(false);
-    setActive(-1);
     onChange(option.key);
     onSelect(option.key);
   }
@@ -367,14 +317,9 @@ export function JiraTicketSelect({
           onFocus={showRecent}
           onClick={showRecent}
           onChange={(event) => {
-            request.current++;
+            suggestionsState.search(event.target.value);
             onChange(event.target.value);
-            setQuery(event.target.value);
             setOpen(true);
-            setSuggestions(emptySuggestions());
-            setActive(-1);
-            setError('');
-            setLoading(true);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Escape' && expanded) {

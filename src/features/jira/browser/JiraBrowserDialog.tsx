@@ -1,18 +1,13 @@
 import * as stylex from '@stylexjs/stylex';
 import { Ticket, TriangleAlert, X } from 'lucide-react';
-import { useEffect, useId, useRef, useState } from 'react';
-import { createPortal, flushSync } from 'react-dom';
+import { useId, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { colors, radii, spacing, typeScale } from '../../../theme/tokens.stylex';
 import { Button } from '../../../ui/Button';
 import { Spinner } from '../../../ui/Spinner';
-import { flushPendingComments } from '../../reviews/diff/commentAutosave';
 import { JiraTicketSelect } from '../tickets/JiraTicketSelect';
-
-type Destination = 'close' | 'details';
-const message = (error: unknown) =>
-  error instanceof Error
-    ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
-    : String(error);
+import { useJiraBrowserSession } from './useJiraBrowserSession';
+import { useJiraDialogFocus } from './useJiraDialogFocus';
 
 const fadeIn = stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } });
 
@@ -278,272 +273,26 @@ export function JiraBrowserDialog({
   onDetails: () => void;
   onTicketChanged: () => void;
 }) {
-  const surface = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
-  const callbacks = useRef({ onClose, onDetails, onTicketChanged });
-  callbacks.current = { onClose, onDetails, onTicketChanged };
-  const lifecycle = useRef<{
-    close: (destination: Destination) => Promise<void>;
-    focus: () => void;
-    prepareChange: () => Promise<boolean>;
-  } | null>(null);
-  const [attempt, setAttempt] = useState(0);
-  const [ready, setReady] = useState(false);
-  const [closing, setClosing] = useState(false);
-  const [error, setError] = useState('');
-  const [currentTicket, setCurrentTicket] = useState(ticket);
-  const [ticketKey, setTicketKey] = useState(ticket || '');
-  const [saving, setSaving] = useState(false);
-  const [loadingTicket, setLoadingTicket] = useState(true);
-  const ticketEdited = useRef(false);
-  const [ticketError, setTicketError] = useState('');
-  const changing = useRef(false);
-  const checkingUnsavedEdits = useRef(false);
-  const openedBranch = useRef(currentBranch);
-  const lastBranch = useRef(currentBranch);
-  const branchChanged = useRef(false);
-  const closeForBranchChange = useRef(false);
   const ticketInputId = useId();
-
-  function requestClose(destination: Destination) {
-    if (!changing.current) void lifecycle.current?.close(destination);
-  }
-
-  async function changeTicket(value: string | null) {
-    if (changing.current) return;
-    if (branchChanged.current) {
-      requestClose('close');
-      return;
-    }
-    const key = value === null ? null : value.trim().toUpperCase();
-    if (key && !/^[A-Z][A-Z0-9]*-[1-9][0-9]*$/.test(key)) {
-      setTicketError('Enter a Jira issue key such as APP-123.');
-      return;
-    }
-    changing.current = true;
-    setSaving(true);
-    setTicketError('');
-    let detached = false;
-    try {
-      checkingUnsavedEdits.current = true;
-      const closed = await lifecycle.current?.prepareChange();
-      checkingUnsavedEdits.current = false;
-      if (!closed) return;
-      detached = true;
-      if (branchChanged.current) return;
-      await window.reviewAPI.setReviewTicket(reviewId, key, openedBranch.current);
-      ticketEdited.current = false;
-      setCurrentTicket(key || null);
-      setTicketKey(key || '');
-      callbacks.current.onTicketChanged();
-      const link = await window.reviewAPI.getJiraTicketLink(reviewId);
-      setCurrentTicket(link?.key || null);
-      setTicketKey(link?.key || '');
-    } catch (reason) {
-      setTicketError(message(reason));
-    } finally {
-      checkingUnsavedEdits.current = false;
-      changing.current = false;
-      setSaving(false);
-      if (detached) {
-        if (branchChanged.current) callbacks.current.onClose();
-        else setAttempt((value) => value + 1);
-      }
-    }
-  }
-
-  useEffect(() => {
-    let disposed = false;
-    let finished = false;
-    let suspended = false;
-    let viewerId: string | null = null;
-    let destination: Destination | null = null;
-    let closingPromise: Promise<void> | null = null;
-    let frame = 0;
-    let previousBounds = '';
-    const closedIds = new Set<string>();
-    setReady(false);
-    setClosing(false);
-    setError('');
-    setLoadingTicket(true);
-    const finish = (next: Destination) => {
-      if (disposed || finished) return;
-      finished = true;
-      (next === 'details' ? callbacks.current.onDetails : callbacks.current.onClose)();
-    };
-    const bounds = () => {
-      const rect = surface.current?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0)
-        throw new Error('The Jira viewer is not visible. Close it and try again.');
-      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-    };
-    const updateBounds = () => {
-      if (!viewerId || disposed || destination || suspended) return;
-      try {
-        const next = bounds();
-        const signature = JSON.stringify(next);
-        if (signature === previousBounds) return;
-        previousBounds = signature;
-        void window.reviewAPI.resizeJiraBrowser(viewerId, next).catch((reason) => {
-          if (!disposed && !finished) setError(message(reason));
-        });
-      } catch (reason) {
-        if (!disposed) setError(message(reason));
-      }
-    };
-    const scheduleBounds = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(updateBounds);
-    };
-    const unsubscribe = window.reviewAPI.onJiraBrowserClosed((id) => {
-      closedIds.add(id);
-      if (id === viewerId && !suspended) finish(destination || 'close');
-    });
-    const unsubscribeClear = window.reviewAPI.onJiraBrowserClearTicket((id) => {
-      if (id === viewerId && !disposed && !finished && !destination) void changeTicket(null);
-    });
-    const opening = (async () => {
-      try {
-        await flushPendingComments();
-        if (disposed || destination) return null;
-        const link = await window.reviewAPI.getJiraTicketLink(reviewId);
-        if (disposed || destination) return null;
-        // Expand the picker before measuring the rectangle for the native page.
-        flushSync(() => {
-          setCurrentTicket(link?.key || null);
-          if (!ticketEdited.current) setTicketKey(link?.key || '');
-        });
-        if (!link) return null;
-        const id = await window.reviewAPI.openJiraBrowser(reviewId, bounds());
-        viewerId = id;
-        if (disposed) {
-          await window.reviewAPI.closeJiraBrowser(id);
-          return null;
-        }
-        if (closedIds.has(id)) {
-          finish(destination || 'close');
-          return null;
-        }
-        setReady(true);
-        updateBounds();
-        return id;
-      } catch (reason) {
-        if (!disposed && !finished) setError(message(reason));
-        return null;
-      } finally {
-        if (!disposed) setLoadingTicket(false);
-      }
-    })();
-    const close = (next: Destination): Promise<void> => {
-      if (closingPromise) return closingPromise;
-      destination = next;
-      setClosing(true);
-      setError('');
-      closingPromise = (async () => {
-        try {
-          const id = await opening;
-          if (!id || closedIds.has(id) || (await window.reviewAPI.closeJiraBrowser(id))) finish(next);
-        } catch (reason) {
-          if (!disposed && !finished) setError(message(reason));
-        } finally {
-          closingPromise = null;
-          destination = null;
-          if (!disposed && !finished) {
-            setClosing(false);
-            scheduleBounds();
-          }
-        }
-      })();
-      return closingPromise;
-    };
-    lifecycle.current = {
-      close,
-      prepareChange: async () => {
-        // Changing the link closes the website while keeping its modal open.
-        suspended = true;
-        try {
-          const id = await opening;
-          const closed = !id || closedIds.has(id) || (await window.reviewAPI.closeJiraBrowser(id));
-          if (closed) setReady(false);
-          else suspended = false;
-          return closed;
-        } catch (reason) {
-          suspended = false;
-          throw reason;
-        }
-      },
-      focus: () => {
-        if (!viewerId || disposed || finished || destination || suspended) return;
-        void window.reviewAPI.focusJiraBrowser(viewerId).catch((reason) => {
-          if (!disposed && !finished) setError(message(reason));
-        });
-      },
-    };
-    const observer = new ResizeObserver(scheduleBounds);
-    if (surface.current) observer.observe(surface.current);
-    window.addEventListener('resize', scheduleBounds);
-    window.visualViewport?.addEventListener('resize', scheduleBounds);
-    return () => {
-      disposed = true;
-      lifecycle.current = null;
-      observer.disconnect();
-      cancelAnimationFrame(frame);
-      window.removeEventListener('resize', scheduleBounds);
-      window.visualViewport?.removeEventListener('resize', scheduleBounds);
-      unsubscribe();
-      unsubscribeClear();
-      if (viewerId && !closedIds.has(viewerId) && !closingPromise)
-        void window.reviewAPI.closeJiraBrowser(viewerId).catch(() => {});
-    };
-  }, [reviewId, attempt]);
-
-  useEffect(() => {
-    const previous = lastBranch.current;
-    lastBranch.current = currentBranch;
-    if (previous !== currentBranch && previous !== undefined && currentBranch !== undefined) {
-      branchChanged.current = true;
-      closeForBranchChange.current = !checkingUnsavedEdits.current;
-    }
-    // A declined unsaved-edit prompt leaves this page open without prompting on every poll.
-    if (closeForBranchChange.current && !saving) {
-      closeForBranchChange.current = false;
-      requestClose('close');
-    }
-  }, [currentBranch, saving]);
-
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const workspace = document.getElementById('root');
-    const wasInert = workspace?.inert;
-    if (workspace) workspace.inert = true;
-    dialog.current?.focus();
-    const keyboard = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        requestClose('close');
-      }
-      if (event.key !== 'Tab') return;
-      const items = [
-        ...(dialog.current?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), [tabindex="0"]',
-        ) || []),
-      ].filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0);
-      if (event.shiftKey && document.activeElement === items[0]) {
-        event.preventDefault();
-        items.at(-1)?.focus();
-      } else if (!event.shiftKey && document.activeElement === items.at(-1)) {
-        event.preventDefault();
-        items[0]?.focus();
-      }
-    };
-    document.addEventListener('keydown', keyboard);
-    return () => {
-      document.removeEventListener('keydown', keyboard);
-      if (workspace) workspace.inert = wasInert || false;
-      if (previous?.isConnected) previous.focus();
-    };
-  }, []);
+  const {
+    surface,
+    ready,
+    closing,
+    error,
+    currentTicket,
+    ticketKey,
+    saving,
+    loadingTicket,
+    ticketError,
+    branchChanged,
+    requestClose,
+    changeTicket,
+    retry,
+    focus,
+    editTicketKey,
+  } = useJiraBrowserSession({ reviewId, ticket, currentBranch, onClose, onDetails, onTicketChanged });
+  useJiraDialogFocus(dialog, () => requestClose('close'));
 
   return createPortal(
     <div
@@ -567,7 +316,7 @@ export function JiraBrowserDialog({
           aria-label="Jira page controls"
           tabIndex={ready && !closing && !saving ? 0 : -1}
           onFocus={(event) => {
-            if (ready && event.target === event.currentTarget) lifecycle.current?.focus();
+            if (ready && event.target === event.currentTarget) focus();
           }}
         >
           {currentTicket && !ready && (
@@ -596,11 +345,7 @@ export function JiraBrowserDialog({
               </span>
               {error && (
                 <div className={`jira-browser-retry ${stylex.props(styles.retry).className}`}>
-                  <Button
-                    type="button"
-                    disabled={closing || saving}
-                    onClick={() => setAttempt((value) => value + 1)}
-                  >
+                  <Button type="button" disabled={closing || saving} onClick={retry}>
                     Try again
                   </Button>
                   <button
@@ -657,11 +402,7 @@ export function JiraBrowserDialog({
                   reviewId={reviewId}
                   value={ticketKey}
                   disabled={closing || saving || loadingTicket}
-                  onChange={(value) => {
-                    ticketEdited.current = true;
-                    setTicketKey(value);
-                    setTicketError('');
-                  }}
+                  onChange={editTicketKey}
                   onSelect={(key) => void changeTicket(key)}
                 />
               </form>
@@ -676,7 +417,7 @@ export function JiraBrowserDialog({
                     type="button"
                     className={`integration-link ${stylex.props(styles['integration-link']).className}`}
                     disabled={closing || saving}
-                    onClick={() => setAttempt((value) => value + 1)}
+                    onClick={retry}
                   >
                     Try again
                   </button>
@@ -721,7 +462,7 @@ export function JiraBrowserDialog({
         {currentTicket && (
           <>
             <div className={`jira-browser-footer ${stylex.props(styles.footer).className}`}>
-              {branchChanged.current && (
+              {branchChanged && (
                 <span
                   className={`jira-browser-error ${stylex.props(styles.browserError).className}`}
                   role="status"
