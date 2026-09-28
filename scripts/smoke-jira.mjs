@@ -6,12 +6,13 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 const executablePath = process.env.BRANCHLINE_TEST_EXECUTABLE || electronExecutable;
 const fixture = await mkdtemp(join(tmpdir(), 'branchline-jira-'));
 const repo = join(fixture, 'jira-project');
 const dataDir = join(fixture, 'app-data');
-const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir };
+const env = smokeEnv({ BRANCHLINE_DATA_DIR: dataDir });
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.BRANCHLINE_DEV_URL;
 const baseURL = 'https://jira.example.invalid/team/jira';

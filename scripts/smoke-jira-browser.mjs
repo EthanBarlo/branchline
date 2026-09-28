@@ -6,11 +6,12 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv, smokeHidden } from './smoke-env.mjs';
 
 const fixture = await mkdtemp(join(tmpdir(), 'branchline-jira-browser-'));
 const repo = join(fixture, 'checkout');
 const entry = join(fixture, 'main.cjs');
-const env = { ...process.env, BRANCHLINE_DATA_DIR: join(fixture, 'data') };
+const env = smokeEnv({ BRANCHLINE_DATA_DIR: join(fixture, 'data') });
 delete env.ELECTRON_RUN_AS_NODE; delete env.BRANCHLINE_DEV_URL;
 let desktop;
 
@@ -229,13 +230,13 @@ try {
     assert.ok(website.x >= 0 && website.y >= 0 && website.x + website.width <= native.size[0] && website.y + website.height <= native.size[1], 'Native views remain within the main window.');
   };
   await assertToolbarFits();
-  await desktop.evaluate(({ app, BrowserWindow }) => {
+  if (!smokeHidden) await desktop.evaluate(({ app, BrowserWindow }) => {
     const main = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html'));
     app.focus({ steal: true }); main.show(); main.focus(); main.webContents.focus();
   });
   await page.getByRole('dialog', { name: 'Jira ticket APP-123', exact: true }).getByRole('button', { name: 'Close', exact: true }).focus();
   await page.keyboard.press('Tab');
-  await until(() => desktop.evaluate(({ webContents }) => webContents.getFocusedWebContents()?.getURL().endsWith('/jira-browser.html')), 'Tab from the modal footer to focus the native Jira controls');
+  if (!smokeHidden) await until(() => desktop.evaluate(({ webContents }) => webContents.getFocusedWebContents()?.getURL().endsWith('/jira-browser.html')), 'Tab from the modal footer to focus the native Jira controls');
   const beforeResize = (await nativeViews()).views.find(view => view.url.startsWith('https:')).bounds;
   await resizeReviewWindow('embedded Jira');
   await until(async () => {
@@ -657,7 +658,7 @@ try {
     await page.getByRole('button', { name: 'View Jira ticket', exact: true }).click();
     await picker.getByRole('alert').filter({ hasText: 'Mock ticket lookup failed' }).waitFor();
     assert.equal((await nativeViews()).views.length, 0);
-    await desktop.evaluate(({ app, BrowserWindow }) => {
+    if (!smokeHidden) await desktop.evaluate(({ app, BrowserWindow }) => {
       const main = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html'));
       app.focus({ steal: true }); main.show(); main.focus(); main.webContents.focus();
     });

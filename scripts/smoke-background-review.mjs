@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 // Exercise the real renderer, production main process and sandboxed preload.
 // A temporary launcher delays one completed Git read, without product hooks or
@@ -76,7 +77,7 @@ try {
   const before = { head: git('rev-parse', 'HEAD'), refs: git('show-ref'), status: git('status', '--porcelain=v1'), index: await readFile(join(repo, '.git/index')) };
   const entry = join(fixture, 'main.cjs');
   await writeFile(entry, `(${installGitDelay.toString()})();\nrequire(${JSON.stringify(resolve('dist-electron/main.cjs'))});\n`);
-  const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir };
+  const env = smokeEnv({ BRANCHLINE_DATA_DIR: dataDir });
   delete env.ELECTRON_RUN_AS_NODE; delete env.BRANCHLINE_DEV_URL;
   desktop = await electron.launch({ executablePath: process.env.BRANCHLINE_TEST_EXECUTABLE || electronExecutable, args: [entry], env, timeout: 30000 });
   const page = await desktop.firstWindow();

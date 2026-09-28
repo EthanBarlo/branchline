@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { JiraBrowserBounds } from '../../../shared/integrations';
 import { pathToFileURL } from 'node:url';
+import { isHiddenSmokeRun } from '../../hidden-smoke-run';
 import { isJiraBrowserURL, jiraBrowserPartition, validateJiraBrowserTarget } from './jira-browser-policy';
 import type { JiraBrowserTarget } from './jira-browser-policy';
 
@@ -83,10 +84,10 @@ export class JiraBrowser {
             this.showMenu(viewer);
             break;
           case 'focus-page':
-            viewer.contents.focus();
+            if (!isHiddenSmokeRun) viewer.contents.focus();
             break;
           case 'focus-host':
-            viewer.window.webContents.focus();
+            if (!isHiddenSmokeRun) viewer.window.webContents.focus();
             break;
           case 'reset':
             await this.resetSignIn(viewer);
@@ -153,7 +154,7 @@ export class JiraBrowser {
 
   focusEmbedded(id: string): void {
     const viewer = [...this.viewers].find((item) => item.id === id);
-    if (viewer && !viewer.closing && !viewer.chrome.isDestroyed()) viewer.chrome.focus();
+    if (!isHiddenSmokeRun && viewer && !viewer.closing && !viewer.chrome.isDestroyed()) viewer.chrome.focus();
   }
 
   updateTheme(): void {
@@ -309,7 +310,7 @@ export class JiraBrowser {
         !existing.closing
       ) {
         this.resizeEmbedded(existing.id, bounds);
-        existing.chrome.focus();
+        if (!isHiddenSmokeRun) existing.chrome.focus();
         return existing.id;
       }
       if (!(await this.closeViewer(existing)))
@@ -389,7 +390,7 @@ export class JiraBrowser {
       if (parent.isDestroyed() || chrome.isDestroyed())
         throw new Error('The Jira modal closed before it was ready.');
       this.publish(viewer);
-      chrome.focus();
+      if (!isHiddenSmokeRun) chrome.focus();
       this.navigate(viewer);
       return id;
     } catch (error) {
@@ -410,7 +411,7 @@ export class JiraBrowser {
     if (!viewer.chrome.isDestroyed()) viewer.chrome.close({ waitForBeforeUnload: false });
     if (notify && !viewer.window.isDestroyed() && !viewer.window.webContents.isDestroyed()) {
       viewer.window.webContents.send(reviewEvents.jiraBrowserClosed, viewer.id);
-      viewer.window.webContents.focus();
+      if (!isHiddenSmokeRun) viewer.window.webContents.focus();
     }
   }
 
@@ -472,6 +473,9 @@ export class JiraBrowser {
         action: 'allow',
         overrideBrowserWindowOptions: {
           parent: host,
+          show: !isHiddenSmokeRun,
+          focusable: !isHiddenSmokeRun,
+          paintWhenInitiallyHidden: true,
           width: 850,
           height: 750,
           autoHideMenuBar: true,

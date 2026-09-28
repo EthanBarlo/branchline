@@ -160,6 +160,8 @@ npm run test:desktop:integrations
 npm run test:desktop:integration-backend
 ```
 
+Local desktop smoke tests keep Electron windows hidden by default. Set `BRANCHLINE_SMOKE_VISIBLE=1` to watch a local run; CI keeps the windows visible.
+
 The unit/integration tests create temporary Git repositories to exercise divergent targets, working contents, recursive submodules, missing refs, renames, binary/large files, symlinks, approval invalidation, persistence, and export. The desktop smoke test launches the real Electron app with a temporary repository and isolated user data, exercises the UI and clipboard, edits a file externally, checks automatic invalidation, and reopens the app to verify persistence. Screenshots are saved under `artifacts/`.
 
 The Jira desktop check covers settings, branch detection, and persistence using isolated test data. It intercepts browser opening to verify the destination without visiting Jira.

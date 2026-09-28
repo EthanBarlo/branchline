@@ -4,6 +4,7 @@ import { reviewEvents } from '../shared/ipc';
 import { updatesBusy } from '../shared/updates';
 import { createServices } from './application/create-services';
 import { installApplicationMenu, setReloadEnabled } from './application/application-menu';
+import { isHiddenSmokeRun } from './hidden-smoke-run';
 import { ReviewWindow, resolvedTheme } from './application/review-window';
 import { configureIntegrationDiagnostics } from './integrations/integration-diagnostics';
 import { JiraBrowser } from './integrations/jira/jira-browser';
@@ -17,6 +18,7 @@ import type { UpdateService } from './updates/update-service';
 // A separate location is used by the automated desktop smoke test.
 if (process.env.BRANCHLINE_DATA_DIR) app.setPath('userData', process.env.BRANCHLINE_DATA_DIR);
 app.setName('Branchline');
+if (isHiddenSmokeRun && process.platform === 'darwin') app.setActivationPolicy('accessory');
 let reviewWindow: ReviewWindow | undefined;
 let updates: UpdateService | undefined;
 
@@ -61,7 +63,12 @@ app.whenReady().then(async () => {
       if (!window.current || window.current.isDestroyed()) window.create();
     });
   } catch (error) {
-    dialog.showErrorBox('Branchline could not start', error instanceof Error ? error.message : String(error));
+    if (isHiddenSmokeRun) console.error('Branchline could not start:', error);
+    else
+      dialog.showErrorBox(
+        'Branchline could not start',
+        error instanceof Error ? error.message : String(error),
+      );
     app.quit();
   }
 });

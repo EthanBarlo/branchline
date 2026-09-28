@@ -6,6 +6,7 @@ import { updatesBusy } from '../../shared/updates';
 import type { ReviewStore } from '../reviews/review-store';
 import type { JiraBrowser } from '../integrations/jira/jira-browser';
 import type { UpdateService } from '../updates/update-service';
+import { isHiddenSmokeRun } from '../hidden-smoke-run';
 import { JiraBrowserOperations } from './jira-browser-operations';
 import { WorkspaceLifecycle } from './workspace-lifecycle';
 
@@ -70,8 +71,10 @@ export class ReviewWindow {
       this.showUpdatesOnReady = true;
       this.create();
     } else {
-      if (this.window.isMinimized()) this.window.restore();
-      this.window.show();
+      if (!isHiddenSmokeRun) {
+        if (this.window.isMinimized()) this.window.restore();
+        this.window.show();
+      }
       if (this.lifecycle.ready) this.send(reviewEvents.updateShow);
       else this.showUpdatesOnReady = true;
     }
@@ -86,6 +89,9 @@ export class ReviewWindow {
   create(): void {
     this.lifecycle.windowCreated();
     this.window = new BrowserWindow({
+      show: !isHiddenSmokeRun,
+      focusable: !isHiddenSmokeRun,
+      paintWhenInitiallyHidden: true,
       width: 1500,
       height: 980,
       minWidth: 1050,

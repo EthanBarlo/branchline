@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 // Exercise the production main process and sandboxed preload. Network transport
 // (including the narrowly scoped cleanup Git remote) is replaced only in this
@@ -155,7 +156,7 @@ try {
   const before = { head: git('rev-parse', 'HEAD'), refs: git('show-ref'), status: git('status', '--porcelain=v1'), index: await readFile(join(repo, '.git/index')), content: await readFile(join(repo, 'local.txt')) };
   const entry = join(fixture, 'main.cjs');
   await writeFile(entry, `(${installTransport.toString()})();\nrequire(${JSON.stringify(resolve('dist-electron/main.cjs'))});\n`);
-  const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir }; delete env.ELECTRON_RUN_AS_NODE; delete env.BRANCHLINE_DEV_URL;
+  const env = smokeEnv({ BRANCHLINE_DATA_DIR: dataDir }); delete env.ELECTRON_RUN_AS_NODE; delete env.BRANCHLINE_DEV_URL;
   desktop = await electron.launch({ executablePath: process.env.BRANCHLINE_TEST_EXECUTABLE || electronExecutable, args: [entry], env, timeout: 30000 });
   const page = await desktop.firstWindow();
   page.setDefaultTimeout(15000);

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 const fixture = await mkdtemp(join(tmpdir(), 'branchline-updates-'));
 const repo = join(fixture, 'repo'), dataDir = join(fixture, 'data');
@@ -15,7 +16,7 @@ const git = (...args) => execFileSync('git', ['-c', 'user.name=Branchline Test',
 git('init', '-b', 'main'); await writeFile(join(repo, 'example.ts'), 'export const answer = 1;\n');
 git('add', '.'); git('commit', '-m', 'Initial'); git('checkout', '-b', 'feature/update');
 await writeFile(join(repo, 'example.ts'), 'export const answer = 2;\n');
-const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir, BRANCHLINE_UPDATE_TEST: '1' };
+const env = smokeEnv({ BRANCHLINE_DATA_DIR: dataDir, BRANCHLINE_UPDATE_TEST: '1' });
 delete env.ELECTRON_RUN_AS_NODE; delete env.BRANCHLINE_DEV_URL;
 const errors = [];
 let desktop, page;

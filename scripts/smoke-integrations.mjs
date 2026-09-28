@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 // Real Electron renderer with an isolated fixture bridge: no Atlassian requests,
 // credentials, user storage, or repository mutations are possible in this test.
@@ -325,8 +326,8 @@ try {
   await mkdir('artifacts', { recursive: true });
   await writeFile(join(fixture, 'preload.cjs'), `(${fixtureBridge.toString()})();`);
   await mkdir(join(fixture, 'data'));
-  await writeFile(join(fixture, 'main.cjs'), `const {app,BrowserWindow}=require('electron'); app.setPath('userData',${JSON.stringify(join(fixture, 'data'))}); app.whenReady().then(()=>{ const window=new BrowserWindow({width:1500,height:980,webPreferences:{preload:${JSON.stringify(join(fixture, 'preload.cjs'))}},show:true}); window.loadFile(${JSON.stringify(resolve('dist/index.html'))}); }); app.on('window-all-closed',()=>app.quit());`);
-  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  await writeFile(join(fixture, 'main.cjs'), `const {app,BrowserWindow}=require('electron'); const hidden=!app.isPackaged&&process.env.BRANCHLINE_SMOKE_HIDDEN==='1'; if(hidden&&process.platform==='darwin') app.setActivationPolicy('accessory'); app.setPath('userData',${JSON.stringify(join(fixture, 'data'))}); app.whenReady().then(()=>{ const window=new BrowserWindow({width:1500,height:980,webPreferences:{preload:${JSON.stringify(join(fixture, 'preload.cjs'))}},show:!hidden,focusable:!hidden,paintWhenInitiallyHidden:true}); window.loadFile(${JSON.stringify(resolve('dist/index.html'))}); }); app.on('window-all-closed',()=>app.quit());`);
+  const env = smokeEnv(); delete env.ELECTRON_RUN_AS_NODE;
   desktop = await electron.launch({ executablePath: process.env.BRANCHLINE_TEST_EXECUTABLE || electronExecutable, args: [join(fixture, 'main.cjs')], env });
   const page = await desktop.firstWindow({ timeout: 20000 }); page.setDefaultTimeout(12000);
   page.on('pageerror', error => errors.push(error.message));

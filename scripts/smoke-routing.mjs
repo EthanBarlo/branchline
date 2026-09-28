@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { _electron as electron } from 'playwright-core';
 import electronExecutable from 'electron';
+import { smokeEnv } from './smoke-env.mjs';
 
 const fixture = await mkdtemp(join(tmpdir(), 'branchline-routing-'));
 const dataDir = join(fixture, 'data');
@@ -103,7 +104,7 @@ async function assertTrustedDocument(page, expectedURL, projectCount = 2) {
 
 try {
   await Promise.all([createRepo(firstRepo), createRepo(secondRepo)]);
-  const env = { ...process.env, BRANCHLINE_DATA_DIR: dataDir };
+  const env = smokeEnv({ BRANCHLINE_DATA_DIR: dataDir });
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.BRANCHLINE_DEV_URL;
   desktop = await electron.launch({
