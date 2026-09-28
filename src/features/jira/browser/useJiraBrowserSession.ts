@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { errorMessage } from '../../../lib/errorMessage';
 import { flushPendingComments } from '../../reviews/diff/commentAutosave';
@@ -239,7 +239,7 @@ export function useJiraBrowserSession({
     };
   }, [reviewId, attempt]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = lastBranch.current;
     lastBranch.current = currentBranch;
     if (previous !== currentBranch && previous !== undefined && currentBranch !== undefined) {
