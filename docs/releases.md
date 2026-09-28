@@ -41,6 +41,7 @@ The workflow writes the key into a temporary file with restricted permissions, s
 The source repository must be public for updates without user authentication. Commit and push the application changes and workflow before creating a release tag.
 
 1. Update the version with `npm version minor --no-git-tag-version` or `npm version patch --no-git-tag-version`, then commit both manifests with the release's code. The initial updater version is **0.10.0**.
+   Before tagging, verify a clean `npm ci` with Node 22 and npm 10. Newer npm versions can drop `@pierre/trees`' optional nested `@pierre/theme` entry from the lockfile during a version bump.
 2. Push the commit, create a stable tag matching the package version, and push that tag. For the initial updater release:
 
    ```sh
