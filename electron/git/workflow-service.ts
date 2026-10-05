@@ -982,6 +982,54 @@ export class GitWorkflowService {
     return null;
   }
 
+  private async remoteDeletionTarget(
+    repository: Repository,
+    remote: string,
+    branch: string,
+  ): Promise<GitDestination> {
+    await this.validBranch(repository.directory, branch);
+    if (!repository.remotes.includes(remote) || remote.startsWith('-'))
+      throw new Error('Choose an available remote.');
+    if ((await this.config(repository.directory, `remote.${remote}.mirror`)) === 'true')
+      throw new Error('Mirror remotes must be managed manually.');
+    const urls = (
+      await this.command(repository.directory, ['remote', 'get-url', '--push', '--all', remote])
+    ).split('\n');
+    if (urls.length !== 1 || urls[0].startsWith('-'))
+      throw new Error('Multiple or invalid push destinations must be managed manually.');
+    const ref = `refs/heads/${branch}`;
+    const output = await this.command(repository.directory, ['ls-remote', '--heads', urls[0], ref]);
+    const commit =
+      output
+        .split('\n')
+        .find((line) => line.split('\t')[1] === ref)
+        ?.split('\t')[0] ?? null;
+    // Deletion needs the server tip for a lease, not its objects or ancestry.
+    return { remote, branch, commit, url: message(urls[0]) };
+  }
+
+  private async localRemoteDeletion(
+    repository: Repository,
+    input: GitActionInput,
+  ): Promise<GitDestination | undefined> {
+    if (!repository.remotes.length) return undefined;
+    const name = input.branch!.name;
+    const configured = await this.config(repository.directory, `branch.${name}.remote`);
+    const known = repository.remotes.filter((remote) =>
+      repository.refs.has(`refs/remotes/${remote}/${name}`),
+    );
+    const remote =
+      input.deleteRemotes?.[repository.path] ||
+      (configured && configured !== '.' ? configured : '') ||
+      (known.length === 1 ? known[0] : repository.remotes.length === 1 ? repository.remotes[0] : '');
+    if (!remote) throw new Error('Choose a remote for this repository to also delete its remote branch.');
+    const merge =
+      remote === configured ? await this.config(repository.directory, `branch.${name}.merge`) : '';
+    if (merge && !merge.startsWith('refs/heads/'))
+      throw new Error('The tracking target is not a remote branch. Choose a remote manually.');
+    return this.remoteDeletionTarget(repository, remote, merge ? merge.slice(11) : name);
+  }
+
   private async checkoutTarget(
     repository: Repository,
     branch: GitBranchChoice,
@@ -1119,6 +1167,69 @@ export class GitWorkflowService {
             row.warnings.push('Saved reviews keep their recorded branch names.');
           }
           row.destination = { remote: '', branch: input.newBranch, commit: row.source.commit };
+        } else if (input.action === 'delete') {
+          if (!input.branch) throw new Error('Choose a branch.');
+          await this.validBranch(repository.directory, input.branch.name);
+          const remote = input.branch.kind === 'remote' ? input.branch.remote : '';
+          if (input.branch.kind === 'remote' && !remote) throw new Error('Choose a remote-qualified branch.');
+          if (input.branch.kind !== 'remote' && input.branch.remote)
+            throw new Error('Choose either a local branch or a remote-qualified branch.');
+          row.source = { remote: remote || '', branch: input.branch.name, commit: null };
+          if (remote) {
+            if (!repository.remotes.includes(remote)) {
+              row.noop = true;
+              return row;
+            }
+            row.source = await this.remoteDeletionTarget(repository, remote, input.branch.name);
+          } else {
+            row.source.commit = repository.refs.get(`refs/heads/${input.branch.name}`) ?? null;
+            if (row.source.commit) {
+              if (repository.branch === input.branch.name)
+                throw new Error('Check out another branch before deleting this local branch.');
+              await this.availableWorktree(repository, input.branch.name);
+              row.sourceConfigSignature = await this.branchConfigSignature(
+                repository.directory,
+                input.branch.name,
+              );
+              const upstream = await this.command(repository.directory, [
+                'for-each-ref',
+                '--format=%(upstream)',
+                `refs/heads/${input.branch.name}`,
+              ]);
+              const base = repository.refs.get(upstream) ?? repository.head;
+              row.unmergedCommits = Number(
+                await this.command(repository.directory, [
+                  'rev-list',
+                  '--count',
+                  `${base}..${row.source.commit}`,
+                ]),
+              );
+              if (row.unmergedCommits && !input.force)
+                row.blockers.push(
+                  `${row.unmergedCommits} unmerged commits. Select "Delete even if unmerged" to delete this branch.`,
+                );
+              if (row.unmergedCommits)
+                row.warnings.push(
+                  `${row.unmergedCommits} unmerged commits will lose this local branch reference.`,
+                );
+            }
+            if (input.deleteRemote) {
+              row.remoteDeletion = await this.localRemoteDeletion(repository, input);
+              if (!row.remoteDeletion)
+                row.warnings.push('No remote configured; only the local branch will be deleted.');
+            }
+          }
+          const target = row.source.remote ? row.source : row.remoteDeletion;
+          if (target) {
+            const fetchUrl = message(
+              await this.command(repository.directory, ['remote', 'get-url', target.remote]),
+            );
+            if (fetchUrl !== target.url)
+              row.warnings.push(
+                'This remote fetches from a different URL. Its tracking branches stay unchanged.',
+              );
+          }
+          row.noop = !row.source.commit && !row.remoteDeletion?.commit;
         } else if (input.action === 'pull') {
           if (repository.fetchError) throw new Error(`Fetch failed: ${repository.fetchError}`);
           if (!repository.upstream || repository.upstream.remote === '.')
@@ -1208,8 +1319,13 @@ export class GitWorkflowService {
   }
 
   preview(projectId: string, input: GitActionInput): Promise<GitActionPreview> {
-    if (!input || !['checkout', 'pull', 'push', 'create', 'rename'].includes(input.action))
+    if (!input || !['checkout', 'pull', 'push', 'create', 'rename', 'delete'].includes(input.action))
       return Promise.reject(new Error('Choose a supported Git action.'));
+    if (
+      (input.force !== undefined && typeof input.force !== 'boolean') ||
+      (input.deleteRemote !== undefined && typeof input.deleteRemote !== 'boolean')
+    )
+      return Promise.reject(new Error('Choose a valid deletion option.'));
     return this.exclusive(
       projectId,
       async () => {
@@ -1251,7 +1367,7 @@ export class GitWorkflowService {
       before.head === after.head &&
       !after.error &&
       !after.inProgress &&
-      (['push', 'create', 'rename'].includes(action) || before.signature === after.signature)
+      (['push', 'create', 'rename', 'delete'].includes(action) || before.signature === after.signature)
     );
   }
 
@@ -1305,6 +1421,7 @@ export class GitWorkflowService {
       await this.save();
       this.emit(projectId, true);
       const order = current.map((repository, index) => ({ repository, index }));
+      const deletedRemotes = new Set<string>();
       const executeRow = async ({ repository, index }: (typeof order)[number]) => {
         if (operation.state !== 'running') return;
         const row = operation.rows[index];
@@ -1329,12 +1446,22 @@ export class GitWorkflowService {
           )
             throw new Error('The checkout changed during the operation. Prepare a new preview.');
           const [rechecked] = await this.rows([latest], prepared.input, true, false);
+          // Different repositories may share one server branch. Once its deletion
+          // has been confirmed, subsequent rows only need to prune their own refs.
+          const remoteTarget = row.source?.remote ? row.source : row.remoteDeletion;
+          const remoteKey = remoteTarget ? JSON.stringify([remoteTarget.url, remoteTarget.branch]) : '';
+          const sharedDeletion = operation.action === 'delete' && deletedRemotes.has(remoteKey);
+          const recheckedRemote = rechecked.source?.remote ? rechecked.source : rechecked.remoteDeletion;
+          if (sharedDeletion && recheckedRemote?.commit === null)
+            recheckedRemote.commit = remoteTarget!.commit;
           if (
             rechecked.blockers.length ||
             JSON.stringify(rechecked.destination) !== JSON.stringify(row.destination) ||
             rechecked.createTracking !== row.createTracking ||
             JSON.stringify(rechecked.source) !== JSON.stringify(row.source) ||
-            rechecked.sourceConfigSignature !== row.sourceConfigSignature
+            rechecked.sourceConfigSignature !== row.sourceConfigSignature ||
+            rechecked.unmergedCommits !== row.unmergedCommits ||
+            JSON.stringify(rechecked.remoteDeletion) !== JSON.stringify(row.remoteDeletion)
           )
             throw new Error(
               rechecked.blockers.join(' ') || 'The branch destination changed. Prepare a new preview.',
@@ -1375,6 +1502,31 @@ export class GitWorkflowService {
                 row.source!.branch,
                 destination.branch,
               ]);
+            } else if (operation.action === 'delete') {
+              const source = row.source!;
+              if (remoteTarget?.commit) {
+                await this.deleteRemoteBranch(repository, remoteTarget, sharedDeletion);
+                deletedRemotes.add(remoteKey);
+              }
+              if (!source.remote && source.commit) {
+                await this.command(repository.directory, [
+                  'branch',
+                  prepared.input.force ? '-D' : '-d',
+                  '--',
+                  source.branch,
+                ]);
+                const after = await this.inspect(repository.directory, repository.path);
+                if (
+                  after.refs.has(`refs/heads/${source.branch}`) ||
+                  (await this.branchConfigSignature(repository.directory, source.branch)) ||
+                  after.branch !== row.branch ||
+                  after.head !== row.head
+                )
+                  throw new Error('The branch changed during deletion. Inspect the result manually.');
+              }
+              // Keep the upstream ref available for Git's normal merged check
+              // until the local branch deletion finishes.
+              if (remoteTarget) await this.pruneDeletedRemote(repository, remoteTarget);
             } else if (operation.action === 'pull') {
               await this.command(repository.directory, [
                 '-c',
@@ -1413,7 +1565,16 @@ export class GitWorkflowService {
           )
             throw new Error('The branch changed during the operation. Inspect the result manually.');
           row.state = 'done';
-          row.message = row.noop ? 'Already up to date.' : 'Completed.';
+          row.message =
+            operation.action === 'delete'
+              ? row.noop
+                ? 'Branch not present; skipped.'
+                : row.remoteDeletion
+                  ? 'Local and remote branches deleted.'
+                  : 'Branch deleted.'
+              : row.noop
+                ? 'Already up to date.'
+                : 'Completed.';
           await this.save();
           this.emit(projectId, true);
         } catch (error) {
@@ -1467,6 +1628,40 @@ export class GitWorkflowService {
     ]);
   }
 
+  private async deleteRemoteBranch(
+    repository: Repository,
+    target: GitDestination,
+    alreadyDeleted: boolean,
+  ): Promise<void> {
+    if (!alreadyDeleted) {
+      const url = await this.command(repository.directory, ['remote', 'get-url', '--push', target.remote]);
+      if (message(url) !== target.url)
+        throw new Error('The remote destination changed. Prepare a new preview.');
+      await this.command(repository.directory, [
+        'push',
+        '--porcelain',
+        '--no-follow-tags',
+        '--recurse-submodules=no',
+        `--force-with-lease=refs/heads/${target.branch}:${target.commit}`,
+        url,
+        `:refs/heads/${target.branch}`,
+      ]);
+    }
+    const after = await this.remoteDeletionTarget(repository, target.remote, target.branch);
+    if (after.url !== target.url || after.commit !== null)
+      throw new Error('The remote branch is still present. Inspect the result manually.');
+  }
+
+  private async pruneDeletedRemote(repository: Repository, source: GitDestination): Promise<void> {
+    // The server deletion is confirmed. Compare-and-delete only this clone's
+    // tracking ref, preserving a concurrent fetch that changed it meanwhile.
+    const fetchUrl = message(await this.command(repository.directory, ['remote', 'get-url', source.remote]));
+    if (fetchUrl !== source.url) return;
+    const ref = `refs/remotes/${source.remote}/${source.branch}`;
+    const commit = await this.command(repository.directory, ['rev-parse', '--verify', ref]).catch(() => null);
+    if (commit) await this.command(repository.directory, ['update-ref', '-d', ref, commit]);
+  }
+
   private async branchEditConfirmed(
     repository: Repository,
     row: GitActionRow,
@@ -1492,6 +1687,42 @@ export class GitWorkflowService {
       const repository = repositories.find((item) => item.path === row.path && !item.error);
       if (!repository || this.journal.directories[projectId]?.[row.path] !== repository.directory) continue;
       try {
+        if (operation.action === 'delete') {
+          const source = row.source!;
+          const target = source.remote ? source : row.remoteDeletion;
+          let remoteDone = !target;
+          let remoteUnchanged = !target;
+          if (target) {
+            const actual = await this.remoteDeletionTarget(repository, target.remote, target.branch);
+            if (actual.url !== target.url) continue;
+            remoteDone = actual.commit === null;
+            remoteUnchanged = actual.commit === target.commit;
+            if (remoteDone) await this.pruneDeletedRemote(repository, target);
+          }
+          let localDone = !!source.remote;
+          let localUnchanged = !!source.remote;
+          if (!source.remote) {
+            if (repository.branch !== row.branch || repository.head !== row.head) continue;
+            const commit = repository.refs.get(`refs/heads/${source.branch}`) ?? null;
+            const config = await this.branchConfigSignature(repository.directory, source.branch);
+            localDone = commit === null && (!source.commit || config === '');
+            localUnchanged = commit === source.commit && config === (row.sourceConfigSignature ?? '');
+          }
+          if (localDone && remoteDone) {
+            row.state = 'done';
+            row.message = 'Git confirms the branch was deleted.';
+          } else if (localUnchanged && (remoteUnchanged || remoteDone)) {
+            row.state = 'failed';
+            row.message =
+              target?.commit && remoteDone && !source.remote
+                ? 'Remote branch deleted; local branch remains. Prepare a new preview to retry.'
+                : 'Git confirms the branch was not deleted.';
+          } else if (localDone && remoteUnchanged) {
+            row.state = 'failed';
+            row.message = 'Local branch deleted; remote branch remains. Prepare a new preview to retry.';
+          }
+          continue;
+        }
         const destination = row.destination!;
         const remoteHead =
           operation.action === 'push'

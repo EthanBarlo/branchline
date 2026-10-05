@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { useMemo, useRef, useState } from 'react';
-import type { GitAction, GitActionPreview } from '../../../shared/git-workflow';
+import type { GitAction, GitActionInput, GitActionPreview } from '../../../shared/git-workflow';
 import type { Project } from '../../../shared/types';
 import { errorMessage } from '../../lib/errorMessage';
 import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
@@ -28,6 +28,7 @@ export function GitWorkspace({
   const { snapshot, busy, fetching, error, reload, setSnapshot } = workflow;
   const { favourites, toggleFavourite } = useGitBranchFavourites(project.id);
   const selectionVersion = useRef(0);
+  const preparationVersion = useRef(0);
   const [selectedName, setSelectedName] = useState(
     () => sessionStorage.getItem(`branchline.git.branch.${project.id}`) || '',
   );
@@ -36,6 +37,13 @@ export function GitWorkspace({
     branch: GitSidebarBranch;
     action: 'create' | 'rename';
   }>();
+  const [deletion, setDeletion] = useState<{
+    branch: GitSidebarBranch;
+    force: boolean;
+    deleteRemote: boolean;
+    remotes: Record<string, string>;
+  }>();
+  const [checking, setChecking] = useState(false);
   const [preview, setPreview] = useState<GitActionPreview>();
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string>();
@@ -66,9 +74,16 @@ export function GitWorkspace({
       publishRemotes[repo.path] || (repo.remotes.length === 1 ? repo.remotes[0] : ''),
     ]),
   );
-  async function prepare(action: GitAction, branch = selectedBranch, remoteChoices = publicationChoices) {
+  async function prepare(
+    action: GitAction,
+    branch = selectedBranch,
+    remoteChoices = publicationChoices,
+    deletionOptions: Pick<GitActionInput, 'force' | 'deleteRemote' | 'deleteRemotes'> = {},
+  ) {
     const version = selectionVersion.current;
+    const request = ++preparationVersion.current;
     setPending(true);
+    setChecking(true);
     setActionError(undefined);
     try {
       const prepared = await window.reviewAPI.previewGitAction(project.id, {
@@ -81,13 +96,36 @@ export function GitWorkspace({
             }
           : undefined,
         publishRemotes: remoteChoices,
+        ...(action === 'delete' ? deletionOptions : {}),
       });
-      if (version === selectionVersion.current) setPreview(prepared);
+      if (version === selectionVersion.current && request === preparationVersion.current)
+        setPreview(prepared);
     } catch (reason) {
-      setActionError(errorMessage(reason));
+      if (request === preparationVersion.current) setActionError(errorMessage(reason));
     } finally {
-      setPending(false);
+      if (request === preparationVersion.current) {
+        setPending(false);
+        setChecking(false);
+      }
     }
+  }
+  function cancelPreview() {
+    preparationVersion.current++;
+    setChecking(false);
+    setPending(false);
+    setPreview(undefined);
+    setDeletion(undefined);
+  }
+  function recheckDeletion(changes: Partial<NonNullable<typeof deletion>>) {
+    if (!deletion || !preview) return;
+    const next = { ...deletion, ...changes };
+    setDeletion(next);
+    setPreview({ ...preview, ready: false });
+    void prepare('delete', next.branch, publicationChoices, {
+      force: next.force,
+      deleteRemote: next.deleteRemote,
+      deleteRemotes: next.remotes,
+    });
   }
   function branchAction(name: string, action: GitBranchMenuAction) {
     if (action === 'favourite') {
@@ -108,11 +146,15 @@ export function GitWorkspace({
       void reload(true).finally(() => setPending(false));
     } else {
       if (
-        action !== 'checkout' &&
+        (action === 'pull' || action === 'push') &&
         (branch.repositories.length !== repositories.length ||
           !branch.repositories.every((repo) => repo.current))
       )
         return;
+      if (action === 'delete') {
+        setDeletion({ branch, force: false, deleteRemote: false, remotes: {} });
+        setPreview({ id: '', projectId: project.id, action: 'delete', rows: [], ready: false });
+      }
       void prepare(action, branch);
     }
   }
@@ -245,6 +287,16 @@ export function GitWorkspace({
           preview={preview}
           projectName={project.name}
           pending={disabled}
+          checking={checking}
+          error={actionError}
+          deletionBranch={preview.action === 'delete' ? deletion?.branch : undefined}
+          deleteRemote={deletion?.deleteRemote ?? false}
+          deletionRepositories={repositories}
+          deletionRemotes={deletion?.remotes ?? {}}
+          onDeleteRemote={(deleteRemote) => recheckDeletion({ deleteRemote })}
+          onDeletionRemote={(path, remote) =>
+            recheckDeletion({ remotes: { ...deletion?.remotes, [path]: remote } })
+          }
           publicationRepositories={repositories.filter(
             (repo) => !repo.upstream && !repo.pushTarget && repo.branch && !repo.error,
           )}
@@ -254,7 +306,9 @@ export function GitWorkspace({
             setPublishRemotes(choices);
             void prepare('push', selectedBranch, choices);
           }}
-          onCancel={() => setPreview(undefined)}
+          forceDelete={deletion?.force ?? false}
+          onForceDelete={(force) => recheckDeletion({ force })}
+          onCancel={cancelPreview}
           onConfirm={() => void execute()}
         />
       )}

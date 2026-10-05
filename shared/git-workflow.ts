@@ -1,4 +1,4 @@
-export type GitAction = 'checkout' | 'pull' | 'push' | 'create' | 'rename';
+export type GitAction = 'checkout' | 'pull' | 'push' | 'create' | 'rename' | 'delete';
 
 export interface GitDestination {
   remote: string;
@@ -64,6 +64,12 @@ export interface GitActionInput {
   newBranch?: string;
   /** Explicit first-publication remote for each repository-relative path. */
   publishRemotes?: Record<string, string>;
+  /** Explicit permission to delete unmerged local branches. */
+  force?: boolean;
+  /** Also delete the local branch's remote counterpart. */
+  deleteRemote?: boolean;
+  /** Explicit remote choice where a local branch has multiple possible remotes. */
+  deleteRemotes?: Record<string, string>;
 }
 
 export interface GitActionRow {
@@ -72,8 +78,10 @@ export interface GitActionRow {
   head: string;
   destination?: GitDestination;
   source?: GitDestination;
-  /** Captured branch configuration for safely reconciling a rename. */
+  /** Captured local branch configuration for validating a rename or deletion. */
   sourceConfigSignature?: string;
+  unmergedCommits?: number;
+  remoteDeletion?: GitDestination;
   createTracking?: boolean;
   noop: boolean;
   blockers: string[];

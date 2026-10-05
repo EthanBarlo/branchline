@@ -1,12 +1,22 @@
 import * as stylex from '@stylexjs/stylex';
-import { ArrowDown, ArrowUp, GitBranch, GitCompareArrows, Pencil, Plus, RefreshCw, Star } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowUp,
+  GitBranch,
+  GitCompareArrows,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Star,
+  Trash2,
+} from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { GitSidebarBranch } from './branchTree';
 import { colors, fonts, radii, spacing, typeScale } from '../../theme/tokens.stylex';
 
 export type GitBranchMenuAction =
-  'review' | 'checkout' | 'fetch' | 'pull' | 'push' | 'create' | 'rename' | 'favourite';
+  'review' | 'checkout' | 'fetch' | 'pull' | 'push' | 'create' | 'rename' | 'delete' | 'favourite';
 export interface GitBranchMenuContext {
   name: string;
   key: string;
@@ -193,6 +203,20 @@ export function GitBranchMenu({
       >
         <Pencil size={14} /> Rename…
       </button>
+      <button
+        role="menuitem"
+        type="button"
+        {...stylex.props(styles.item, styles.danger)}
+        disabled={busy || (!branch.remote && branch.repositories.some((repo) => repo.current))}
+        title={
+          !branch.remote && branch.repositories.some((repo) => repo.current)
+            ? 'Check out another branch before deleting this local branch.'
+            : undefined
+        }
+        onClick={() => perform('delete')}
+      >
+        <Trash2 size={14} /> Delete branch…
+      </button>
       <div role="separator" {...stylex.props(styles.separator)} />
       <button
         role="menuitem"
@@ -266,6 +290,13 @@ const styles = stylex.create({
     textAlign: 'left',
     outline: { default: 'none', ':focus-visible': 'none' },
     opacity: { default: 1, ':disabled': 0.35 },
+  },
+  danger: {
+    color: {
+      default: colors.dangerText,
+      ':hover:not(:disabled)': colors.dangerStrong,
+      ':focus-visible': colors.dangerStrong,
+    },
   },
   separator: { height: 1, marginBlock: 5, marginInline: 8, backgroundColor: colors.borderSubtle },
   hint: {

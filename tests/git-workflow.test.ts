@@ -1065,3 +1065,416 @@ test('history growth reuses bounded Git pages and invalidates captured tips on r
   assert.equal(refreshed.events[0].entries[0].commit.hash, newest);
   assert.ok(logs.slice(calls).some((args) => args.includes('--skip=0')));
 });
+
+test('deletes local branches across nested repositories without changing files, checkout, or remotes', async () => {
+  const { local, child, remote, service } = await withChild();
+  git(local, 'push', '-q', 'origin', 'feature');
+  for (const repo of [local, child]) git(repo, 'config', 'branch.feature.description', 'delete this configuration');
+  await writeFile(path.join(child, 'untracked.txt'), 'preserve\n');
+  const before = [local, child].map(repo => [git(repo, 'rev-parse', 'HEAD'), git(repo, 'status', '--porcelain'), git(repo, 'write-tree')]);
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' } });
+  assert.equal(preview.ready, true, JSON.stringify(preview));
+  assert.equal(service.needsJiraClose('project', preview.id), false);
+  const result = await service.run('project', preview.id);
+  assert.equal(result.state, 'completed');
+  assert.equal(result.rows.length, 2);
+  for (const [i, repo] of [local, child].entries()) {
+    assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+    assert.throws(() => git(repo, 'config', 'branch.feature.description'));
+    assert.deepEqual([git(repo, 'rev-parse', 'HEAD'), git(repo, 'status', '--porcelain'), git(repo, 'write-tree')], before[i]);
+    assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
+  }
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+});
+
+test('missing local branches and missing remotes are skipped without blocking other repositories', async () => {
+  const { local, child, remote, service } = await withChild();
+  git(child, 'branch', '-d', 'feature');
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' } });
+  assert.deepEqual(result.rows.map(row => row.noop), [false, true]);
+  git(local, 'branch', 'remote-only');
+  git(local, 'push', '-q', 'origin', 'remote-only');
+  git(child, 'remote', 'remove', 'origin');
+  const removed = await run(service, { action: 'delete', branch: { name: 'remote-only', kind: 'remote', remote: 'origin' } });
+  assert.equal(removed.state, 'completed');
+  assert.deepEqual(removed.rows.map(row => row.noop), [false, true]);
+  assert.throws(() => git(remote, 'rev-parse', '--verify', 'refs/heads/remote-only'));
+  assert.ok(git(local, 'rev-parse', 'remote-only'));
+});
+
+test('checked out branches in any repository or worktree block every local deletion', async () => {
+  const { local, child, directory, service } = await withChild();
+  git(child, 'switch', '-q', 'feature');
+  let preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' }, force: true });
+  assert.equal(preview.ready, false);
+  assert.match(preview.rows[1].blockers.join(' '), /another branch/);
+  await assert.rejects(service.run('project', preview.id), /unblocked/);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  git(child, 'switch', '-q', 'main');
+  git(child, 'worktree', 'add', '-q', path.join(directory, 'other-worktree'), 'feature');
+  preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' }, force: true });
+  assert.equal(preview.ready, false);
+  assert.match(preview.rows[1].blockers.join(' '), /another worktree/);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  assert.ok(git(child, 'rev-parse', 'feature'));
+});
+
+test('unmerged local branches require explicit force deletion across the project', async () => {
+  const { local, child, service } = await withChild();
+  git(child, 'switch', '-q', 'feature');
+  await commit(child, 'feature-only.txt', 'unmerged\n');
+  git(child, 'switch', '-q', 'main');
+  const input: GitActionInput = { action: 'delete', branch: { name: 'feature', kind: 'local' } };
+  const preview = await service.preview('project', input);
+  assert.equal(preview.ready, false);
+  assert.equal(preview.rows[1].unmergedCommits, 1);
+  await assert.rejects(service.run('project', preview.id), /unblocked/);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  assert.equal((await run(service, { ...input, force: true })).state, 'completed');
+  for (const repo of [local, child]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+});
+
+test('unmerged checks follow the branch upstream, matching git branch -d', async () => {
+  const { local, peer, service } = await fixture();
+  git(local, 'switch', '-qc', 'feature');
+  await commit(local, 'feature.txt', 'unmerged into HEAD but published\n');
+  git(local, 'push', '-qu', 'origin', 'feature');
+  git(local, 'switch', '-q', 'main');
+  assert.equal((await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' } })).state, 'completed');
+  git(local, 'branch', '--track', 'feature', 'origin/feature');
+  git(peer, 'push', '-q', 'origin', 'main:feature', '--force');
+  await service.fetch('project');
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' } });
+  assert.equal(preview.ready, false);
+  assert.equal(preview.rows[0].unmergedCommits, 1);
+});
+
+test('local branch tip and configuration changes invalidate the entire deletion preview', async () => {
+  const { local, child, service } = await withChild();
+  for (const change of ['tip', 'config']) {
+    const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' } });
+    assert.equal(preview.ready, true);
+    if (change === 'tip') {
+      const head = git(child, 'rev-parse', 'feature');
+      const next = git(child, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'New branch tip');
+      git(child, 'update-ref', 'refs/heads/feature', next);
+    } else git(child, 'config', 'branch.feature.description', 'changed since preview');
+    await assert.rejects(service.run('project', preview.id), /changed since the preview/);
+    assert.ok(git(local, 'rev-parse', 'feature'));
+    git(child, 'update-ref', 'refs/heads/feature', 'HEAD');
+  }
+});
+
+test('deletes only the qualified remote branch across repositories, preserving local branches and other remotes', async () => {
+  const { local, child, remote, directory, service } = await withChild();
+  const childRemote = path.join(directory, 'child-source');
+  git(childRemote, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const other = path.join(directory, 'other.git');
+  git(directory, 'clone', '--bare', '-q', remote, other);
+  git(local, 'remote', 'add', 'backup', other);
+  await service.fetch('project');
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(result.state, 'completed');
+  for (const repo of [remote, childRemote]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+  for (const repo of [local, child]) {
+    assert.ok(git(repo, 'rev-parse', 'feature'));
+    assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/remotes/origin/feature'));
+    assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
+  }
+  assert.ok(git(other, 'rev-parse', 'feature'));
+  assert.ok(git(local, 'rev-parse', 'refs/remotes/backup/feature'));
+  const snapshot = await service.getStatus('project');
+  assert.deepEqual(snapshot.branches.find(branch => branch.name === 'feature')!.repositories.find(repo => repo.path === '.')!.remotes, ['backup']);
+});
+
+test('a remote branch change after preview blocks all deletions before writing', async () => {
+  const { local, child, remote, directory, service } = await withChild();
+  const childRemote = path.join(directory, 'child-source');
+  git(childRemote, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  const head = git(childRemote, 'rev-parse', 'feature');
+  const next = git(childRemote, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'Advance remote');
+  git(childRemote, 'update-ref', 'refs/heads/feature', next);
+  await assert.rejects(service.run('project', preview.id), /changed since the preview/);
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+  assert.equal(git(childRemote, 'rev-parse', 'feature'), next);
+  assert.ok(git(child, 'rev-parse', 'feature'));
+});
+
+test('the deletion lease protects remote commits pushed during execution', async () => {
+  const { local, remote, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  const internals = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = internals.command.bind(service);
+  let next = '';
+  internals.command = async (directory, args) => {
+    if (args[0] === 'push') {
+      const head = git(remote, 'rev-parse', 'feature');
+      next = git(remote, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'Concurrent push');
+      git(remote, 'update-ref', 'refs/heads/feature', next);
+    }
+    return command(directory, args);
+  };
+  const result = await service.run('project', preview.id);
+  assert.equal(result.state, 'failed');
+  assert.equal(result.rows[0].state, 'unknown');
+  assert.equal(git(remote, 'rev-parse', 'feature'), next);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+});
+
+test('repositories sharing a server branch delete it once and prune each tracking ref', async () => {
+  const { local, child, remote, service } = await withChild();
+  git(local, 'push', '-q', 'origin', 'feature');
+  git(child, 'remote', 'set-url', 'origin', remote);
+  await service.fetch('project');
+  const internals = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = internals.command.bind(service);
+  let pushes = 0;
+  internals.command = async (directory, args) => {
+    if (args[0] === 'push') pushes++;
+    return command(directory, args);
+  };
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(result.state, 'completed', JSON.stringify(result));
+  assert.equal(pushes, 1);
+  for (const repo of [local, child]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/remotes/origin/feature'));
+});
+
+test('partial remote deletion preserves completed results when a later server rejects deletion', async () => {
+  const { local, child, remote, directory, service } = await withChild();
+  const childRemote = path.join(directory, 'child-source');
+  git(childRemote, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const hook = path.join(childRemote, '.git', 'hooks', 'pre-receive');
+  await writeFile(hook, '#!/bin/sh\necho "Branch protected" >&2\nexit 1\n');
+  await chmod(hook, 0o755);
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(result.state, 'failed');
+  assert.deepEqual(result.rows.map(row => row.state), ['done', 'failed']);
+  assert.throws(() => git(remote, 'rev-parse', '--verify', 'refs/heads/feature'));
+  assert.ok(git(childRemote, 'rev-parse', 'feature'));
+  for (const repo of [local, child]) assert.ok(git(repo, 'rev-parse', 'feature'));
+});
+
+test('interrupted local and remote deletions reconcile from observed branch state without replaying writes', async () => {
+  for (const kind of ['local', 'remote'] as const) {
+    const { local, remote, service, journal, project } = await fixture();
+    git(local, 'branch', 'feature');
+    git(local, 'push', '-q', 'origin', 'feature');
+    await run(service, { action: 'delete', branch: { name: 'feature', kind, ...(kind === 'remote' ? { remote: 'origin' } : {}) } });
+    const stored = JSON.parse(await readFile(journal, 'utf8'));
+    stored.operations.project.state = 'running';
+    stored.operations.project.rows[0].state = 'running';
+    await writeFile(journal, JSON.stringify(stored));
+    const reopened = new GitWorkflowService(journal, () => project);
+    await reopened.load();
+    const operation = (await reopened.getStatus('project')).operation!;
+    assert.equal(operation.state, 'interrupted');
+    assert.equal(operation.rows[0].state, 'done');
+    assert.match(operation.rows[0].message!, /branch was deleted/);
+    if (kind === 'remote') assert.throws(() => git(remote, 'rev-parse', '--verify', 'refs/heads/feature'));
+    else assert.ok(git(remote, 'rev-parse', 'feature'));
+  }
+});
+
+test('remote deletion uses a separate push URL without pruning branches fetched from a different server', async () => {
+  const { local, remote, directory, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const pushRemote = path.join(directory, 'push.git');
+  git(directory, 'clone', '--bare', '-q', remote, pushRemote);
+  git(local, 'remote', 'set-url', '--push', 'origin', pushRemote);
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(result.state, 'completed');
+  assert.match(result.rows[0].warnings.join(' '), /different URL/);
+  assert.throws(() => git(pushRemote, 'rev-parse', '--verify', 'refs/heads/feature'));
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+  assert.ok(git(local, 'rev-parse', 'refs/remotes/origin/feature'));
+});
+
+test('remote deletion previews redact embedded credentials', async () => {
+  const { local, service } = await fixture();
+  git(local, 'branch', 'feature');
+  const head = git(local, 'rev-parse', 'HEAD');
+  const internals = service as unknown as {
+    command(directory: string, args: string[]): Promise<string>;
+  };
+  const command = internals.command.bind(service);
+  internals.command = async (directory, args) => {
+    if (args[0] === 'remote' && args[1] === 'get-url') return 'https://user:private-token@example.invalid/repo.git';
+    if (args[0] === 'ls-remote') return `${head}\trefs/heads/feature`;
+    return command(directory, args);
+  };
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(preview.ready, true);
+  assert.equal(preview.rows[0].source?.url, 'https://[redacted]@example.invalid/repo.git');
+  assert.equal(JSON.stringify(preview).includes('private-token'), false);
+});
+
+test('remote deletion blocks ambiguous choices, mirror remotes, and multiple push destinations before writing', async () => {
+  const { local, child, remote, service } = await withChild();
+  git(local, 'push', '-q', 'origin', 'feature');
+  for (const branch of [{ name: 'feature', kind: 'remote' as const }, { name: '--bad', kind: 'remote' as const, remote: 'origin' }]) {
+    const preview = await service.preview('project', { action: 'delete', branch });
+    assert.equal(preview.ready, false);
+  }
+  git(child, 'config', 'remote.origin.mirror', 'true');
+  let preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(preview.ready, false);
+  assert.match(preview.rows[1].blockers.join(' '), /Mirror/);
+  git(child, 'config', '--unset', 'remote.origin.mirror');
+  git(local, 'config', '--add', 'remote.origin.pushurl', remote);
+  git(local, 'config', '--add', 'remote.origin.pushurl', remote);
+  preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } });
+  assert.equal(preview.ready, false);
+  assert.match(preview.rows[0].blockers.join(' '), /Multiple or invalid push/);
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+});
+
+test('optional remote deletion removes local and corresponding remote branches across nested repositories', async () => {
+  const { local, child, remote, directory, service } = await withChild();
+  const childRemote = path.join(directory, 'child-source');
+  git(childRemote, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const before = [local, child].map(repo => git(repo, 'rev-parse', 'HEAD'));
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true });
+  assert.equal(result.state, 'completed', JSON.stringify(result));
+  assert.equal(result.rows.length, 2);
+  for (const repo of [local, child, remote, childRemote]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+  for (const [i, repo] of [local, child].entries()) {
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), before[i]);
+    assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/remotes/origin/feature'));
+  }
+});
+
+test('optional remote deletion follows differently named upstreams and keeps their refs until local merged checks finish', async () => {
+  const { local, remote, service } = await fixture();
+  git(local, 'switch', '-qc', 'topic-local');
+  await commit(local, 'topic.txt', 'published but unmerged into HEAD\n');
+  git(local, 'push', '-qu', 'origin', 'topic-local:topic-remote');
+  git(local, 'switch', '-q', 'main');
+  git(local, 'branch', 'topic-remote');
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'topic-local', kind: 'local' }, deleteRemote: true });
+  assert.equal(preview.ready, true, JSON.stringify(preview));
+  assert.equal(preview.rows[0].unmergedCommits, 0);
+  assert.equal(preview.rows[0].remoteDeletion?.branch, 'topic-remote');
+  const result = await service.run('project', preview.id);
+  assert.equal(result.state, 'completed', JSON.stringify(result));
+  assert.throws(() => git(local, 'rev-parse', '--verify', 'refs/heads/topic-local'));
+  assert.throws(() => git(remote, 'rev-parse', '--verify', 'refs/heads/topic-remote'));
+  assert.ok(git(local, 'rev-parse', 'refs/heads/topic-remote'), 'other local branch stays intact');
+});
+
+test('optional remote deletion requires a choice when ambiguous and deletes only the selected remote', async () => {
+  const { local, remote, directory, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const other = path.join(directory, 'other.git');
+  git(directory, 'clone', '--bare', '-q', remote, other);
+  git(local, 'remote', 'add', 'backup', other);
+  await service.fetch('project');
+  const input: GitActionInput = { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true };
+  const preview = await service.preview('project', input);
+  assert.equal(preview.ready, false);
+  assert.match(preview.rows[0].blockers.join(' '), /Choose a remote/);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  const result = await run(service, { ...input, deleteRemotes: { '.': 'backup' } });
+  assert.equal(result.state, 'completed');
+  assert.throws(() => git(other, 'rev-parse', '--verify', 'refs/heads/feature'));
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+  assert.throws(() => git(local, 'rev-parse', '--verify', 'refs/heads/feature'));
+});
+
+test('optional remote deletion blocks all local writes when a remote cannot be checked or changes after preview', async () => {
+  const { local, child, remote, directory, service } = await withChild();
+  const childRemote = path.join(directory, 'child-source');
+  git(childRemote, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const input: GitActionInput = { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true };
+  const preview = await service.preview('project', input);
+  assert.equal(preview.ready, true);
+  const head = git(childRemote, 'rev-parse', 'feature');
+  const next = git(childRemote, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'Advance remote');
+  git(childRemote, 'update-ref', 'refs/heads/feature', next);
+  await assert.rejects(service.run('project', preview.id), /changed since the preview/);
+  for (const repo of [local, child, remote]) assert.ok(git(repo, 'rev-parse', 'feature'));
+  git(child, 'remote', 'set-url', 'origin', path.join(directory, 'missing.git'));
+  assert.equal((await service.preview('project', input)).ready, false);
+  for (const repo of [local, child, remote]) assert.ok(git(repo, 'rev-parse', 'feature'));
+});
+
+test('optional remote deletion handles missing counterparts and repositories with no remote', async () => {
+  const { local, child, service } = await withChild();
+  git(child, 'remote', 'remove', 'origin');
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true });
+  assert.equal(result.state, 'completed', JSON.stringify(result));
+  assert.equal(result.rows[0].remoteDeletion?.commit, null);
+  assert.match(result.rows[1].warnings.join(' '), /No remote configured/);
+  for (const repo of [local, child]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+});
+
+test('combined deletion reports partial remote success if the subsequent local deletion fails', async () => {
+  const { local, remote, service, journal, project } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true });
+  const internals = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = internals.command.bind(service);
+  internals.command = async (directory, args) => {
+    if (args[0] === 'branch' && args[1] === '-d') throw new Error('Local deletion failed');
+    return command(directory, args);
+  };
+  const result = await service.run('project', preview.id);
+  assert.equal(result.state, 'failed');
+  assert.equal(result.rows[0].state, 'failed');
+  assert.match(result.rows[0].message!, /Remote branch deleted; local branch remains/);
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  assert.throws(() => git(remote, 'rev-parse', '--verify', 'refs/heads/feature'));
+  const reopened = new GitWorkflowService(journal, () => project);
+  await reopened.load();
+  assert.equal((await reopened.getStatus('project')).operation?.rows[0].state, 'failed');
+  assert.equal((await run(reopened, { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true })).state, 'completed');
+});
+
+test('remote deletion checks use advertised tips without downloading commit objects', async () => {
+  const { local, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const internals = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = internals.command.bind(service);
+  let fetches = 0;
+  internals.command = async (directory, args) => {
+    if (args[0] === 'fetch') fetches++;
+    return command(directory, args);
+  };
+  assert.equal((await run(service, { action: 'delete', branch: { name: 'feature', kind: 'remote', remote: 'origin' } })).state, 'completed');
+  assert.equal(fetches, 0);
+});
+
+test('combined deletion removes a shared server branch once while deleting each local branch', async () => {
+  const { local, child, remote, service } = await withChild();
+  git(local, 'push', '-q', 'origin', 'feature');
+  git(child, 'remote', 'set-url', 'origin', remote);
+  await service.fetch('project');
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true });
+  assert.equal(result.state, 'completed', JSON.stringify(result));
+  for (const repo of [local, child, remote]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/feature'));
+});
+
+test('combined deletion preserves a local branch when the server rejects its remote deletion', async () => {
+  const { local, remote, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'push', '-q', 'origin', 'feature');
+  const hook = path.join(remote, 'hooks', 'pre-receive');
+  await writeFile(hook, '#!/bin/sh\necho "Branch protected" >&2\nexit 1\n');
+  await chmod(hook, 0o755);
+  const result = await run(service, { action: 'delete', branch: { name: 'feature', kind: 'local' }, deleteRemote: true });
+  assert.equal(result.state, 'failed');
+  assert.equal(result.rows[0].state, 'failed');
+  assert.ok(git(local, 'rev-parse', 'feature'));
+  assert.ok(git(remote, 'rev-parse', 'feature'));
+});

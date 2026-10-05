@@ -287,6 +287,8 @@ try {
   await page.keyboard.press('ArrowUp');
   assert.equal(await menu.getByRole('menuitem', { name: 'Add to favourites', exact: true }).evaluate(element => element === document.activeElement), true);
   await page.keyboard.press('ArrowUp');
+  assert.equal(await menu.getByRole('menuitem', { name: 'Delete branch…', exact: true }).evaluate(element => element === document.activeElement), true);
+  await page.keyboard.press('ArrowUp');
   assert.equal(await menu.getByRole('menuitem', { name: 'Rename…', exact: true }).evaluate(element => element === document.activeElement), true);
   await page.keyboard.press('ArrowUp');
   assert.equal(await menu.getByRole('menuitem', { name: 'Fetch project', exact: true }).evaluate(element => element === document.activeElement), true);
@@ -325,11 +327,98 @@ try {
     assert.equal(git(repo, 'rev-parse', 'topic/context-renamed'), git(repo, 'rev-parse', 'feature/demo'));
     assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/context-created'));
   }
+  // Combined deletion is opt-in, with explicit force for unmerged feature commits.
+  git(local, 'push', '-q', 'origin', 'topic/context-renamed');
+  for (const repo of [childSource, leafSource]) git(repo, 'branch', 'topic/context-renamed');
+  await panel.getByRole('textbox', { name: 'Find a branch' }).fill('topic/context-renamed');
+  await waitForGitIdle();
+  await branchAction('topic/context-renamed', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.waitFor();
+  await confirmation.getByRole('status').waitFor({ state: 'hidden' });
+  assert.equal(await confirmation.getByRole('checkbox', { name: 'Also delete remote branch', exact: true }).isChecked(), false);
+  assert.equal(await confirmation.getByText('Delete local branch', { exact: true }).count(), 3);
+  assert.equal(await confirmation.getByRole('button', { name: 'Confirm delete branch', exact: true }).isDisabled(), true);
+  await confirmation.getByRole('button', { name: 'Cancel preview', exact: true }).click();
+  for (const repo of [local, child, leaf, remote, childSource, leafSource]) assert.ok(git(repo, 'rev-parse', 'topic/context-renamed'));
+  await branchAction('topic/context-renamed', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.getByRole('checkbox', { name: 'Delete even if unmerged', exact: true }).check();
+  await confirmation.getByRole('checkbox', { name: 'Also delete remote branch', exact: true }).check();
+  await confirmation.getByRole('combobox', { name: 'Delete remote for .', exact: true }).click();
+  await page.getByRole('option', { name: 'origin', exact: true }).click();
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Confirm delete branch');
+    return button && !button.disabled;
+  });
+  await confirmation.getByRole('button', { name: 'Confirm delete branch', exact: true }).click();
+  await panel.getByText('Last delete · completed', { exact: true }).waitFor();
+  await waitForGitIdle();
+  for (const repo of [local, child, leaf]) {
+    assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/context-renamed'));
+    assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
+  }
+  for (const repo of [remote, childSource, leafSource]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/context-renamed'));
+  await tree.getByRole('treeitem', { name: 'topic/context-renamed', exact: true }).waitFor({ state: 'hidden' });
+  await panel.getByRole('textbox', { name: 'Find a branch' }).fill('');
+  // Qualified remote deletion covers all three repositories and preserves local namesakes.
+  for (const repo of [local, child, leaf]) git(repo, 'branch', 'topic/delete-remote');
+  git(local, 'push', '-q', 'origin', 'topic/delete-remote');
+  for (const repo of [childSource, leafSource]) git(repo, 'branch', 'topic/delete-remote');
+  await branchAction('main', 'Fetch project');
+  await waitForGitIdle();
+  await panel.getByRole('textbox', { name: 'Find a branch' }).fill('topic/delete-remote');
+  // Hold the real preview IPC: the dialog must open while its checks cannot finish.
+  await desktop.evaluate(({ ipcMain }) => {
+    const original = ipcMain._invokeHandlers.get('review:git-preview');
+    const driver = globalThis.deletePreviewSmoke = { entered: false, completed: false, release: null, restore: null };
+    const waiting = new Promise(resolve => { driver.release = resolve; });
+    driver.restore = () => ipcMain._invokeHandlers.set('review:git-preview', original);
+    ipcMain._invokeHandlers.set('review:git-preview', async (...args) => {
+      driver.entered = true;
+      await waiting;
+      try { return await original(...args); }
+      finally { driver.completed = true; }
+    });
+  });
+  await branchAction('origin/topic/delete-remote', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.waitFor({ timeout: 2000 });
+  await confirmation.getByRole('status').waitFor({ timeout: 2000 });
+  assert.equal(await desktop.evaluate(() => globalThis.deletePreviewSmoke.completed), false);
+  assert.equal(await confirmation.getByRole('button', { name: 'Confirm delete branch', exact: true }).isDisabled(), true);
+  assert.equal(await confirmation.getByRole('checkbox', { name: 'Also delete remote branch', exact: true }).count(), 0);
+  await confirmation.getByRole('button', { name: 'Cancel preview', exact: true }).click();
+  await confirmation.waitFor({ state: 'hidden' });
+  await desktop.evaluate(() => globalThis.deletePreviewSmoke.release());
+  for (let attempt = 0; attempt < 200 && !await desktop.evaluate(() => globalThis.deletePreviewSmoke.completed); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(await desktop.evaluate(() => globalThis.deletePreviewSmoke.completed), true);
+  await desktop.evaluate(() => globalThis.deletePreviewSmoke.restore());
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.getByRole('dialog').count(), 0, 'a cancelled preview never reopens when checks finish');
+  for (const repo of [remote, childSource, leafSource]) assert.ok(git(repo, 'rev-parse', 'topic/delete-remote'));
+  await waitForGitIdle();
+  await branchAction('origin/topic/delete-remote', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.waitFor();
+  await confirmation.getByRole('status').waitFor({ state: 'hidden' });
+  assert.equal(await confirmation.getByText('Delete remote branch', { exact: true }).count(), 3);
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Confirm delete branch');
+    return button && !button.disabled;
+  });
+  await confirmation.getByRole('button', { name: 'Confirm delete branch', exact: true }).click();
+  // Wait on the actual refs too: the previous deletion result has the same heading.
+  await page.waitForFunction(() => document.querySelector('[aria-label="Git · Git fixture"]')?.getAttribute('aria-busy') === 'false');
+  for (const repo of [remote, childSource, leafSource]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/delete-remote'));
+  for (const repo of [local, child, leaf]) assert.ok(git(repo, 'rev-parse', 'topic/delete-remote'));
+  await tree.getByRole('treeitem', { name: 'origin/topic/delete-remote', exact: true }).waitFor({ state: 'hidden' });
   await panel.getByRole('textbox', { name: 'Find a branch' }).fill('');
   const mainRow = tree.getByRole('treeitem', { name: 'main', exact: true });
   await mainRow.evaluate(element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: innerWidth - 1, clientY: innerHeight - 1 })));
   menu = page.getByRole('menu', { name: 'Branch actions for main', exact: true });
   await menu.waitFor();
+  assert.equal(await menu.getByRole('menuitem', { name: 'Delete branch…', exact: true }).isDisabled(), true, 'checked-out local branch deletion is disabled');
   const bounds = await menu.boundingBox();
   const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
   assert.ok(bounds.x + bounds.width <= viewport.width - 7 && bounds.y + bounds.height <= viewport.height - 7);
@@ -511,7 +600,7 @@ try {
   assert.ok(fetchReads.length > 0);
   for (const [key, count] of fetchReads) assert.equal(count, 1, key);
   assert.deepEqual(errors, []);
-  console.log('Git workspace desktop smoke passed: parent-linked commit graph, virtualised history, automatic history loading, combined repositories and branch filters, search, keyboard navigation, full commit details, light/dark rendering, quiet stable refreshes, preserved menus and selection, direct branch actions, coalesced focus fetches, Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch and Rename with previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
+  console.log('Git workspace desktop smoke passed: parent-linked commit graph, virtualised history, automatic history loading, combined repositories and branch filters, search, keyboard navigation, full commit details, light/dark rendering, quiet stable refreshes, preserved menus and selection, direct branch actions, coalesced focus fetches, Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch, Rename, and local/remote and optional combined deletion with immediate cancellable checking dialogs, stale response protection, remote choices, unmerged protection and previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
 } catch (error) {
   const page = desktop && (await desktop.windows())[0];
   if (page) console.error((await page.locator('body').innerText()).slice(-6000));
