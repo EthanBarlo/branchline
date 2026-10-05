@@ -332,7 +332,7 @@ export function ReviewWorkspace() {
                         ticket={
                           jiraLinks[review.id] === undefined ? jiraTicket : jiraLinks[review.id]?.key || null
                         }
-                        currentBranch={isCurrent ? featureBranch || null : undefined}
+                        currentBranch={isCurrent ? metadata?.inspection?.currentBranch : undefined}
                         ticketView={settings.jiraTicketView}
                         refreshKey={String(integrationRevision)}
                         onTicketChanged={() => setJiraLinkRevision((value) => value + 1)}

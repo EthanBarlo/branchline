@@ -184,10 +184,28 @@ try {
   }, repo);
   // The default entry point opens the full ticket directly, without an API
   // summary request or any additional BrowserWindow.
+  // Hold the first branch inspection so opening Jira while Current is loading
+  // cannot mistake the initial branch result for a checkout change.
+  await desktop.evaluate(({ ipcMain }) => {
+    const original = ipcMain._invokeHandlers.get('review:refresh');
+    const held = new Promise(resolve => { globalThis.jiraSmoke.releaseInitialRefresh = resolve; });
+    ipcMain._invokeHandlers.set('review:refresh', async (...args) => {
+      await held;
+      return original(...args);
+    });
+    globalThis.jiraSmoke.restoreInitialRefresh = () => ipcMain._invokeHandlers.set('review:refresh', original);
+  });
   await page.reload();
   await page.evaluate(() => window.reviewAPI.updateSettings({ theme: 'dark' }));
   await page.evaluate(() => { window.jiraClosedEvents = []; window.reviewAPI.onJiraBrowserClosed(id => window.jiraClosedEvents.push(id)); });
   await openTicket(page);
+  const initiallyOpenedViews = (await nativeViews()).views.map(view => view.id);
+  await desktop.evaluate(() => {
+    globalThis.jiraSmoke.restoreInitialRefresh();
+    globalThis.jiraSmoke.releaseInitialRefresh();
+  });
+  await page.locator('[title="Checked out: feature/APP-123"]').waitFor();
+  assert.deepEqual((await nativeViews()).views.map(view => view.id), initiallyOpenedViews, 'The initial branch inspection keeps the Jira page open.');
   assert.equal(await chrome('window.branchlineJiraInitialTheme'), 'dark', 'The toolbar receives the saved dark theme before its first state message.');
   assert.equal(await chrome('getComputedStyle(document.documentElement).backgroundColor'), 'rgb(34, 34, 34)');
   const mainId = (await nativeViews()).mainId;
