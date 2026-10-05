@@ -40,6 +40,9 @@ jobs:
       - run: npm run build
       - run: npm run test:desktop
       - run: npm run test:desktop:routing
+      - run: npm run test:desktop:git
+      - run: npm run test:desktop:git-history
+      - run: npm run test:desktop:performance
       - run: npm run test:desktop:background-review
       - run: npm run test:desktop:jira
       - run: npm run test:desktop:jira-browser
