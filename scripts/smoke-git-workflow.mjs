@@ -28,8 +28,26 @@ await mkdir(local);
 git(fixture, 'init', '-q', '--bare', '-b', 'main', remote);
 git(local, 'init', '-q', '-b', 'main');
 await commit(local, 'hello.ts', 'export const hello = "initial";\n');
+// A long, branching log exercises pagination, virtual rows, merges and tags.
+const historyBase = git(local, 'rev-parse', 'HEAD');
+let importedHistory = '';
+for (let i = 1; i <= 260; i++) {
+  const message = `History fixture commit ${i}`;
+  importedHistory += `commit refs/heads/main\nmark :${i}\nauthor Desktop Test <test@example.invalid> ${1700000000 + i} +0000\ncommitter Desktop Test <test@example.invalid> ${1700000000 + i} +0000\ndata ${Buffer.byteLength(message)}\n${message}\nfrom ${i === 1 ? historyBase : `:${i - 1}`}\n\n`;
+}
+execFileSync('git', ['fast-import', '--quiet'], { cwd: local, env, input: importedHistory });
+git(local, 'reset', '--hard', '-q', 'main');
+git(local, 'switch', '-qc', 'history/side');
+await commit(local, 'graph-side.ts', 'export const side = true;\n');
+git(local, 'switch', '-q', 'main');
+await commit(local, 'graph-main.ts', 'export const main = true;\n');
+git(local, 'merge', '--no-ff', '-qm', 'Merge history example\n\nA full commit message survives the history IPC.', 'history/side');
+git(local, 'tag', '-a', 'v0.1', '-m', 'Graph fixture tag');
+
 git(local, 'remote', 'add', 'origin', remote);
 git(local, 'push', '-qu', 'origin', 'main');
+// An unpublished branch must still offer explicit remote choice inside Push preview.
+git(local, 'remote', 'add', 'backup', remote);
 // Three repositories share one logical branch tree, including a nested submodule.
 const childSource = join(fixture, 'child-source');
 const leafSource = join(fixture, 'leaf-source');
@@ -72,14 +90,100 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: 'Add project', exact: true }).click();
   await page.getByRole('button', { name: 'Project Git workflow', exact: true }).click();
   let panel = page.getByRole('region', { name: 'Git · Git fixture', exact: true });
-  await panel.getByText('Incoming', { exact: true }).waitFor();
-  await page.waitForFunction(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Fetch'); return button && !button.disabled; });
+  const waitForGitIdle = () => page.waitForFunction(() =>
+    document.querySelector('[aria-label="Git · Git fixture"]')?.getAttribute('aria-busy') === 'false');
+  const branchAction = async (branch, action) => {
+    await panel.getByRole('treeitem', { name: branch, exact: true }).click({ button: 'right' });
+    await page.getByRole('menu', { name: `Branch actions for ${branch}`, exact: true })
+      .getByRole('menuitem', { name: action, exact: true }).click();
+  };
+  await panel.getByLabel('Incoming 1', { exact: true }).first().waitFor();
+  await waitForGitIdle();
   const tree = panel.getByRole('tree', { name: 'Project branches' });
   assert.equal(await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).count(), 1);
   assert.equal(await tree.getByRole('treeitem', { name: 'main', exact: true }).getByLabel('Incoming 1', { exact: true }).count(), 1);
   assert.equal(await tree.getByRole('treeitem', { name: 'main', exact: true }).getByLabel('Outgoing 1', { exact: true }).count(), 1);
+  assert.equal(await tree.locator('[aria-label^="Incoming 0"], [aria-label^="Outgoing 0"], [aria-label$=" —"]').count(), 0, 'empty and unknown-only counts stay hidden');
+  const options = tree.locator('button[aria-label="Actions for feature/demo"]');
+  await panel.getByRole('textbox', { name: 'Search loaded commits', exact: true }).focus();
+  await page.mouse.move(1000, 20);
+  assert.equal(await options.evaluate((element) => getComputedStyle(element).visibility), 'hidden');
+  await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).hover();
+  assert.equal(await options.evaluate((element) => getComputedStyle(element).visibility), 'visible');
+  assert.equal(await tree.locator('button[aria-label="Actions for main"]').evaluate((element) => getComputedStyle(element).visibility), 'hidden', 'hover only reveals that branch');
+  await page.mouse.move(1000, 20);
+  await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).focus();
+  assert.equal(await options.evaluate((element) => getComputedStyle(element).visibility), 'visible', 'keyboard focus reveals branch actions');
+  await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+
   await tree.getByRole('treeitem', { name: 'Local', exact: true }).waitFor();
   await tree.getByRole('treeitem', { name: 'Remote', exact: true }).waitFor();
+  await panel.getByRole('combobox', { name: 'History branches', exact: true }).click();
+  await page.getByRole('option', { name: 'All branches', exact: true }).click();
+  const log = panel.getByRole('grid', { name: 'Commit log', exact: true });
+  await log.locator('[data-commit-hash]').first().waitFor();
+  await log.getByText('Merge history example', { exact: true }).waitFor();
+  await log.getByText('v0.1', { exact: true }).waitFor();
+  assert.ok(await log.locator('svg path').count() > 0);
+  assert.ok(await log.locator('[data-commit-hash]').count() < 100, 'history rows are virtualised');
+  assert.equal(await panel.getByRole('button', { name: 'Load older commits', exact: true }).count(), 0);
+  await log.evaluate((element) => { element.scrollTop = element.scrollHeight - element.clientHeight - 400; });
+  assert.equal(await panel.getByRole('group', { name: 'Commit history summary', exact: true }).count(), 0);
+  assert.equal(await panel.locator('summary').filter({ hasText: 'Branch details' }).count(), 0);
+  await page.waitForFunction((count) => Number(document.querySelector('[aria-label="Commit log"]')?.dataset.loadedCommits) === count,
+    [local, child, leaf].reduce((sum, directory) => sum + Number(git(directory, 'rev-list', '--all', '--count')), 0));
+  await log.focus();
+  await log.press('End');
+  await log.getByText('History fixture commit 1', { exact: true }).waitFor();
+  await log.press('Home');
+  const search = panel.getByRole('textbox', { name: 'Search loaded commits', exact: true });
+  await search.fill('Merge history example');
+  await panel.getByRole('button', { name: 'Next', exact: true }).click();
+  await log.focus();
+  await log.press('Enter');
+  await panel.getByRole('region', { name: 'Commit details', exact: true }).getByText('A full commit message survives the history IPC.', { exact: true }).waitFor();
+  await panel.getByRole('button', { name: 'Close commit details', exact: true }).click();
+  await search.fill('');
+  await log.getByText('outgoing.ts', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('combobox', { name: 'History repository', exact: true }).count(), 0);
+  await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).click();
+  await panel.getByRole('combobox', { name: 'History branches', exact: true }).click();
+  await page.getByRole('option', { name: 'Selected branch', exact: true }).click();
+  await log.locator(`[data-repository-path="."][data-commit-hash="${git(local, 'rev-parse', 'feature/demo')}"]`).waitFor();
+  assert.equal(await log.getByText('incoming.ts', { exact: true }).count(), 0);
+  await panel.getByRole('combobox', { name: 'History branches', exact: true }).click();
+  await page.getByRole('option', { name: 'All branches', exact: true }).click();
+  await log.getByText('incoming.ts', { exact: true }).waitFor();
+  if (process.env.BRANCHLINE_GIT_GRAPH_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_GRAPH_SCREENSHOT });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  if (process.env.BRANCHLINE_GIT_GRAPH_DARK_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_GRAPH_DARK_SCREENSHOT });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+
+  // A history refresh with new decorations must preserve the inspected commit and scroll.
+  await log.focus();
+  await log.press('End');
+  await log.locator('[aria-selected="true"]').waitFor();
+  const beforeRefresh = await log.evaluate(element => ({
+    hash: element.querySelector('[aria-selected="true"]')?.getAttribute('data-commit-hash'),
+    scroll: element.scrollTop,
+  }));
+  assert.ok(beforeRefresh.hash);
+  git(local, 'tag', 'refresh-marker', beforeRefresh.hash);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    window.dispatchEvent(new Event('focus'));
+    delete document.hidden;
+  });
+  await log.getByText('refresh-marker', { exact: true }).waitFor();
+  const afterRefresh = await log.evaluate(element => ({
+    hash: element.querySelector('[aria-selected="true"]')?.getAttribute('data-commit-hash'),
+    scroll: element.scrollTop,
+  }));
+  assert.deepEqual(afterRefresh, beforeRefresh);
   // Routine checks must preserve tree geometry, row identity and the open menu.
   await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).click();
   await tree.getByRole('button', { name: 'Actions for feature/demo', exact: true }).click();
@@ -106,9 +210,14 @@ try {
   assert.equal(stability.selected, 'true');
   assert.equal(stability.menuOpen, true);
   await page.keyboard.press('Escape');
-  await panel.getByRole('button', { name: 'New branch', exact: true }).click();
+  for (const action of ['Fetch', 'Pull project', 'Push project', 'New branch', 'Rename', 'Review', 'Check out']) {
+    assert.equal(await panel.getByRole('button', { name: action, exact: true }).count(), 0, 'duplicate toolbar actions removed');
+  }
+  assert.equal(await panel.locator('header').count(), 0, 'checkout summary toolbar removed');
+  assert.equal(await panel.getByRole('heading', { level: 1 }).count(), 0, 'selected branch toolbar removed');
+  await branchAction('feature/demo', "New branch from 'feature/demo'…");
   await page.getByRole('dialog', { name: 'New branch', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
-  await panel.getByRole('button', { name: 'Rename', exact: true }).click();
+  await branchAction('feature/demo', 'Rename…');
   await page.getByRole('dialog', { name: 'Rename branch', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
 
   const localGroup = tree.getByRole('group', { name: 'Local', exact: true });
@@ -127,7 +236,7 @@ try {
   await originGroup.getByRole('treeitem', { name: 'origin/main', exact: true }).click();
   assert.equal(await originGroup.getByRole('treeitem', { name: 'origin/main', exact: true }).getAttribute('aria-selected'), 'true');
   assert.equal(await localGroup.getByRole('treeitem', { name: 'main', exact: true }).getAttribute('aria-selected'), 'false');
-  await panel.getByRole('button', { name: 'Review', exact: true }).click();
+  await branchAction('origin/main', 'Review branch…');
   const remoteReview = page.getByRole('dialog', { name: 'Review another branch', exact: true });
   assert.match(await remoteReview.getByRole('combobox', { name: 'Feature branch', exact: true }).innerText(), /origin\/main/);
   await remoteReview.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -141,8 +250,7 @@ try {
   await page.keyboard.press('Escape');
   assert.equal(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).evaluate(element => element === document.activeElement), true);
   assert.match(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).innerText(), /\[packages\/core\]/);
-  assert.equal(await panel.getByRole('button', { name: 'Review', exact: true }).isDisabled(), true);
-  await panel.getByRole('button', { name: 'Check out', exact: true }).click();
+  await branchAction('codex/submodule-only', 'Check out…');
   let confirmation = page.getByRole('dialog', { name: 'Checkout preview', exact: true });
   assert.equal(await confirmation.getByRole('button', { name: 'Confirm checkout', exact: true }).isDisabled(), true);
   assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'main');
@@ -163,7 +271,9 @@ try {
   await tree.getByRole('treeitem', { name: 'codex', exact: true }).press('ArrowRight');
   await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).waitFor();
   await tree.getByRole('treeitem', { name: 'main', exact: true }).click();
-  assert.equal(await panel.getByRole('button', { name: 'Review', exact: true }).isDisabled(), false);
+  await tree.getByRole('treeitem', { name: 'main', exact: true }).click({ button: 'right' });
+  assert.equal(await page.getByRole('menu').getByRole('menuitem', { name: 'Review branch…', exact: true }).isDisabled(), false);
+  await page.keyboard.press('Escape');
   // Right-click targets the inspected branch; opening the menu never changes checkout.
   const featureRow = tree.getByRole('treeitem', { name: 'feature/demo', exact: true });
   await featureRow.click({ button: 'right' });
@@ -223,12 +333,12 @@ try {
   const bounds = await menu.boundingBox();
   const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
   assert.ok(bounds.x + bounds.width <= viewport.width - 7 && bounds.y + bounds.height <= viewport.height - 7);
-  await panel.getByRole('heading', { name: 'main', exact: true }).click();
+  await panel.getByRole('textbox', { name: 'Search loaded commits', exact: true }).click();
   await menu.waitFor({ state: 'hidden' });
   await mainRow.press('Shift+F10');
   await menu.getByRole('menuitem', { name: 'Fetch project', exact: true }).click();
   await menu.waitFor({ state: 'hidden' });
-  await page.waitForFunction(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Fetch'); return button && !button.disabled; });
+  await waitForGitIdle();
   if (process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT });
   await mainRow.click({ button: 'right' });
   await menu.getByRole('menuitem', { name: 'Pull project…', exact: true }).click();
@@ -270,7 +380,11 @@ try {
   assert.equal(git(leaf, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   await panel.getByRole('treeitem', { name: 'feature/demo', exact: true }).click({ button: 'right' });
   await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Push project…', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm push', exact: true }).click();
+  const pushPreview = page.getByRole('dialog', { name: 'Push preview', exact: true });
+  assert.equal(await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).isDisabled(), true);
+  await pushPreview.getByRole('combobox', { name: 'Publish remote for .', exact: true }).click();
+  await page.getByRole('option', { name: 'origin', exact: true }).click();
+  await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).click();
   await panel.getByText('Last push · completed', { exact: true }).waitFor();
   assert.equal(git(remote, 'rev-parse', 'feature/demo'), git(local, 'rev-parse', 'HEAD'));
   // Renaming a current branch also updates nested checkouts and keeps remote tracking destinations.
@@ -316,7 +430,7 @@ try {
   git(peer, 'switch', '-qc', 'feature/demo', '--track', 'origin/feature/demo');
   await commit(peer, 'remote-only.ts', 'export const remoteOnly = true;\n');
   git(peer, 'push', '-q');
-  await panel.getByRole('button', { name: 'Pull project', exact: true }).click();
+  await branchAction('feature/demo', 'Pull project…');
   await page.getByRole('dialog').getByText('Branches have diverged. Merge or rebase manually, then refresh.', { exact: true }).waitFor();
   assert.equal(await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).isDisabled(), true);
   await page.screenshot({ path: join(fixture, 'git-panel.png') });
@@ -356,7 +470,7 @@ try {
     });
   });
   await panel.getByRole('treeitem', { name: 'main', exact: true }).click();
-  await panel.getByRole('button', { name: 'Check out', exact: true }).click();
+  await branchAction('main', 'Check out…');
   for (let attempt = 0; attempt < 100 && !await desktop.evaluate(() => globalThis.gitPreviewSmoke.held); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(await desktop.evaluate(() => globalThis.gitPreviewSmoke.held), true);
   await page.getByRole('tab', { name: 'Other Git fixture', exact: true }).click();
@@ -392,15 +506,12 @@ try {
   });
   await desktop.evaluate(() => globalThis.gitCacheSmoke.release());
   await panel.getByText('Live Git status', { exact: true }).waitFor();
-  await page.waitForFunction(() => {
-    const button = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Fetch');
-    return button && !button.disabled;
-  });
+  await waitForGitIdle();
   const fetchReads = await desktop.evaluate(() => Object.entries(globalThis.gitCacheSmoke.reads).filter(([key]) => key.startsWith('review:git-fetch:')));
   assert.ok(fetchReads.length > 0);
   for (const [key, count] of fetchReads) assert.equal(count, 1, key);
   assert.deepEqual(errors, []);
-  console.log('Git workspace desktop smoke passed: quiet stable refreshes, preserved menus and selection, direct branch actions, coalesced focus fetches, Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch and Rename with previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
+  console.log('Git workspace desktop smoke passed: parent-linked commit graph, virtualised history, automatic history loading, combined repositories and branch filters, search, keyboard navigation, full commit details, light/dark rendering, quiet stable refreshes, preserved menus and selection, direct branch actions, coalesced focus fetches, Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch and Rename with previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
 } catch (error) {
   const page = desktop && (await desktop.windows())[0];
   if (page) console.error((await page.locator('body').innerText()).slice(-6000));

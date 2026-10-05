@@ -4,6 +4,8 @@ import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/prom
 import path from 'node:path';
 import { GitWorkflowCache } from './workflow-cache';
 import { GitOperationQueue } from './operation-queue';
+import { historyFormat, parseHistory } from './history';
+import { projectGraphHistory } from './project-history';
 import { mapConcurrent } from '../integrations/concurrency';
 import type { Project } from '../../shared/types';
 import type {
@@ -18,6 +20,10 @@ import type {
   GitRepositoryStatus,
   GitWorkflowChange,
   GitWorkflowSnapshot,
+  GitCommit,
+  GitHistory,
+  GitHistoryInput,
+  GitProjectHistory,
 } from '../../shared/git-workflow';
 
 interface Repository extends GitRepositoryStatus {
@@ -68,6 +74,10 @@ const remoteCacheRef = (url: string, branch: string): string =>
 /** Owns local Git writes. Reads coexist; writes drain readers and protect overlapping projects. */
 export class GitWorkflowService {
   private queue = new GitOperationQueue();
+  private historyCache = new Map<
+    string,
+    { signature: string; commits: GitCommit[]; hasMore: boolean; loading: Promise<void> }
+  >();
   private branchCache = new Map<
     string,
     {
@@ -754,6 +764,153 @@ export class GitWorkflowService {
 
   getStatus(projectId: string): Promise<GitWorkflowSnapshot> {
     return this.read(() => this.scan(projectId, false), this.project(projectId).repoPath);
+  }
+
+  private historyLimit(limit = 250): number {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit >= Number.MAX_SAFE_INTEGER)
+      throw new Error('Choose a positive, safe history limit.');
+    return limit;
+  }
+
+  private async historyRepository(projectId: string, repository: Repository): Promise<string> {
+    const directory = await realpath(repository.directory);
+    const root = await realpath(this.project(projectId).repoPath);
+    if (!within(root, directory)) throw new Error('Unsafe submodule path.');
+    const top = await realpath(await this.command(directory, ['rev-parse', '--show-toplevel']));
+    if (top !== directory) throw new Error('Submodule is not initialized. Initialize it manually.');
+    return directory;
+  }
+
+  private async repositoryHistory(directory: string, input: GitHistoryInput): Promise<GitHistory> {
+    const limit = this.historyLimit(input.limit);
+    const [refOutput, head] = await Promise.all([
+      this.command(directory, [
+        'for-each-ref',
+        '--format=%(refname)%00%(objectname)%00%(*objectname)%00%(objecttype)%00%(*objecttype)',
+        'refs/heads/',
+        'refs/remotes/',
+        'refs/tags/',
+      ]),
+      this.command(directory, ['rev-parse', '--verify', 'HEAD']).catch(() => ''),
+    ]);
+    const refs = (
+      await Promise.all(
+        refOutput.split('\n').map(async (line) => {
+          const fields = line.split('\0');
+          if (fields[4] !== 'tag') return line;
+          const commit = await this.command(directory, [
+            'rev-parse',
+            '--verify',
+            `${fields[1]}^{commit}`,
+          ]).catch(() => '');
+          if (!commit) return line;
+          fields[2] = commit;
+          fields[4] = 'commit';
+          return fields.join('\0');
+        }),
+      )
+    ).join('\n');
+    let revisions = [
+      ...new Set([
+        ...refs.split('\n').flatMap((line) => {
+          const [, hash, peeled, type, peeledType] = line.split('\0');
+          return type === 'commit' ? [hash] : peeledType === 'commit' ? [peeled] : [];
+        }),
+        ...(head ? [head] : []),
+      ]),
+    ];
+    if (input.branch) {
+      await this.validBranch(directory, input.branch.name);
+      const ref = input.branch.remote
+        ? `refs/remotes/${input.branch.remote}/${input.branch.name}`
+        : `refs/heads/${input.branch.name}`;
+      const revision = await this.command(directory, ['rev-parse', '--verify', `${ref}^{commit}`]).catch(
+        () => '',
+      );
+      if (!revision) throw new Error('This branch is unavailable in the selected repository.');
+      revisions = [revision];
+    }
+    if (!refs && !head) return { repositoryPath: input.repositoryPath, commits: [], hasMore: false };
+    const signature = JSON.stringify([refs, head, revisions]);
+    let cached = this.historyCache.get(directory);
+    if (!cached || cached.signature !== signature) {
+      // Keep reuse bounded to the currently inspected repositories.
+      if (this.historyCache.size >= 32) this.historyCache.clear();
+      cached = { signature, commits: [], hasMore: true, loading: Promise.resolve() };
+      this.historyCache.set(directory, cached);
+    }
+    const history = cached;
+    const request = history.loading.then(async () => {
+      while (history.hasMore && history.commits.length < limit + 1) {
+        const count = Math.min(250, limit + 1 - history.commits.length);
+        const log = await this.command(directory, [
+          'log',
+          '-z',
+          '--topo-order',
+          '--no-show-signature',
+          '--no-color',
+          `--skip=${history.commits.length}`,
+          `--max-count=${count}`,
+          `--format=${historyFormat}`,
+          ...revisions,
+          '--',
+        ]);
+        const page = parseHistory(log, refs, head);
+        history.commits.push(...page);
+        history.hasMore = page.length === count;
+      }
+    });
+    // Serialize overlapping reads of the same cached traversal, including after failures.
+    history.loading = request.catch(() => {});
+    await request;
+    return {
+      repositoryPath: input.repositoryPath,
+      commits: history.commits.slice(0, limit),
+      hasMore: history.hasMore || history.commits.length > limit,
+    };
+  }
+
+  async getHistory(projectId: string, input: GitHistoryInput): Promise<GitHistory> {
+    this.historyLimit(input.limit);
+    return this.read(async () => {
+      const repository = (await this.discover(projectId)).find((repo) => repo.path === input.repositoryPath);
+      if (!repository) throw new Error('Repository is not part of this project.');
+      return this.repositoryHistory(await this.historyRepository(projectId, repository), input);
+    }, this.project(projectId).repoPath);
+  }
+
+  async getProjectHistory(
+    projectId: string,
+    input: Omit<GitHistoryInput, 'repositoryPath'>,
+  ): Promise<GitProjectHistory> {
+    const limit = this.historyLimit(input.limit);
+    return this.read(async () => {
+      const repositories = await this.discover(projectId);
+      const results = await mapConcurrent(repositories, 4, async (repository) => {
+        try {
+          const directory = await this.historyRepository(projectId, repository);
+          return {
+            path: repository.path,
+            history: await this.repositoryHistory(directory, {
+              ...input,
+              repositoryPath: repository.path,
+            }),
+          };
+        } catch (error) {
+          return { path: repository.path, error: message(error) };
+        }
+      });
+      const histories = results.flatMap((result) => (result.history ? [result.history] : []));
+      const events = projectGraphHistory(histories);
+      return {
+        events: events.slice(0, limit),
+        repositories: results.map((result) => ({
+          path: result.path,
+          ...(result.error ? { error: result.error } : {}),
+        })),
+        hasMore: histories.some((history) => history.hasMore) || events.length > limit,
+      };
+    }, this.project(projectId).repoPath);
   }
 
   private async fetchRepositories(repositories: Repository[]): Promise<void> {

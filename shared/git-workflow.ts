@@ -120,6 +120,11 @@ export interface GitWorkflowChange {
 }
 
 export interface GitWorkflowAPI {
+  getGitHistory(projectId: string, input: GitHistoryInput): Promise<GitHistory>;
+  getGitProjectHistory(
+    projectId: string,
+    input: Omit<GitHistoryInput, 'repositoryPath'>,
+  ): Promise<GitProjectHistory>;
   getCachedGitStatus(projectId: string): Promise<GitWorkflowSnapshot | undefined>;
   getGitStatus(projectId: string): Promise<GitWorkflowSnapshot>;
   fetchGit(projectId: string): Promise<GitWorkflowSnapshot>;
@@ -127,4 +132,49 @@ export interface GitWorkflowAPI {
   runGitAction(projectId: string, previewId: string): Promise<GitOperation>;
   acknowledgeGitOperation(projectId: string): Promise<GitWorkflowSnapshot>;
   onGitWorkflowChanged(callback: (change: GitWorkflowChange) => void): () => void;
+}
+
+export interface GitHistoryInput {
+  repositoryPath: string;
+  /** Omit to show every local branch, remote branch and tag, plus detached HEAD. */
+  branch?: GitBranchChoice;
+  limit?: number;
+}
+
+export interface GitCommitRef {
+  name: string;
+  kind: 'local' | 'remote' | 'tag' | 'head';
+}
+
+export interface GitCommit {
+  hash: string;
+  parents: string[];
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  body: string;
+  refs: GitCommitRef[];
+  committedAt?: string;
+}
+
+export interface GitHistory {
+  repositoryPath: string;
+  commits: GitCommit[];
+  hasMore: boolean;
+}
+
+export interface GitTimelineEntry {
+  repositoryPath: string;
+  commit: GitCommit;
+  association: 'anchor';
+}
+export interface GitTimelineEvent {
+  id: string;
+  entries: GitTimelineEntry[];
+}
+export interface GitProjectHistory {
+  events: GitTimelineEvent[];
+  repositories: { path: string; error?: string }[];
+  hasMore: boolean;
 }

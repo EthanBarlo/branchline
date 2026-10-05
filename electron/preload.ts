@@ -15,6 +15,8 @@ function invoke<Name extends ReviewRequestName>(
 }
 
 const api: ReviewAPI = {
+  getGitHistory: (...args) => invoke('git-history', ...args),
+  getGitProjectHistory: (...args) => invoke('git-project-history', ...args),
   getCachedGitStatus: (id) => invoke('git-cache', id),
   getGitStatus: (id) => invoke('git-status', id),
   fetchGit: (id) => invoke('git-fetch', id),

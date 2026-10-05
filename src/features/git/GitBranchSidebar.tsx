@@ -20,28 +20,37 @@ import { aggregateCount, branchTree, type BranchFolder, type GitSidebarBranch } 
 
 export function BranchCounts({
   repositories,
+  hideEmpty = false,
 }: {
   repositories: { incoming: number | null; outgoing: number | null; diverged: boolean }[];
+  hideEmpty?: boolean;
 }) {
+  const incoming = repositories.some((repo) => (repo.incoming ?? 0) > 0);
+  const outgoing = repositories.some((repo) => (repo.outgoing ?? 0) > 0);
+  if (hideEmpty && !incoming && !outgoing) return null;
   return (
     <span
       {...stylex.props(styles.counts)}
       title="Commit counts summed across repositories. — or ? means a destination is unavailable."
     >
-      <span
-        aria-label={`Incoming ${aggregateCount(repositories.map((repo) => repo.incoming))}`}
-        {...stylex.props(styles.count, repositories.some((repo) => repo.incoming) && styles.incoming)}
-      >
-        <ArrowDown size={12} />
-        {aggregateCount(repositories.map((repo) => repo.incoming))}
-      </span>
-      <span
-        aria-label={`Outgoing ${aggregateCount(repositories.map((repo) => repo.outgoing))}`}
-        {...stylex.props(styles.count, repositories.some((repo) => repo.outgoing) && styles.outgoing)}
-      >
-        <ArrowUp size={12} />
-        {aggregateCount(repositories.map((repo) => repo.outgoing))}
-      </span>
+      {(!hideEmpty || incoming) && (
+        <span
+          aria-label={`Incoming ${aggregateCount(repositories.map((repo) => repo.incoming))}`}
+          {...stylex.props(styles.count, incoming && styles.incoming)}
+        >
+          <ArrowDown size={12} />
+          {aggregateCount(repositories.map((repo) => repo.incoming))}
+        </span>
+      )}
+      {(!hideEmpty || outgoing) && (
+        <span
+          aria-label={`Outgoing ${aggregateCount(repositories.map((repo) => repo.outgoing))}`}
+          {...stylex.props(styles.count, outgoing && styles.outgoing)}
+        >
+          <ArrowUp size={12} />
+          {aggregateCount(repositories.map((repo) => repo.outgoing))}
+        </span>
+      )}
     </span>
   );
 }
@@ -182,8 +191,13 @@ export function GitBranchSidebar({
     return (
       <li
         key={`branch:${branch.key}`}
+        data-git-branch-row=""
         role="none"
-        {...stylex.props(styles.branchRow, selected === branch.key && styles.selected)}
+        {...stylex.props(
+          stylex.defaultMarker(),
+          styles.branchRow,
+          selected === branch.key && styles.selected,
+        )}
       >
         <button
           role="treeitem"
@@ -234,7 +248,7 @@ export function GitBranchSidebar({
           {!!current && favourite && (
             <Tag size={12} aria-label={checkoutLabel} {...stylex.props(styles.current)} />
           )}
-          <BranchCounts repositories={branch.repositories} />
+          <BranchCounts repositories={branch.repositories} hideEmpty />
         </button>
         <button
           type="button"
@@ -362,9 +376,6 @@ export function GitBranchSidebar({
             </button>
           )}
         </label>
-        <div {...stylex.props(styles.scope)}>
-          Across {repositoryCount} {repositoryCount === 1 ? 'repository' : 'repositories'}
-        </div>
         <ul
           ref={tree}
           role="tree"
@@ -530,6 +541,11 @@ const styles = stylex.create({
     color: colors.textQuiet,
   },
   menuControl: {
+    visibility: {
+      default: 'hidden',
+      [stylex.when.ancestor(':is([data-git-branch-row]:hover)')]: 'visible',
+      [stylex.when.ancestor(':is([data-git-branch-row]:focus-within)')]: 'visible',
+    },
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -599,7 +615,6 @@ const styles = stylex.create({
     color: colors.textDefault,
     outline: 'none',
   },
-  scope: { paddingInline: 16, paddingBlock: 12, fontSize: typeScale.micro, color: colors.textQuiet },
   list: { padding: 0, margin: 0, listStyle: 'none' },
   tree: { overflowY: 'auto', flex: '1', paddingBottom: 12, minHeight: 0 },
   row: {

@@ -7,6 +7,8 @@ type AsyncReviewMethod = {
 /** Existing channel names remain stable for packaged preload and desktop clients. */
 export const reviewRequestMethods = {
   'git-cache': 'getCachedGitStatus',
+  'git-history': 'getGitHistory',
+  'git-project-history': 'getGitProjectHistory',
   'git-status': 'getGitStatus',
   'git-fetch': 'fetchGit',
   'git-preview': 'previewGitAction',

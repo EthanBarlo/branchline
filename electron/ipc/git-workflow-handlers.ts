@@ -10,6 +10,8 @@ export function registerGitWorkflowHandlers(
   window: ReviewWindow,
 ): void {
   handle('git-cache', (id) => workflow.getCachedStatus(id));
+  handle('git-history', (id, input) => workflow.getHistory(id, input));
+  handle('git-project-history', (id, input) => workflow.getProjectHistory(id, input));
   handle('git-status', (id) => workflow.getStatus(id));
   handle('git-fetch', (id) => workflow.fetch(id));
   handle('git-preview', (id, input) => workflow.preview(id, input));
