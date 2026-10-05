@@ -310,7 +310,12 @@ try {
   const flushedComment = await waitForComment(page, reviewId, temporaryFeedback);
   await page.locator('[data-item-path="docs/notes.md"]').click();
   await page.getByText(temporaryFeedback, { exact: true }).waitFor();
-  await page.locator('[data-active-diff]').getByRole('button', { name: 'Delete comment', exact: true }).click();
+  // File selection scrolls after two animation frames, once the diff body is
+  // installed. Let that finish before Playwright chooses a click coordinate.
+  await page.locator('[data-active-diff]').evaluate(async () => {
+    for (let frame = 0; frame < 3; frame++) await new Promise(resolve => requestAnimationFrame(resolve));
+  });
+  await page.locator(`[data-comment-id="${flushedComment.id}"]`).getByRole('button', { name: 'Delete comment', exact: true }).click();
   await waitForState(page, ({ reviews }) => {
     const review = reviews.find(item => item.id === reviewId);
     return review && !review.comments.some(comment => comment.id === flushedComment.id);
