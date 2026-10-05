@@ -274,7 +274,7 @@ try {
   const afterDraft = await desktop.evaluate(() => globalThis.providerSmoke);
   assert.equal(afterDraft.childCreated, false, 'Typing branch feedback does not create its PR.');
   assert.equal(afterDraft.comments.length, 0, 'Draft feedback remains local in every repository.');
-  assert.ok(!afterDraft.git.some(args => args.includes('ls-remote') || args.includes('push') || args.includes('fetch') || args.includes('checkout')), 'Opening and commenting on PR-less branches uses only immutable API snapshots.');
+  assert.ok(!afterDraft.git.slice(loaded.git).some(args => args.includes('ls-remote') || args.includes('push') || args.includes('fetch') || args.includes('checkout')), 'After opening the remote review, commenting on PR-less branches uses only immutable API snapshots; local-project automatic fetches before opening are separate.');
   assert.deepEqual(drafts.binding.repositories.map(row => row.status), ['pull-request', 'changes', 'no-changes']);
   const result = await page.evaluate(async ({ setup: { bb, jira, project, inbox, review }, drafts }) => {
     const api = window.reviewAPI;

@@ -10,6 +10,7 @@ export function SettingsPage() {
   return (
     <SettingsView
       section={section}
+      backLabel={navigation.workspaceArea === 'git' ? 'Back to Git' : 'Back to review'}
       onSectionChange={(next) => void navigation.openSettings(next, navigation.showLegacyLinks)}
       showLegacyLinks={navigation.showLegacyLinks}
       settings={settings}

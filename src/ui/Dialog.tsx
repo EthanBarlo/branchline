@@ -114,6 +114,7 @@ interface DialogProps {
   small?: boolean;
   wide?: boolean;
   variant?: 'standard' | 'integration';
+  eyebrow?: string;
 }
 
 export function Dialog({
@@ -124,6 +125,7 @@ export function Dialog({
   small = false,
   wide = false,
   variant = 'standard',
+  eyebrow,
 }: DialogProps) {
   const titleId = useId();
   const container = useRef<HTMLDivElement>(null);
@@ -185,7 +187,7 @@ export function Dialog({
         >
           <div>
             <span className={`eyebrow ${stylex.props(styles.eyebrow).className}`}>
-              {integration ? 'BRANCHLINE · CONNECTED REVIEW' : 'BRANCHLINE'}
+              {eyebrow ?? (integration ? 'BRANCHLINE · CONNECTED REVIEW' : 'BRANCHLINE')}
             </span>
             <h2 id={titleId} {...stylex.props(styles.title, integration && styles.integrationTitle)}>
               {title}

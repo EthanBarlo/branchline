@@ -96,6 +96,9 @@ function fixtureBridge() {
     return { items, blockers: items.filter(item => item.error || item.state === 'unknown' || item.state === 'conflict').map(item => item.error || `${item.state === 'unknown' ? 'Check delivery' : 'Resolve the conflict'} before publishing.`) };
   }
   const api = {
+    onGitWorkflowChanged: () => () => {},
+    getGitStatus: async projectId => ({ projectId, repositories: [], branches: [] }),
+    fetchGit: async projectId => ({ projectId, repositories: [], branches: [] }),
     onBeforeClose: () => () => {}, onCloseCancelled: () => () => {}, onUpdateStateChanged: () => () => {}, onUpdateDialogRequested: () => () => {},
     onRemoteReviewLoadProgress: listener => { loadListeners.add(listener); return () => { loadListeners.delete(listener); }; },
     onRemoteReviewChanged: listener => { remoteListeners.add(listener); return () => { remoteListeners.delete(listener); }; },

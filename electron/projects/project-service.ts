@@ -20,7 +20,7 @@ export function validBranch(inspection: RepoInspection, value: string, label: st
   const matches = inspection.branches.filter((ref) => ref === normalized || ref === `origin/${normalized}`);
   if (!branch || !matches.length)
     throw new Error(
-      `${label} “${branch}” is not available in this repository. Choose an available branch, or fetch it outside Branchline.`,
+      `${label} “${branch}” is not available in this repository. Choose an available branch, or fetch it in the Git workspace.`,
     );
   // Persist the same branch names shown by the picker so aliases use the Git
   // engine's documented local-first / remote-tracking fallback consistently.

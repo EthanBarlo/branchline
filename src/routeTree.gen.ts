@@ -13,6 +13,7 @@ import { Route as WorkspaceRouteImport } from './routes/_workspace'
 import { Route as WorkspaceIndexRouteImport } from './routes/_workspace.index'
 import { Route as WorkspaceSettingsSectionRouteImport } from './routes/_workspace.settings.$section'
 import { Route as WorkspaceProjectsProjectIdCurrentRouteImport } from './routes/_workspace.projects.$projectId.current'
+import { Route as WorkspaceProjectsProjectIdGitRouteImport } from './routes/_workspace.projects.$projectId.git'
 import { Route as WorkspaceProjectsProjectIdReviewsReviewIdRouteImport } from './routes/_workspace.projects.$projectId.reviews.$reviewId'
 
 const WorkspaceRoute = WorkspaceRouteImport.update({
@@ -36,6 +37,12 @@ const WorkspaceProjectsProjectIdCurrentRoute =
     path: '/projects/$projectId/current',
     getParentRoute: () => WorkspaceRoute,
   } as any)
+const WorkspaceProjectsProjectIdGitRoute =
+  WorkspaceProjectsProjectIdGitRouteImport.update({
+    id: '/projects/$projectId/git',
+    path: '/projects/$projectId/git',
+    getParentRoute: () => WorkspaceRoute,
+  } as any)
 const WorkspaceProjectsProjectIdReviewsReviewIdRoute =
   WorkspaceProjectsProjectIdReviewsReviewIdRouteImport.update({
     id: '/projects/$projectId/reviews/$reviewId',
@@ -47,12 +54,14 @@ export interface FileRoutesByFullPath {
   '/': typeof WorkspaceIndexRoute
   '/settings/$section': typeof WorkspaceSettingsSectionRoute
   '/projects/$projectId/current': typeof WorkspaceProjectsProjectIdCurrentRoute
+  '/projects/$projectId/git': typeof WorkspaceProjectsProjectIdGitRoute
   '/projects/$projectId/reviews/$reviewId': typeof WorkspaceProjectsProjectIdReviewsReviewIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof WorkspaceIndexRoute
   '/settings/$section': typeof WorkspaceSettingsSectionRoute
   '/projects/$projectId/current': typeof WorkspaceProjectsProjectIdCurrentRoute
+  '/projects/$projectId/git': typeof WorkspaceProjectsProjectIdGitRoute
   '/projects/$projectId/reviews/$reviewId': typeof WorkspaceProjectsProjectIdReviewsReviewIdRoute
 }
 export interface FileRoutesById {
@@ -61,6 +70,7 @@ export interface FileRoutesById {
   '/_workspace/': typeof WorkspaceIndexRoute
   '/_workspace/settings/$section': typeof WorkspaceSettingsSectionRoute
   '/_workspace/projects/$projectId/current': typeof WorkspaceProjectsProjectIdCurrentRoute
+  '/_workspace/projects/$projectId/git': typeof WorkspaceProjectsProjectIdGitRoute
   '/_workspace/projects/$projectId/reviews/$reviewId': typeof WorkspaceProjectsProjectIdReviewsReviewIdRoute
 }
 export interface FileRouteTypes {
@@ -69,12 +79,14 @@ export interface FileRouteTypes {
     | '/'
     | '/settings/$section'
     | '/projects/$projectId/current'
+    | '/projects/$projectId/git'
     | '/projects/$projectId/reviews/$reviewId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/settings/$section'
     | '/projects/$projectId/current'
+    | '/projects/$projectId/git'
     | '/projects/$projectId/reviews/$reviewId'
   id:
     | '__root__'
@@ -82,6 +94,7 @@ export interface FileRouteTypes {
     | '/_workspace/'
     | '/_workspace/settings/$section'
     | '/_workspace/projects/$projectId/current'
+    | '/_workspace/projects/$projectId/git'
     | '/_workspace/projects/$projectId/reviews/$reviewId'
   fileRoutesById: FileRoutesById
 }
@@ -119,6 +132,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceProjectsProjectIdCurrentRouteImport
       parentRoute: typeof WorkspaceRoute
     }
+    '/_workspace/projects/$projectId/git': {
+      id: '/_workspace/projects/$projectId/git'
+      path: '/projects/$projectId/git'
+      fullPath: '/projects/$projectId/git'
+      preLoaderRoute: typeof WorkspaceProjectsProjectIdGitRouteImport
+      parentRoute: typeof WorkspaceRoute
+    }
     '/_workspace/projects/$projectId/reviews/$reviewId': {
       id: '/_workspace/projects/$projectId/reviews/$reviewId'
       path: '/projects/$projectId/reviews/$reviewId'
@@ -133,6 +153,7 @@ interface WorkspaceRouteChildren {
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
   WorkspaceSettingsSectionRoute: typeof WorkspaceSettingsSectionRoute
   WorkspaceProjectsProjectIdCurrentRoute: typeof WorkspaceProjectsProjectIdCurrentRoute
+  WorkspaceProjectsProjectIdGitRoute: typeof WorkspaceProjectsProjectIdGitRoute
   WorkspaceProjectsProjectIdReviewsReviewIdRoute: typeof WorkspaceProjectsProjectIdReviewsReviewIdRoute
 }
 
@@ -141,6 +162,7 @@ const WorkspaceRouteChildren: WorkspaceRouteChildren = {
   WorkspaceSettingsSectionRoute: WorkspaceSettingsSectionRoute,
   WorkspaceProjectsProjectIdCurrentRoute:
     WorkspaceProjectsProjectIdCurrentRoute,
+  WorkspaceProjectsProjectIdGitRoute: WorkspaceProjectsProjectIdGitRoute,
   WorkspaceProjectsProjectIdReviewsReviewIdRoute:
     WorkspaceProjectsProjectIdReviewsReviewIdRoute,
 }

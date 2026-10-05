@@ -18,7 +18,7 @@ declare module '@tanstack/react-router' {
     router: typeof router;
   }
   interface HistoryState {
-    workspace?: { projectId: string; reviewId: string };
+    workspace?: { projectId: string; reviewId: string; area?: 'git' };
     legacyJiraLinks?: boolean;
   }
 }

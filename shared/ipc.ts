@@ -6,6 +6,12 @@ type AsyncReviewMethod = {
 
 /** Existing channel names remain stable for packaged preload and desktop clients. */
 export const reviewRequestMethods = {
+  'git-cache': 'getCachedGitStatus',
+  'git-status': 'getGitStatus',
+  'git-fetch': 'fetchGit',
+  'git-preview': 'previewGitAction',
+  'git-run': 'runGitAction',
+  'git-acknowledge': 'acknowledgeGitOperation',
   'integrations-state': 'getIntegrations',
   'integration-diagnostics': 'getIntegrationDiagnostics',
   'integration-log-open': 'openIntegrationLog',
@@ -81,6 +87,7 @@ export type ReviewRequestHandler<Name extends ReviewRequestName> = (
 ) => ReviewRequestResult<Name> | Promise<ReviewRequestResult<Name>>;
 
 export const reviewEvents = {
+  gitWorkflowChanged: 'review:git-workflow-changed',
   beforeClose: 'review:before-close',
   closeCancelled: 'review:close-cancelled',
   updateStateChanged: 'review:update-state-changed',

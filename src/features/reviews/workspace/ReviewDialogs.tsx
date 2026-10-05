@@ -29,6 +29,7 @@ export function ReviewDialogs({
   const { showUpdates } = lifecycle;
   const {
     showNewReview,
+    initialFeatureBranch,
     setShowNewReview,
     integrationProject,
     setIntegrationProject,
@@ -100,6 +101,7 @@ export function ReviewDialogs({
           project={project}
           onClose={() => setShowNewReview(false)}
           onCreated={newReviewCreated}
+          initialFeatureBranch={initialFeatureBranch}
         />
       )}
       {settingsProject && (

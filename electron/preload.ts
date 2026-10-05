@@ -15,6 +15,20 @@ function invoke<Name extends ReviewRequestName>(
 }
 
 const api: ReviewAPI = {
+  getCachedGitStatus: (id) => invoke('git-cache', id),
+  getGitStatus: (id) => invoke('git-status', id),
+  fetchGit: (id) => invoke('git-fetch', id),
+  previewGitAction: (...args) => invoke('git-preview', ...args),
+  runGitAction: (...args) => invoke('git-run', ...args),
+  acknowledgeGitOperation: (id) => invoke('git-acknowledge', id),
+  onGitWorkflowChanged: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      change: import('../shared/git-workflow').GitWorkflowChange,
+    ) => callback(change);
+    ipcRenderer.on(reviewEvents.gitWorkflowChanged, listener);
+    return () => ipcRenderer.removeListener(reviewEvents.gitWorkflowChanged, listener);
+  },
   getIntegrations: () => invoke('integrations-state'),
   getIntegrationDiagnostics: () => invoke('integration-diagnostics'),
   openIntegrationLog: () => invoke('integration-log-open'),

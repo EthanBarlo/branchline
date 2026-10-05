@@ -139,7 +139,7 @@ function resolveBranch(info: Metadata, name: string): { ref: string; oid: string
   if (matching.length > 1)
     throw new Error(`Branch “${name}” is ambiguous across remotes. Select a remote-qualified branch.`);
   throw new Error(
-    `Branch “${name}” was not found locally or in remote-tracking refs. Fetch it outside Branchline, then refresh.`,
+    `Branch “${name}” was not found locally or in remote-tracking refs. Fetch it in the Git workspace, then refresh.`,
   );
 }
 

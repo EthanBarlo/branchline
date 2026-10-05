@@ -17,6 +17,7 @@ export function useReviewDialogs({ workspace, data, selectReview }: ReviewDialog
   const { selectedProjectId, selectedReviewId, selectProject } = navigation;
   const { registerReview, registerReviews, markReviewsDeleted, getSelection } = data;
   const [showNewReview, setShowNewReview] = useState(false);
+  const [initialFeatureBranch, setInitialFeatureBranch] = useState('');
   const [integrationProject, setIntegrationProject] = useState<Project | null>(null);
   const [showPullRequests, setShowPullRequests] = useState(false);
   const [cleanupProject, setCleanupProject] = useState<Project | null>(null);
@@ -72,6 +73,7 @@ export function useReviewDialogs({ workspace, data, selectReview }: ReviewDialog
     const id = deleteProject.id;
     try {
       await flushPendingComments();
+      await data.waitForRefreshes();
       const state = await window.reviewAPI.deleteProject(id);
       markReviewsDeleted(reviews.filter((item) => item.projectId === id).map((item) => item.id));
       setProjects(state.projects);
@@ -99,6 +101,8 @@ export function useReviewDialogs({ workspace, data, selectReview }: ReviewDialog
 
   return {
     showNewReview,
+    initialFeatureBranch,
+    setInitialFeatureBranch,
     setShowNewReview,
     integrationProject,
     setIntegrationProject,

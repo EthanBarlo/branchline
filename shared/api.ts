@@ -1,5 +1,6 @@
 import type { UpdateAPI } from './updates';
 import type { IntegrationAPI } from './integrations';
+import type { GitWorkflowAPI } from './git-workflow';
 import type {
   AppState,
   AppSettings,
@@ -13,7 +14,7 @@ import type {
   NewComment,
 } from './types';
 
-export interface ReviewAPI extends UpdateAPI, IntegrationAPI {
+export interface ReviewAPI extends UpdateAPI, IntegrationAPI, GitWorkflowAPI {
   onBeforeClose(callback: (reason: 'close' | 'install') => Promise<void>): () => void;
   onCloseCancelled(callback: (message: string) => void): () => void;
   getState(): Promise<AppState>;

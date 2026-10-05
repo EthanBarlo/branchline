@@ -48,6 +48,8 @@ export function useReviewData({
   const selectedIdRef = useRef(selectedReviewId);
   const selectedProjectRef = useRef(selectedProjectId);
   const deletedReviewIds = useRef(new Set<string>());
+  const refreshWaiters = useRef(new Set<Promise<void>>());
+  const waitForRefreshes = useCallback(() => Promise.allSettled([...refreshWaiters.current]), []);
   const refreshInFlight = useRef(new Set<string>());
   const targetInFlight = useRef(new Set<string>());
   const targetVersions = useRef<Record<string, number>>({});
@@ -180,6 +182,11 @@ export function useReviewData({
       if (updateBusyRef.current) return;
       if (refreshInFlight.current.has(id) || targetInFlight.current.has(id)) return;
       refreshInFlight.current.add(id);
+      let settled!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        settled = resolve;
+      });
+      refreshWaiters.current.add(completed);
       const version = mutationVersions.current[id] || 0;
       refreshMutationVersions.current[id] = version;
       const targetVersion = targetVersions.current[id] || 0;
@@ -203,6 +210,8 @@ export function useReviewData({
           setError(errorMessage(reason));
       } finally {
         refreshInFlight.current.delete(id);
+        refreshWaiters.current.delete(completed);
+        settled();
         if (mounted.current && selectedIdRef.current === id) setRefreshing(false);
       }
     },
@@ -447,6 +456,7 @@ export function useReviewData({
 
   return {
     snapshots,
+    waitForRefreshes,
     reviewMetadata,
     selectedFiles,
     refreshing,

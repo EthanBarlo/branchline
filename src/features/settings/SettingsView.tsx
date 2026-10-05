@@ -143,6 +143,7 @@ export function SettingsView({
   section,
   onSectionChange,
   showLegacyLinks = false,
+  backLabel = 'Back to review',
   settings,
   ticket,
   onSaved,
@@ -155,6 +156,7 @@ export function SettingsView({
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   showLegacyLinks?: boolean;
+  backLabel?: string;
   settings: AppSettings;
   ticket: string | null;
   onSaved: (settings: AppSettings) => void;
@@ -207,7 +209,7 @@ export function SettingsView({
       <aside {...stylex.props(styles.sidebar)}>
         <button {...stylex.props(styles.back)} type="button" disabled={saving} onClick={onClose}>
           <ArrowLeft size={15} />
-          Back to review
+          {backLabel}
         </button>
         <div {...stylex.props(styles.sidebarHeading)}>
           <h1 {...stylex.props(styles.sidebarTitle)}>Settings</h1>

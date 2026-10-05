@@ -19,6 +19,7 @@ Branchline has three code boundaries. `src` runs in a browser renderer, `electro
 | `src/features/jira/browser` | Embedded Jira dialog and native-view session coordination. |
 | `src/features/jira/tickets` | Ticket picker and cancellable suggestion searches. |
 | `src/features/projects`, `src/features/settings` | Project dialogs and application settings. |
+| `src/features/git` | Project Git status, fetch scheduling, action previews, and progress. |
 | `src/ui`, `src/lib`, `src/theme` | Shared controls, platform-independent renderer helpers, and StyleX theme definitions. These cannot depend on features. |
 | `src/jira-browser` | Standalone Jira toolbar renderer and HTML entrypoint. |
 | `electron/application` | Desktop window lifecycle, close/update gates, and native Jira operation sequencing. |
@@ -52,6 +53,8 @@ Jira native-view lifetime stays separate from dialog markup. Ticket changes firs
 
 Desktop handlers share one sender-trust check and operation gate. `shared/api.ts` describes the renderer facade; `shared/ipc.ts` derives request arguments and results from that facade. Handler groups cannot silently diverge from preload method signatures. Native close/install preparation drains accepted writes and waits for the renderer's matching flush acknowledgement before proceeding.
 
+The Git workflow service owns checkout, fast-forward pull, non-force push, local branch creation, and rename. Its process-wide guard allows concurrent reads, drains existing readers before writes, and blocks new readers until a write finishes. This protects overlapping projects and snapshot consistency while keeping lightweight comment checkout checks independent of long diff scans. Git previews capture repository identity, branch/head, dirty state, and explicit destinations; execution checks them again. Mutation boundaries invalidate local snapshot generations, so an older scan cannot publish an intermediate checkout. Ordinary comparison code stays read-only. Operation receipts and fetch timestamps live separately in `git-workflow.json`; interrupted writes are reconciled rather than replayed. Automatic fetching is active for local reviews and explicitly opened Git workspaces, preserving cached Bitbucket review behaviour.
+
 The integration coordinator retains serialization and durable write ordering. Jira ticket selection and closed-review eligibility are separate domain services; extracting those rules must not move provider operations outside the coordinator's locks or change recovery receipts.
 
 ## Verification
@@ -66,5 +69,8 @@ Run desktop suites after building:
 - `test:desktop:integrations` and `test:desktop:integration-backend`: connection forms, remote workflows, and real IPC/provider payload wiring against mocked providers.
 - `test:desktop:jira` and `test:desktop:jira-browser`: ticket selection, native browser sizing, focus, and close/ticket-change races.
 - `test:desktop:updates`: updater and close/install coordination with the native test driver.
+- `test:desktop:git`: branch review and checkout, incoming counts, fast-forward pull, first publication, feedback preservation, and divergence blocking against temporary Git remotes.
 
 Keep test scenarios tied to observable behavior. Existing desktop selectors and component keys are contracts during refactoring; change them deliberately alongside coverage.
+
+The dedicated `/projects/$projectId/git` workspace shares project navigation and guarded history with Reviews. `GitBranchSidebar` renders one Local/Remote branch tree across all discovered repositories, using `sidebarBranches` for separate reference identities and `branchTree` for folders/search, pinned favourites, and aggregate counts. Favourites and collapsed folders are project-scoped renderer preferences. Checked-out branches use a tag icon. Workflow snapshots contain local/remote membership and destination counts for every logical branch, including submodule-only branches. A display-only `GitWorkflowCache` persists snapshots in `git-status-cache.json`, keyed by saved project identity and repository path. `getCachedGitStatus` restores the list without querying Git. Status scans discover membership separately from inspection, read and fetch repositories concurrently, and publish partial snapshots over the existing workflow event channel. Pending paths retain cached entries until the complete topology is known. Publication versions prevent late results replacing newer ones; streamed status events do not trigger comparison refreshes. Mutation preflights always discover the full live project under the existing barrier. Non-current and per-remote counts are cached against effective Git configuration and ref revisions; external changes invalidate that cache. Selecting a branch reads its details; checkout and publication remain explicit, previewed writes.

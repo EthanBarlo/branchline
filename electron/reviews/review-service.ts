@@ -64,6 +64,12 @@ export class ReviewService {
     this.completed.delete(id);
   }
 
+  invalidateLocalSnapshots(): void {
+    for (const review of this.store.getState().reviews) {
+      if (!review.remote) this.invalidateSnapshot(review.id);
+    }
+  }
+
   /** Called only in the mutation queue, including the lightweight checkout guard. */
   private async currentContext(review: Review, inspection: RepoInspection, target?: string): Promise<Review> {
     const next = await this.store.switchCurrentContext(review.projectId, inspection.currentBranch, target);

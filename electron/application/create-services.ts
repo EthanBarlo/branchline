@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type { Review } from '../../shared/types';
 import { buildSnapshot, inspectRepo } from '../git/repository';
 import { PointerService } from '../git/pointer-service';
+import { GitWorkflowService } from '../git/workflow-service';
 import { ConnectionManager, type SecureStorage } from '../integrations/connection-manager';
 import { IntegrationService } from '../integrations/integration-service';
 import { IntegrationStore } from '../integrations/integration-store';
@@ -13,10 +14,22 @@ import { ReviewStore } from '../reviews/review-store';
 export async function createServices(dataDirectory: string, secureStorage: SecureStorage) {
   const store = new ReviewStore(join(dataDirectory, 'reviews.json'));
   await store.load();
-  const projects = new ProjectService(store);
+  let reviews: ReviewService;
+  const gitWorkflow = new GitWorkflowService(
+    join(dataDirectory, 'git-workflow.json'),
+    (id) => store.getProject(id),
+    () => reviews?.invalidateLocalSnapshots(),
+  );
+  await gitWorkflow.load();
+  const projects = new ProjectService(store, (repo) => gitWorkflow.read(() => inspectRepo(repo)));
   let integrations: IntegrationService;
-  const reviews = new ReviewService(store, inspectRepo, (config) =>
-    config.remote ? integrations.buildSnapshot(config as Review) : buildSnapshot(config),
+  reviews = new ReviewService(
+    store,
+    (repo) => gitWorkflow.read(() => inspectRepo(repo)),
+    (config) =>
+      config.remote
+        ? integrations.buildSnapshot(config as Review)
+        : gitWorkflow.read(() => buildSnapshot(config)),
   );
   const integrationStore = new IntegrationStore(join(dataDirectory, 'integrations.json'));
   const connections = new ConnectionManager(join(dataDirectory, 'credentials.json'), secureStorage);
@@ -30,5 +43,5 @@ export async function createServices(dataDirectory: string, secureStorage: Secur
     new PointerService(join(dataDirectory, 'pointer-workspaces')),
   );
   await integrations.removeCompletedReviews();
-  return { store, projects, integrations, integrationStore };
+  return { store, projects, integrations, integrationStore, gitWorkflow };
 }

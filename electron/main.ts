@@ -10,6 +10,7 @@ import { configureIntegrationDiagnostics } from './integrations/integration-diag
 import { JiraBrowser } from './integrations/jira/jira-browser';
 import { createReviewHandlerRegistrar } from './ipc/register-review-handlers';
 import { registerWorkspaceHandlers } from './ipc/workspace-handlers';
+import { registerGitWorkflowHandlers } from './ipc/git-workflow-handlers';
 import { registerIntegrationHandlers } from './ipc/integration-handlers';
 import { registerLifecycleHandlers } from './ipc/lifecycle-handlers';
 import { createUpdateService } from './updates/update-runtime';
@@ -38,6 +39,7 @@ app.whenReady().then(async () => {
     });
     integrationStore.onReviewChanged((change) => window.send(reviewEvents.remoteReviewChanged, change));
     integrations.onRemoteReviewLoadProgress((change) => window.send(reviewEvents.remoteReviewLoad, change));
+    services.gitWorkflow.subscribe((change) => window.send(reviewEvents.gitWorkflowChanged, change));
     updates = createUpdateService(
       () => window.lifecycle.prepareInstall(),
       () => window.lifecycle.releaseInstall(),
@@ -54,6 +56,7 @@ app.whenReady().then(async () => {
       installGate: window.lifecycle.installGate,
     });
     registerWorkspaceHandlers(handle, { ...services, window });
+    registerGitWorkflowHandlers(handle, services.gitWorkflow, jira, window);
     registerIntegrationHandlers(handle, integrations, jira, window);
     registerLifecycleHandlers(handle, window, updates);
     installApplicationMenu(window);

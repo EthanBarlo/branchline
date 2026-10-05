@@ -14,16 +14,18 @@ export function NewReviewDialog({
   project,
   onClose,
   onCreated,
+  initialFeatureBranch = '',
 }: {
   project: Project;
   onClose: () => void;
   onCreated: (review: Review) => void;
+  initialFeatureBranch?: string;
 }) {
   const [inspection, setInspection] = useState<RepoInspection | null>(null);
   const [inspecting, setInspecting] = useState(true);
   const [saving, setSaving] = useState(false);
   const [baseBranch, setBaseBranch] = useState(project.defaultBaseBranch || '');
-  const [featureBranch, setFeatureBranch] = useState('');
+  const [featureBranch, setFeatureBranch] = useState(initialFeatureBranch);
   const [name, setName] = useState('');
   const [includeWorkingTree, setIncludeWorkingTree] = useState(false);
   const [error, setError] = useState<string | null>(null);

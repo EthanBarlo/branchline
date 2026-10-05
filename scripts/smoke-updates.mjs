@@ -29,6 +29,13 @@ async function launch(test = true) {
 }
 const state = () => page.evaluate(() => window.reviewAPI.getUpdateState());
 const phase = value => page.waitForFunction(expected => window.reviewAPI.getUpdateState().then(state => state.phase === expected), value);
+const waitForAuthorization = () => desktop.evaluate(async ({ app }) => {
+  const deadline = Date.now() + 15000;
+  while (!app.branchlineUpdateTest.authorizationPending) {
+    if (Date.now() >= deadline) throw new Error('Administrator authorization did not become pending.');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+});
 
 try {
   await launch();
@@ -184,6 +191,7 @@ try {
   });
   await phase('installing');
   await page.getByText('Your review work is saved. If macOS asks for an administrator password, use the system prompt to continue.', { exact: true }).waitFor();
+  await waitForAuthorization();
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationPending), true);
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.installs), 0);
   assert.equal(page.isClosed(), false, 'The app must stay open until administrator authorization finishes.');
@@ -209,6 +217,7 @@ try {
   await page.getByRole('button', { name: 'Restart to update', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Retry update', exact: true }).click();
   await phase('installing');
+  await waitForAuthorization();
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationPending), true);
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.authorizationRequests), 2);
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.downloads), downloadsBeforeAuthorization, 'Retrying authorization must reuse the downloaded update.');
