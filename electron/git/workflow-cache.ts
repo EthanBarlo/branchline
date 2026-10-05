@@ -6,7 +6,8 @@ import type { Project } from '../../shared/types';
 /** Display-only cache. Mutation preflights always read Git again. */
 export class GitWorkflowCache {
   private entries: Record<string, { root: string; snapshot: GitWorkflowSnapshot }> = {};
-  private saving: Promise<void> = Promise.resolve();
+  private saving?: Promise<void>;
+  private revision = 0;
   constructor(private filename: string) {}
   async load(): Promise<void> {
     try {
@@ -40,14 +41,21 @@ export class GitWorkflowCache {
   }
   put(project: Project, snapshot: GitWorkflowSnapshot): Promise<void> {
     this.entries[project.id] = { root: path.resolve(project.repoPath), snapshot: structuredClone(snapshot) };
-    const saved = this.saving
-      .catch(() => {})
-      .then(async () => {
+    this.revision++;
+    if (this.saving) return this.saving;
+    const saved = (async () => {
+      let persisted: number;
+      do {
+        persisted = this.revision;
         await mkdir(path.dirname(this.filename), { recursive: true });
         const temporary = `${this.filename}.tmp`;
         await writeFile(temporary, JSON.stringify(this.entries), { mode: 0o600 });
         await rename(temporary, this.filename);
-      });
+      } while (persisted !== this.revision);
+      this.saving = undefined;
+    })().finally(() => {
+      if (this.saving === saved) this.saving = undefined;
+    });
     this.saving = saved;
     return saved;
   }

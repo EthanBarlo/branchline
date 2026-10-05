@@ -9,8 +9,10 @@ import {
   Folder,
   GitBranch,
   Search,
+  MoreHorizontal,
+  X,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { colors, fonts, typeScale } from '../../theme/tokens.stylex';
 import { GitBranchMenu, type GitBranchMenuAction, type GitBranchMenuContext } from './GitBranchMenu';
@@ -122,29 +124,40 @@ export function GitBranchSidebar({
     localStorage.setItem('branchline.git.sidebarWidth', String(value));
   }
   const tree = useRef<HTMLUListElement>(null);
-  const local = branchTree(
-    branches.filter((branch) => !branch.remote),
-    query,
-    'Local',
-    favourites,
-  );
-  const remotes = [...new Set(branches.flatMap((branch) => (branch.remote ? [branch.remote] : [])))]
-    .sort()
-    .map((remote) => ({
-      ...branchTree(
-        branches.filter((branch) => branch.remote === remote),
-        query,
-        `Remote/${remote}`,
-        favourites,
-      ),
-      name: remote,
-    }));
-  const remote: BranchFolder = { path: 'Remote', name: 'Remote', folders: remotes, branches: [], pinned: [] };
+  const sections = useMemo(() => {
+    const local = branchTree(
+      branches.filter((branch) => !branch.remote),
+      query,
+      'Local',
+      favourites,
+    );
+    const remotes = [...new Set(branches.flatMap((branch) => (branch.remote ? [branch.remote] : [])))]
+      .sort()
+      .map((remote) => ({
+        ...branchTree(
+          branches.filter((branch) => branch.remote === remote),
+          query,
+          `Remote/${remote}`,
+          favourites,
+        ),
+        name: remote,
+      }));
+    const remote: BranchFolder = {
+      path: 'Remote',
+      name: 'Remote',
+      folders: remotes,
+      branches: [],
+      pinned: [],
+    };
+    const matches = (folder: BranchFolder): boolean =>
+      !!(folder.pinned.length || folder.branches.length || folder.folders.some(matches));
+    const sections: BranchFolder[] = [{ ...local, name: 'Local' }, remote].filter(
+      (folder) => !query || matches(folder),
+    );
+    return sections;
+  }, [branches, query, favourites]);
   const matches = (folder: BranchFolder): boolean =>
     !!(folder.pinned.length || folder.branches.length || folder.folders.some(matches));
-  const sections: BranchFolder[] = [{ ...local, name: 'Local' }, remote].filter(
-    (folder) => !query || matches(folder),
-  );
   function toggle(path: string) {
     setCollapsed((previous) => {
       const next = new Set(previous);
@@ -167,7 +180,11 @@ export function GitBranchSidebar({
         ? 'Checked out in all repositories'
         : `Checked out in ${current} of ${repositoryCount} repositories`;
     return (
-      <li key={`branch:${branch.key}`} role="none" {...stylex.props(styles.branchRow)}>
+      <li
+        key={`branch:${branch.key}`}
+        role="none"
+        {...stylex.props(styles.branchRow, selected === branch.key && styles.selected)}
+      >
         <button
           role="treeitem"
           aria-level={depth}
@@ -242,6 +259,22 @@ export function GitBranchSidebar({
         >
           <Star size={12} fill={favourite ? 'currentColor' : 'none'} />
         </button>
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={`Actions for ${label}`}
+          aria-haspopup="menu"
+          title="Branch actions"
+          {...stylex.props(styles.menuControl)}
+          onClick={(event) => {
+            const anchor =
+              event.currentTarget.parentElement!.querySelector<HTMLButtonElement>('[role="treeitem"]')!;
+            const rect = event.currentTarget.getBoundingClientRect();
+            openMenu(branch.key, anchor, rect.right, rect.bottom);
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
       </li>
     );
   }
@@ -310,21 +343,27 @@ export function GitBranchSidebar({
             aria-label="Find a branch"
             placeholder="Find a branch…"
             value={query}
+            autoComplete="off"
+            spellCheck={false}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setQuery('');
+            }}
             onChange={(event) => setQuery(event.target.value)}
             {...stylex.props(styles.input)}
           />
+          {query && (
+            <button
+              type="button"
+              aria-label="Clear branch search"
+              {...stylex.props(styles.clearSearch)}
+              onClick={() => setQuery('')}
+            >
+              <X size={12} />
+            </button>
+          )}
         </label>
         <div {...stylex.props(styles.scope)}>
           Across {repositoryCount} {repositoryCount === 1 ? 'repository' : 'repositories'}
-          {(cached || refreshing) && (
-            <span role="status" {...stylex.props(styles.refreshStatus)}>
-              {cached
-                ? refreshing
-                  ? 'Cached · refreshing…'
-                  : 'Cached · refresh failed'
-                : 'Updating branches…'}
-            </span>
-          )}
         </div>
         <ul
           ref={tree}
@@ -370,6 +409,14 @@ export function GitBranchSidebar({
         {branches.length > 0 && !sections.some(matches) && (
           <p {...stylex.props(styles.empty)}>No matching branches.</p>
         )}
+        <div role="status" {...stylex.props(styles.refreshStatus)}>
+          <span {...stylex.props(styles.statusDot, cached && !refreshing && styles.statusStale)} />
+          {loading || refreshing
+            ? 'Refreshing Git status…'
+            : cached
+              ? 'Showing saved status'
+              : 'Live Git status'}
+        </div>
       </aside>
       {context && contextBranch && (
         <GitBranchMenu
@@ -453,13 +500,46 @@ const styles = stylex.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 0,
-    backgroundColor: colors.panel,
+    backgroundColor: 'transparent',
     color: colors.textQuiet,
     opacity: { default: 0, ':hover': 1, ':focus-visible': 1 },
   },
   favourited: { color: colors.warningStrong, opacity: 1 },
   section: { color: colors.textDefault, fontWeight: 600, marginTop: 8 },
-  refreshStatus: { display: 'block', marginTop: 5, color: colors.warningStrong },
+  refreshStatus: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    minHeight: 36,
+    flexShrink: 0,
+    paddingInline: 16,
+    borderTopWidth: 1,
+    borderTopStyle: 'solid',
+    borderTopColor: colors.borderSubtle,
+    fontSize: typeScale.micro,
+    color: colors.textQuiet,
+  },
+  statusDot: { width: 5, height: 5, borderRadius: '50%', backgroundColor: colors.successText },
+  statusStale: { backgroundColor: colors.warningStrong },
+  clearSearch: {
+    display: 'flex',
+    alignItems: 'center',
+    borderWidth: 0,
+    padding: 3,
+    backgroundColor: 'transparent',
+    color: colors.textQuiet,
+  },
+  menuControl: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 24,
+    flexShrink: 0,
+    borderWidth: 0,
+    backgroundColor: 'transparent',
+    color: { default: colors.textQuiet, ':hover': colors.textPrimary },
+    padding: 0,
+  },
   resizer: {
     width: 5,
     flexShrink: 0,
@@ -528,8 +608,8 @@ const styles = stylex.create({
     gap: 7,
     width: '100%',
     minHeight: 28,
-    paddingRight: 12,
-    paddingBlock: 4,
+    paddingRight: 2,
+    paddingBlock: 5,
     borderWidth: 0,
     textAlign: 'left',
     backgroundColor: {
@@ -556,7 +636,7 @@ const styles = stylex.create({
     whiteSpace: 'nowrap',
     textOverflow: 'ellipsis',
   },
-  counts: { display: 'inline-flex', gap: 9, alignItems: 'center', flexShrink: 0 },
+  counts: { display: 'inline-flex', gap: 7, alignItems: 'center', flexShrink: 0 },
   count: {
     display: 'inline-flex',
     alignItems: 'center',

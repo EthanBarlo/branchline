@@ -66,20 +66,25 @@ export function useReviewActions({
 
   async function addComment(selection: CommentSelection, body: string, commentId: string) {
     if (!selectedFile) throw new Error('Select a file before adding feedback.');
+    return addCommentForFile(selectedFile, selection, body, commentId);
+  }
+
+  async function addCommentForFile(
+    file: ReviewFile,
+    selection: CommentSelection,
+    body: string,
+    commentId: string,
+  ) {
     await mutate((id, context) =>
       window.reviewAPI.addComment(
         id,
         {
           id: commentId,
-          fileId: selectedFile.id,
-          repoRelativePath: selectedFile.repoRelativePath,
+          fileId: file.id,
+          repoRelativePath: file.repoRelativePath,
           ...selection,
-          path:
-            selection.path ??
-            (selection.side === 'deletions'
-              ? (selectedFile.oldPath ?? selectedFile.path)
-              : selectedFile.path),
-          fingerprint: selection.fingerprint ?? selectedFile.fingerprint,
+          path: selection.path ?? (selection.side === 'deletions' ? (file.oldPath ?? file.path) : file.path),
+          fingerprint: selection.fingerprint ?? file.fingerprint,
           body,
         },
         context,
@@ -207,6 +212,7 @@ export function useReviewActions({
     resetView,
     changeCurrentTarget,
     addComment,
+    addCommentForFile,
     updateComment,
     removeComment,
     beginReanchor,

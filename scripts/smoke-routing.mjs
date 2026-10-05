@@ -91,7 +91,7 @@ async function waitForSection(page, name) {
 }
 
 async function comment(page, body) {
-  await page.locator('[data-column-number="2"][data-line-type="change-addition"]').first().click();
+  await page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').first().click();
   const editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
   await editor.fill(body);
   return editor;

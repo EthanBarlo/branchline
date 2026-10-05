@@ -113,6 +113,7 @@ export interface GitWorkflowSnapshot {
 
 export interface GitWorkflowChange {
   projectId: string;
+  activity?: 'fetch' | 'preview' | 'mutation';
   busy: boolean;
   snapshot?: GitWorkflowSnapshot;
   operation?: GitOperation;

@@ -46,6 +46,8 @@ export function useCommentSessions({
   const selectionVersion = useRef(0);
   const [error, setError] = useState('');
   const [selectedLines, setSelectedLines] = useState<SelectedLineRange | null>(null);
+  const callbacks = useRef({ onAddComment, onUpdateComment, onDeleteComment });
+  callbacks.current = { onAddComment, onUpdateComment, onDeleteComment };
   function makeSession(id: string, anchor: CommentAnchor, comment?: ReviewComment, backup?: CommentBackup) {
     return new CommentAutosave({
       id,
@@ -55,9 +57,9 @@ export function useCommentSessions({
       comment,
       backup,
       callbacks: {
-        add: onAddComment,
-        update: onUpdateComment,
-        delete: onDeleteComment,
+        add: (...args) => callbacks.current.onAddComment(...args),
+        update: (...args) => callbacks.current.onUpdateComment(...args),
+        delete: (...args) => callbacks.current.onDeleteComment(...args),
         removed: (removedId) => {
           if (!alive.current) return;
           setSessions((previous) => {

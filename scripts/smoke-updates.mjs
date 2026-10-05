@@ -117,7 +117,7 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: 'Add project', exact: true }).click();
   await page.getByRole('combobox', { name: 'Current target branch', exact: true }).click();
   await page.getByRole('option', { name: 'main', exact: true }).click();
-  await page.locator('[data-column-number="1"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="1"][data-line-type="change-addition"]').click();
   let editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
   await mkdir(join(dataDir, 'reviews.json.tmp'));
   await editor.fill('Keep this feedback when saving fails.');
@@ -172,7 +172,7 @@ try {
   assert.equal(saved.reviews[0].comments[0].body, feedbackBeforeWindowClose);
   await page.locator('.review-comment').waitFor();
   editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
-  if (!await editor.isVisible()) await page.getByRole('button', { name: 'Edit comment', exact: true }).click();
+  if (!await editor.isVisible()) await page.locator('[data-active-diff]').getByRole('button', { name: 'Edit comment', exact: true }).click();
   assert.equal(await editor.inputValue(), feedbackBeforeWindowClose);
   assert.equal(await editor.isEditable(), true);
   console.log('A native install failure after window close restores the saved, editable workspace and cached update.');

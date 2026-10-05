@@ -80,6 +80,37 @@ try {
   assert.equal(await tree.getByRole('treeitem', { name: 'main', exact: true }).getByLabel('Outgoing 1', { exact: true }).count(), 1);
   await tree.getByRole('treeitem', { name: 'Local', exact: true }).waitFor();
   await tree.getByRole('treeitem', { name: 'Remote', exact: true }).waitFor();
+  // Routine checks must preserve tree geometry, row identity and the open menu.
+  await tree.getByRole('treeitem', { name: 'feature/demo', exact: true }).click();
+  await tree.getByRole('button', { name: 'Actions for feature/demo', exact: true }).click();
+  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).waitFor();
+  const stability = await page.evaluate(async () => {
+    const tree = document.querySelector('[role="tree"][aria-label="Project branches"]');
+    const row = tree.querySelector('[aria-label="feature/demo"]');
+    const top = tree.getBoundingClientRect().top;
+    const scroll = tree.scrollTop;
+    let updates = 0;
+    const unsubscribe = window.reviewAPI.onGitWorkflowChanged(change => { if (change.snapshot) updates++; });
+    const project = (await window.reviewAPI.getState()).projects[0];
+    for (let check = 0; check < 3; check++) await window.reviewAPI.getGitStatus(project.id);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    unsubscribe();
+    return { updates, sameRow: row === tree.querySelector('[aria-label="feature/demo"]'),
+      top, afterTop: tree.getBoundingClientRect().top, scroll, afterScroll: tree.scrollTop,
+      selected: row.getAttribute('aria-selected'), menuOpen: !!document.querySelector('[role="menu"]') };
+  });
+  assert.equal(stability.updates, 0);
+  assert.equal(stability.sameRow, true);
+  assert.equal(stability.afterTop, stability.top);
+  assert.equal(stability.afterScroll, stability.scroll);
+  assert.equal(stability.selected, 'true');
+  assert.equal(stability.menuOpen, true);
+  await page.keyboard.press('Escape');
+  await panel.getByRole('button', { name: 'New branch', exact: true }).click();
+  await page.getByRole('dialog', { name: 'New branch', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
+  await panel.getByRole('button', { name: 'Rename', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Rename branch', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
+
   const localGroup = tree.getByRole('group', { name: 'Local', exact: true });
   const originGroup = tree.getByRole('group', { name: 'origin', exact: true });
   await originGroup.getByRole('treeitem', { name: 'origin/main', exact: true }).waitFor();
@@ -324,24 +355,25 @@ try {
       return result;
     });
   });
+  await panel.getByRole('treeitem', { name: 'main', exact: true }).click();
   await panel.getByRole('button', { name: 'Check out', exact: true }).click();
   for (let attempt = 0; attempt < 100 && !await desktop.evaluate(() => globalThis.gitPreviewSmoke.held); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(await desktop.evaluate(() => globalThis.gitPreviewSmoke.held), true);
   await page.getByRole('tab', { name: 'Other Git fixture', exact: true }).click();
   await otherPanel.getByRole('treeitem', { name: 'main', exact: true }).waitFor();
   await desktop.evaluate(() => globalThis.gitPreviewSmoke.release());
-  for (let attempt = 0; attempt < 100 && !await desktop.evaluate(() => globalThis.gitPreviewSmoke.statusCompleted); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(await desktop.evaluate(() => globalThis.gitPreviewSmoke.statusCompleted), true);
+  for (let attempt = 0; attempt < 100 && !await desktop.evaluate(() => globalThis.gitPreviewSmoke.released); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(await desktop.evaluate(() => globalThis.gitPreviewSmoke.released), true);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(await otherPanel.locator('[data-branch-key]').count(), 1);
   assert.equal(await otherPanel.getByRole('treeitem', { name: 'main', exact: true }).getAttribute('aria-selected'), 'true');
   assert.equal(await page.getByRole('dialog').count(), 0);
   await desktop.evaluate(({ ipcMain }) => {
-    const driver = globalThis.gitCacheSmoke = { calls: 0, release: null };
+    const driver = globalThis.gitCacheSmoke = { calls: 0, reads: {}, release: null };
     const held = new Promise(resolve => { driver.release = resolve; });
     for (const channel of ['review:git-fetch', 'review:git-status']) {
       const original = ipcMain._invokeHandlers.get(channel);
-      ipcMain._invokeHandlers.set(channel, async (...args) => { driver.calls++; await held; return original(...args); });
+      ipcMain._invokeHandlers.set(channel, async (...args) => { driver.calls++; const key = `${channel}:${args[1]}`; driver.reads[key] = (driver.reads[key] || 0) + 1; await held; return original(...args); });
     }
   });
   await page.reload();
@@ -349,13 +381,26 @@ try {
   await page.getByRole('button', { name: 'Project Git workflow', exact: true }).click();
   panel = page.getByRole('region', { name: 'Git · Git fixture', exact: true });
   await panel.getByRole('treeitem', { name: 'main', exact: true }).waitFor();
-  await panel.getByText('Cached · refreshing…', { exact: true }).waitFor();
+  await panel.getByText('Refreshing Git status…', { exact: true }).waitFor();
   assert.equal(await panel.getByRole('button', { name: 'Unfavourite main', exact: true }).count(), 1);
   assert.equal(await panel.getByRole('button', { name: 'Unfavourite origin/main', exact: true }).count(), 1);
   if (process.env.BRANCHLINE_GIT_SIDEBAR_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_SIDEBAR_SCREENSHOT });
+  // Repeated focus checks during an existing fetch must not enqueue another fetch.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    for (let i = 0; i < 4; i++) window.dispatchEvent(new Event('focus'));
+  });
   await desktop.evaluate(() => globalThis.gitCacheSmoke.release());
+  await panel.getByText('Live Git status', { exact: true }).waitFor();
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Fetch');
+    return button && !button.disabled;
+  });
+  const fetchReads = await desktop.evaluate(() => Object.entries(globalThis.gitCacheSmoke.reads).filter(([key]) => key.startsWith('review:git-fetch:')));
+  assert.ok(fetchReads.length > 0);
+  for (const [key, count] of fetchReads) assert.equal(count, 1, key);
   assert.deepEqual(errors, []);
-  console.log('Git workspace desktop smoke passed: Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch and Rename with previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
+  console.log('Git workspace desktop smoke passed: quiet stable refreshes, preserved menus and selection, direct branch actions, coalesced focus fetches, Local/Remote sections, checkout icons, persisted favourites and cached startup before fresh results, branch context menu, keyboard/focus/dismissal, New Branch and Rename with previews across nested repositories, unified nested branch tree, coverage labels, aggregate counts, search/folders/keyboard/resize, missing-branch preflight, navigation, fast-forward pull, branch review/checkout, publication, feedback preservation, and divergence blocking.');
 } catch (error) {
   const page = desktop && (await desktop.windows())[0];
   if (page) console.error((await page.locator('body').innerText()).slice(-6000));

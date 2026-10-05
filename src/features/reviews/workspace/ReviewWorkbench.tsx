@@ -1,5 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
+import { reviewFilePath } from '../tree/reviewFileOrder';
+import { isApproved } from '../session/reviewSession';
 import type { ResolvedTheme } from '../../../theme/theme';
 import { DiffWorkspace } from '../DiffWorkspace';
 import { FeedbackPanel } from '../FeedbackPanel';
@@ -81,6 +83,21 @@ export function ReviewWorkbench({
     resizingFiles,
     setResizingFiles,
   } = preferences;
+  const stackFiles = useMemo(
+    () =>
+      files.filter((file) => {
+        if (file.id === selectedFile?.id) return true;
+        if (filter === 'unreviewed' && (historicalFiles[file.id] || (review && isApproved(review, file))))
+          return false;
+        if (
+          filter === 'commented' &&
+          !review?.comments.some((comment) => comment.fileId === file.id && !comment.resolved)
+        )
+          return false;
+        return !query.trim() || reviewFilePath(file).toLowerCase().includes(query.trim().toLowerCase());
+      }),
+    [files, selectedFile?.id, filter, historicalFiles, review, query],
+  );
   if (!review) return null;
 
   return (
@@ -114,6 +131,15 @@ export function ReviewWorkbench({
         />
       )}
       <DiffWorkspace
+        stackProps={{
+          files: stackFiles,
+          review,
+          historicalFiles,
+          actions,
+          approvalBusy,
+          anchorRevision,
+          onError,
+        }}
         selectedFile={selectedFile}
         snapshot={snapshot}
         remoteLoading={remoteLoading}
@@ -131,7 +157,6 @@ export function ReviewWorkbench({
         approved={approved}
         approvalBusy={approvalBusy}
         onToggleApproval={() => void toggleApproval()}
-        viewerKey={`${viewKey}:${selectedFile?.id}:${anchorRevision}`}
         viewerProps={{
           theme: theme,
           draftScope: viewKey,

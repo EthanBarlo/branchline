@@ -15,6 +15,7 @@ import type { BranchReviewService } from './branch-review-service';
 import type { BitbucketClient } from './bitbucket-client';
 import { IntegrationStore } from '../integration-store';
 import { ReviewStore } from '../../reviews/review-store';
+import { mapConcurrent } from '../concurrency';
 
 const same = (a: PublishedValue | undefined, b: PublishedValue | undefined) =>
   !!a && !!b && a.body === b.body && a.resolved === b.resolved && a.deleted === b.deleted;
@@ -72,7 +73,7 @@ function changeAction(
   return null;
 }
 
-/** Caller serializes this service with local edits, refreshes and merge actions per review. */
+/** Caller serializes remote actions per review. Local edits may proceed after publication intent freezes. */
 export class PublicationService {
   constructor(
     private readonly reviews: ReviewStore,
@@ -136,6 +137,7 @@ export class PublicationService {
   async capture(id: string): Promise<void> {
     const binding = this.state.review(id);
     if (!binding) return;
+    const additions: CommentPublication[] = [];
     for (const comment of this.reviews.getReview(id).comments) {
       if (binding.publications[comment.id]) continue;
       // A stale draft must remain saved even when it cannot be anchored remotely.
@@ -145,10 +147,12 @@ export class PublicationService {
       } catch {
         continue;
       }
-      await this.state.updateReview(id, (r) => {
-        r.publications[comment.id] = { commentId: comment.id, anchor, state: 'draft', backup: comment };
-      });
+      additions.push({ commentId: comment.id, anchor, state: 'draft', backup: comment });
     }
+    if (additions.length)
+      await this.state.updateReview(id, (r) => {
+        for (const publication of additions) r.publications[publication.commentId] ??= publication;
+      });
   }
 
   async reconcile(
@@ -357,7 +361,7 @@ export class PublicationService {
     if (latest.state !== 'OPEN') throw new Error('This PR is no longer open.');
   }
 
-  async publish(id: string): Promise<RemoteReviewState> {
+  async publish(id: string, onPrepared: () => void = () => {}): Promise<RemoteReviewState> {
     const preview = await this.preview(id);
     if (preview.blockers.length) throw new Error(preview.blockers.join('\n'));
     if (this.branches && preview.items.length) {
@@ -383,11 +387,15 @@ export class PublicationService {
         ),
       };
     });
-    for (const entry of batch) {
+    onPrepared();
+    // Each comment has its own durable receipt. Steps on one comment remain
+    // ordered; independent comments may use the network at the same time.
+    let stopped = false;
+    await mapConcurrent(batch, 3, async (entry) => {
+      if (stopped) return;
       let publication = this.binding(id).publications[entry.commentId];
       const pr = this.pr(binding, publication.anchor);
       try {
-        await this.assertCurrent(client, pr, publication.remoteId ? undefined : publication.anchor);
         for (let step = 0; step < 3; step++) {
           publication = this.binding(id).publications[entry.commentId];
           const action = changeAction(publication, entry.value);
@@ -438,7 +446,8 @@ export class PublicationService {
                 error: errorText(error),
               }),
             );
-            return this.binding(id);
+            stopped = true;
+            return;
           }
         }
         await this.assertCurrent(client, pr);
@@ -448,9 +457,10 @@ export class PublicationService {
           p.error = errorText(error);
           if (p.state !== 'unknown') p.state = 'failed';
         });
-        return this.binding(id);
+        stopped = true;
+        return;
       }
-    }
+    });
     return this.binding(id);
   }
 

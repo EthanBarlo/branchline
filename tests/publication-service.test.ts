@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InlinePayload, PullRequest, RemoteComment } from '../shared/integrations';
-import type { ReviewFile, ReviewSnapshot } from '../shared/types';
+import type { ReviewComment, ReviewFile, ReviewSnapshot } from '../shared/types';
 import type { BitbucketClient } from '../electron/integrations/bitbucket/bitbucket-client';
 import { PublicationService, inlinePayload } from '../electron/integrations/bitbucket/publication-service';
 import { ReviewStore } from '../electron/reviews/review-store';
@@ -44,7 +44,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
     const result = await reviews.addComment(review.id, { fileId: live.file.id, repoRelativePath: '.', path: live.file.path, side: 'additions', lineStart: 1, lineEnd: 2, fingerprint: live.file.fingerprint, context: 'new\nline', body: 'Please check this', ...changes });
     await service.capture(review.id); return result.comments.at(-1)!;
   };
-  return { directory, reviews, state, review, live, service, add, make };
+  return { directory, reviews, state, review, live, service, add, make, client };
 }
 
 test('publishes exact new/old ranges and file anchors, including canonical rename path', async t => {
@@ -223,4 +223,34 @@ test('a push after successful delivery clears the failed marker when remote inte
   assert.equal(f.state.review(f.review.id)!.publications[comment.id].state, 'synced');
   await f.service.publish(f.review.id);
   assert.equal(f.live.sent.length, 1);
+});
+
+
+test('independent comments publish concurrently with three active deliveries and frozen intent', async t => {
+  const f = await fixture(t);
+  const comments: ReviewComment[] = [];
+  for (let index = 0; index < 6; index++) comments.push(await f.add({ body: `note ${index}` }));
+  const create = f.client.createComment.bind(f.client);
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  let active = 0; let peak = 0; let arrivals = 0;
+  let ready!: () => void;
+  const arrived = new Promise<void>(resolve => { ready = resolve; });
+  f.client.createComment = async (pr, payload) => {
+    active++; peak = Math.max(peak, active); arrivals++;
+    assert.ok(Object.values(f.state.review(f.review.id)!.publications).some(p => p.state === 'sending' && p.intended?.body === payload.content.raw));
+    if (arrivals === 3) ready();
+    await hold;
+    try { return await create(pr, payload); } finally { active--; }
+  };
+  const publication = f.service.publish(f.review.id);
+  await Promise.race([arrived, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Comment deliveries did not overlap')), 3000); timer.unref(); })]);
+  assert.equal(peak, 3); assert.equal(arrivals, 3);
+  await f.reviews.updateComment(f.review.id, comments[0].id, { body: 'edited during delivery' });
+  release(); await publication;
+  assert.equal(peak, 3); assert.equal(f.live.sent.length, 6);
+  assert.equal(f.state.review(f.review.id)!.publications[comments[0].id].acknowledged?.body, 'note 0');
+  assert.equal(f.reviews.getReview(f.review.id).comments[0].body, 'edited during delivery');
+  assert.ok((await f.service.preview(f.review.id)).items.some(item => item.commentId === comments[0].id && item.action === 'update'));
 });

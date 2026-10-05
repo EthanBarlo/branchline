@@ -21,15 +21,15 @@ export async function createServices(dataDirectory: string, secureStorage: Secur
     () => reviews?.invalidateLocalSnapshots(),
   );
   await gitWorkflow.load();
-  const projects = new ProjectService(store, (repo) => gitWorkflow.read(() => inspectRepo(repo)));
+  const projects = new ProjectService(store, (repo) => gitWorkflow.read(() => inspectRepo(repo), repo));
   let integrations: IntegrationService;
   reviews = new ReviewService(
     store,
-    (repo) => gitWorkflow.read(() => inspectRepo(repo)),
+    (repo) => gitWorkflow.read(() => inspectRepo(repo), repo),
     (config) =>
       config.remote
         ? integrations.buildSnapshot(config as Review)
-        : gitWorkflow.read(() => buildSnapshot(config)),
+        : gitWorkflow.read(() => buildSnapshot(config), config.repoPath),
   );
   const integrationStore = new IntegrationStore(join(dataDirectory, 'integrations.json'));
   const connections = new ConnectionManager(join(dataDirectory, 'credentials.json'), secureStorage);

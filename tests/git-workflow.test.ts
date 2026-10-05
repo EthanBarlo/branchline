@@ -835,3 +835,83 @@ test('late parallel scans cannot replace a newer snapshot or its persistent cach
   assert.equal(service.getCachedStatus('project')!.repositories[0].head, newer.repositories[0].head);
   assert.ok((await service.acknowledge('project')).version! > newer.version!);
 });
+
+test('sibling pushes overlap and a referenced parent waits for every started child', async t => {
+  const { local, child, directory, service } = await withChild();
+  const source = path.join(directory, 'sibling-source');
+  await mkdir(source); git(source, 'init', '-q', '-b', 'main');
+  await commit(source, 'sibling.txt', 'initial\n');
+  git(local, 'submodule', 'add', '-q', source, 'sibling');
+  git(local, 'commit', '-qm', 'Add sibling'); git(local, 'push', '-q');
+  const sibling = path.join(local, 'sibling');
+  for (const repo of [child, sibling]) {
+    git(git(repo, 'remote', 'get-url', 'origin'), 'config', 'receive.denyCurrentBranch', 'ignore');
+    await commit(repo, 'outgoing.txt', 'outgoing\n');
+  }
+  git(local, 'add', 'child', 'sibling'); git(local, 'commit', '-qm', 'New pointers');
+  const preview = await service.preview('project', { action: 'push' });
+  assert.equal(preview.ready, true, JSON.stringify(preview.rows));
+  const driver = service as any; const command = driver.command.bind(service);
+  let release!: () => void; const hold = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  const events: string[] = [];
+  const physicalLocal = await realpath(local);
+  driver.command = async (repo: string, args: string[]) => {
+    if (args[0] === 'push') {
+      const name = repo === physicalLocal ? 'parent' : path.basename(repo);
+      events.push(`start ${name}`);
+      if (name !== 'parent') {
+        if (events.filter(event => event.startsWith('start ')).length === 2) entered();
+        await hold;
+      }
+      const result = await command(repo, args); events.push(`done ${name}`); return result;
+    }
+    return command(repo, args);
+  };
+  const operation = service.run('project', preview.id);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([started, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Sibling pushes did not overlap')), 3000); })]);
+    assert.deepEqual(events.slice().sort(), ['start child', 'start sibling']);
+  } finally { clearTimeout(timer); release(); }
+  assert.equal((await operation).state, 'completed');
+  assert.ok(events.indexOf('start parent') > events.indexOf('done child'));
+  assert.ok(events.indexOf('start parent') > events.indexOf('done sibling'));
+});
+
+test('routine checks publish no progress or cache writes when unchanged, and external edits publish one coherent update', async () => {
+  const { local, child, service } = await withChild();
+  const initial = await service.getStatus('project');
+  const events: import('../shared/git-workflow').GitWorkflowSnapshot[] = [];
+  const unsubscribe = service.subscribe(change => { if (change.snapshot) events.push(change.snapshot); });
+  const cache = (service as any).cache;
+  const put = cache.put.bind(cache);
+  let writes = 0;
+  cache.put = (...args: any[]) => { writes++; return put(...args); };
+  try {
+    const checked = await service.getStatus('project');
+    assert.equal(checked.version, initial.version);
+    assert.equal(events.length, 0);
+    assert.equal(writes, 0);
+    for (const repo of [local, child]) git(repo, 'branch', 'topic/external');
+    const changed = await service.getStatus('project');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].loading, false);
+    assert.equal(changed.branches.find(branch => branch.name === 'topic/external')!.repositories.length, 2);
+    assert.equal(writes, 1);
+    assert.deepEqual(service.getCachedStatus('project')!.branches, changed.branches);
+  } finally { unsubscribe(); }
+});
+
+test('discovery shares HEAD, index and module reads with status inspection', async () => {
+  const { service } = await fixture();
+  const driver = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = driver.command.bind(service);
+  const calls: string[] = [];
+  driver.command = (directory, args) => { calls.push(args.join(' ')); return command(directory, args); };
+  await service.getStatus('project');
+  for (const invocation of ['rev-parse --verify HEAD', 'ls-files --stage -z'])
+    assert.equal(calls.filter(call => call === invocation).length, 1, invocation);
+  assert.equal(calls.filter(call => call.startsWith('ls-tree -rz ')).length, 1);
+});

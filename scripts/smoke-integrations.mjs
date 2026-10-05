@@ -97,6 +97,7 @@ function fixtureBridge() {
   }
   const api = {
     onGitWorkflowChanged: () => () => {},
+    getCachedGitStatus: async () => undefined,
     getGitStatus: async projectId => ({ projectId, repositories: [], branches: [] }),
     fetchGit: async projectId => ({ projectId, repositories: [], branches: [] }),
     onBeforeClose: () => () => {}, onCloseCancelled: () => () => {}, onUpdateStateChanged: () => () => {}, onUpdateDialogRequested: () => () => {},
@@ -615,7 +616,7 @@ try {
   await stale.getByRole('button', { name: 'Choose current lines…', exact: true }).click();
   await page.locator('.reanchor-banner').waitFor();
   // Pierre renders line-number elements into open shadow roots.
-  const gutter = page.locator('[data-column-number="2"][data-line-type="change-addition"]');
+  const gutter = page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]');
   await gutter.waitFor();
   await gutter.click();
   await page.locator('.reanchor-banner').waitFor({ state: 'hidden' });
@@ -650,7 +651,7 @@ try {
   await page.screenshot({ path: 'artifacts/integration-published-pr-links.png', animations: 'disabled' });
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
 
-  await page.locator('[data-comment-id="10000000-0000-4000-8000-000000000001"]').getByRole('button', { name: 'Edit comment', exact: true }).click();
+  await page.locator('[data-active-diff]').locator('[data-comment-id="10000000-0000-4000-8000-000000000001"]').getByRole('button', { name: 'Edit comment', exact: true }).click();
   await page.getByRole('textbox', { name: 'Comment text', exact: true }).fill('Updated feedback after the first publication.');
   await page.getByRole('button', { name: 'Publish feedback', exact: true }).click();
   panel = await dialog(page, 'Publish feedback');
@@ -674,7 +675,7 @@ try {
   assert.equal(await page.getByText('You’re all caught up.', { exact: true }).count(), 0);
   await page.evaluate(() => window.integrationSmoke.setSnapshotMode('unavailable'));
   await page.getByRole('button', { name: 'Refresh review', exact: true }).click();
-  await page.getByText('This file could not be loaded', { exact: true }).waitFor();
+  await page.locator('[data-active-diff]').getByText('This file could not be loaded', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Mark reviewed', exact: true }).isDisabled(), true);
   await page.evaluate(() => window.integrationSmoke.setSnapshotMode('normal'));
   await page.getByRole('button', { name: 'Refresh review', exact: true }).click();

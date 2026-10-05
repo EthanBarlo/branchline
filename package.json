@@ -27,7 +27,9 @@
     "format:check": "prettier --check src electron shared",
     "routes:generate": "node scripts/generate-routes.mjs",
     "test:desktop:routing": "node scripts/smoke-routing.mjs",
-    "lint": "eslint src electron shared --ext .ts,.tsx"
+    "lint": "eslint src electron shared --ext .ts,.tsx",
+    "test:desktop:performance": "node scripts/smoke-performance.mjs",
+    "benchmark:performance": "node --import tsx scripts/benchmark-performance.mjs"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.1",

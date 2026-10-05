@@ -8,9 +8,11 @@ import { Button } from '../../ui/Button';
 import { Spinner } from '../../ui/Spinner';
 import { RemoteLoadRepositories } from '../integrations/RemoteLoadRepositories';
 import { DiffViewer } from './diff/DiffViewer';
+import { DiffStack } from './diff/DiffStack';
 import { fileLocation } from './fileLocation';
 
 interface DiffWorkspaceProps {
+  stackProps: Omit<ComponentProps<typeof DiffStack>, 'selectedFileId' | 'viewerProps'>;
   selectedFile?: ReviewFile;
   snapshot?: ReviewSnapshot;
   remoteLoading: boolean;
@@ -28,11 +30,11 @@ interface DiffWorkspaceProps {
   approved: boolean;
   approvalBusy: boolean;
   onToggleApproval: () => void;
-  viewerKey: string;
   viewerProps: ComponentProps<typeof DiffViewer>;
 }
 
 export function DiffWorkspace({
+  stackProps,
   selectedFile,
   snapshot,
   remoteLoading,
@@ -50,7 +52,6 @@ export function DiffWorkspace({
   approved,
   approvalBusy,
   onToggleApproval,
-  viewerKey,
   viewerProps,
 }: DiffWorkspaceProps) {
   const showFilesButton =
@@ -190,7 +191,12 @@ export function DiffWorkspace({
             </div>
           )}
           <div className={`diff-content ${stylex.props(styles['diff-content']).className}`}>
-            <DiffViewer key={viewerKey} {...viewerProps} />
+            <DiffStack
+              key={viewerProps.draftScope}
+              {...stackProps}
+              selectedFileId={selectedFile.id}
+              viewerProps={viewerProps}
+            />
           </div>
         </>
       )}

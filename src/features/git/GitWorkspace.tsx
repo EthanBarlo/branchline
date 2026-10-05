@@ -1,6 +1,15 @@
 import * as stylex from '@stylexjs/stylex';
-import { ArrowDown, ArrowUp, GitBranch, RefreshCw } from 'lucide-react';
-import { useRef, useState } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  GitBranch,
+  GitCompareArrows,
+  Pencil,
+  Plus,
+  RefreshCw,
+} from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
 import type {
   GitAction,
   GitActionPreview,
@@ -9,7 +18,7 @@ import type {
 } from '../../../shared/git-workflow';
 import type { Project } from '../../../shared/types';
 import { errorMessage } from '../../lib/errorMessage';
-import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
+import { colors, fonts, spacing, typeScale } from '../../theme/tokens.stylex';
 import { Button } from '../../ui/Button';
 import { FormError } from '../../ui/Field';
 import { Select } from '../../ui/Select';
@@ -49,7 +58,7 @@ export function GitWorkspace({
   workflow: GitWorkflow;
   onReview: (branch: string) => void;
 }) {
-  const { snapshot, busy, error, reload, setSnapshot } = workflow;
+  const { snapshot, busy, fetching, error, reload, setSnapshot } = workflow;
   const { favourites, toggleFavourite } = useGitBranchFavourites(project.id);
   const selectionVersion = useRef(0);
   const [selectedName, setSelectedName] = useState(
@@ -64,7 +73,7 @@ export function GitWorkspace({
   const [preview, setPreview] = useState<GitActionPreview>();
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string>();
-  const branches = sidebarBranches(snapshot?.branches ?? []);
+  const branches = useMemo(() => sidebarBranches(snapshot?.branches ?? []), [snapshot?.branches]);
   const repositories = snapshot?.repositories ?? [];
   const selectedBranch =
     branches.find((branch) => branch.key === selectedName) ??
@@ -95,6 +104,8 @@ export function GitWorkspace({
   );
   const remotes = [...new Set(selectedBranch?.repositories.flatMap((repo) => repo.remotes) ?? [])].sort();
   const partial = selectedBranch && selectedBranch.repositories.length < repositoryCount;
+  const checkedOut =
+    !!selectedBranch && !partial && selectedBranch.repositories.every((repo) => repo.current);
 
   async function prepare(action: GitAction, branch = selectedBranch) {
     const version = selectionVersion.current;
@@ -113,7 +124,6 @@ export function GitWorkspace({
         publishRemotes: publicationChoices,
       });
       if (version === selectionVersion.current) setPreview(prepared);
-      setSnapshot(await window.reviewAPI.getGitStatus(project.id));
     } catch (reason) {
       setActionError(errorMessage(reason));
     } finally {
@@ -190,12 +200,19 @@ export function GitWorkspace({
       <header {...stylex.props(styles.toolbar)}>
         <div {...stylex.props(styles.checkout)}>
           <GitBranch size={14} />
-          <strong>{checkoutSummary(repositories)}</strong>
-          <span {...stylex.props(styles.muted)}>checked out</span>
+          <strong>{snapshot ? checkoutSummary(repositories) : 'Reading checkout…'}</strong>
+          {!!repositories.length && <span {...stylex.props(styles.muted)}>checked out</span>}
         </div>
         <BranchCounts repositories={repositories} />
         <div {...stylex.props(styles.toolbarActions)}>
-          {disabled && <Spinner size={14} />}
+          <span {...stylex.props(styles.activity)} aria-live="polite">
+            {disabled && (
+              <>
+                <Spinner size={12} />
+                <span>{fetching ? 'Fetching…' : 'Working…'}</span>
+              </>
+            )}
+          </span>
           <Button
             disabled={disabled}
             onClick={async () => {
@@ -235,7 +252,7 @@ export function GitWorkspace({
           favourites={favourites}
           onToggleFavourite={toggleFavourite}
           cached={!!snapshot?.cached}
-          refreshing={!!snapshot?.loading}
+          refreshing={fetching || !!snapshot?.loading}
           onAction={branchAction}
           selected={selectedBranch?.key}
           loading={!snapshot && !error}
@@ -254,8 +271,20 @@ export function GitWorkspace({
             <>
               <div {...stylex.props(styles.branchHeader)}>
                 <div {...stylex.props(styles.branchHeading)}>
-                  <p {...stylex.props(styles.eyebrow)}>SELECTED BRANCH</p>
-                  <h1 {...stylex.props(styles.title)}>
+                  <div {...stylex.props(styles.branchLabel)}>
+                    <span {...stylex.props(styles.eyebrow)}>
+                      {selectedBranch.remote ? 'Remote branch' : 'Local branch'}
+                    </span>
+                    {checkedOut && (
+                      <span {...stylex.props(styles.checkoutBadge)}>
+                        <Check size={11} /> Checked out
+                      </span>
+                    )}
+                  </div>
+                  <h1
+                    title={`${selectedBranch.remote ? `${selectedBranch.remote}/` : ''}${selectedBranch.name}`}
+                    {...stylex.props(styles.title)}
+                  >
                     <GitBranch size={20} />
                     {selectedBranch.remote ? `${selectedBranch.remote}/` : ''}
                     {selectedBranch.name}
@@ -264,17 +293,30 @@ export function GitWorkspace({
                     {partial
                       ? `${selectedBranch.repositories.length} of ${repositoryCount} repositories`
                       : `All ${repositoryCount} ${repositoryCount === 1 ? 'repository' : 'repositories'}`}{' '}
-                    ·{' '}
-                    <span>
-                      {selectedBranch.repositories.every((repo) => repo.current) && !partial
-                        ? 'Checked out'
-                        : 'Available to inspect'}
-                    </span>
+                    · <span>{checkedOut ? 'Checked out' : 'Available to inspect'}</span>
                   </p>
                 </div>
                 <div {...stylex.props(styles.branchActions)}>
                   <Button
-                    disabled={disabled || !reviewRef}
+                    disabled={disabled}
+                    onClick={() =>
+                      selectedBranch && setNameAction({ branch: selectedBranch, action: 'create' })
+                    }
+                  >
+                    <Plus size={13} /> New branch
+                  </Button>
+                  {!selectedBranch.remote && (
+                    <Button
+                      disabled={disabled}
+                      onClick={() =>
+                        selectedBranch && setNameAction({ branch: selectedBranch, action: 'rename' })
+                      }
+                    >
+                      <Pencil size={13} /> Rename
+                    </Button>
+                  )}
+                  <Button
+                    disabled={pending || (busy && !fetching) || !reviewRef}
                     title={
                       !rootBranch
                         ? 'Branch review requires this branch in the root repository'
@@ -282,9 +324,13 @@ export function GitWorkspace({
                     }
                     onClick={() => reviewRef && onReview(reviewRef)}
                   >
-                    Review
+                    <GitCompareArrows size={13} /> Review
                   </Button>
-                  <Button variant="primary" disabled={disabled} onClick={() => void prepare('checkout')}>
+                  <Button
+                    variant="primary"
+                    disabled={disabled || checkedOut}
+                    onClick={() => void prepare('checkout')}
+                  >
                     Check out
                   </Button>
                 </div>
@@ -314,14 +360,18 @@ export function GitWorkspace({
                 <strong>Repositories</strong>
                 <BranchCounts repositories={selectedBranch.repositories} />
               </div>
-              <div role="table" aria-label="Selected branch repositories">
+              <div
+                role="table"
+                aria-label="Selected branch repositories"
+                {...stylex.props(styles.repositoryList)}
+              >
                 {repositories.map((repository) => {
                   const branch = selectedBranch.repositories.find((repo) => repo.path === repository.path);
                   const problem = repository.error || (!branch ? 'Branch missing' : branch.error);
                   return (
                     <div key={repository.path} role="row" {...stylex.props(styles.repository)}>
                       <div role="cell" {...stylex.props(styles.repositoryTop)}>
-                        <div>
+                        <div {...stylex.props(styles.repositoryHeading)}>
                           <strong {...stylex.props(styles.repoName)}>
                             {repository.path === '.' ? project.name : repository.path}
                           </strong>
@@ -330,7 +380,13 @@ export function GitWorkspace({
                           </span>
                         </div>
                         <span
-                          {...stylex.props(styles.note, !!(problem || branch?.diverged) && styles.warning)}
+                          {...stylex.props(
+                            styles.statusBadge,
+                            !(problem || branch?.diverged) &&
+                              status(branch) === 'Up to date' &&
+                              styles.statusClean,
+                            !!(problem || branch?.diverged || branch?.incoming) && styles.statusWarning,
+                          )}
                         >
                           {problem || status(branch)}
                         </span>
@@ -341,7 +397,7 @@ export function GitWorkspace({
                         />
                       </div>
                       <div role="cell" {...stylex.props(styles.details)}>
-                        <span>
+                        <span {...stylex.props(styles.branchType)}>
                           {branch?.local
                             ? 'Local branch'
                             : branch
@@ -515,6 +571,14 @@ const styles = stylex.create({
     fontSize: typeScale.small,
   },
   muted: { color: colors.textQuiet },
+  activity: {
+    display: 'flex',
+    gap: 6,
+    alignItems: 'center',
+    minWidth: 80,
+    color: colors.textQuiet,
+    fontSize: typeScale.micro,
+  },
   toolbarActions: { display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' },
   body: { display: 'flex', flex: '1', minHeight: 0 },
   main: {
@@ -529,6 +593,21 @@ const styles = stylex.create({
     gap: 20,
     alignItems: 'center',
     marginBottom: 24,
+    padding: 20,
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: colors.borderSubtle,
+    borderRadius: 10,
+    backgroundColor: colors.panel,
+    flexWrap: 'wrap',
+  },
+  branchLabel: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 },
+  checkoutBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: typeScale.micro,
+    color: colors.successText,
   },
   branchHeading: { minWidth: 0 },
   eyebrow: {
@@ -536,20 +615,23 @@ const styles = stylex.create({
     color: colors.textQuiet,
     letterSpacing: '0.08em',
     marginTop: 0,
-    marginBottom: 10,
+    marginBottom: 0,
+    textTransform: 'uppercase',
   },
   title: {
     display: 'flex',
     gap: 10,
     alignItems: 'center',
-    fontSize: 24,
-    lineHeight: 1.3,
+    fontSize: 22,
+    fontFamily: fonts.code,
+    letterSpacing: '-0.04em',
+    lineHeight: 1.4,
     fontWeight: 550,
     color: colors.textPrimary,
     margin: 0,
     overflowWrap: 'anywhere',
   },
-  branchActions: { display: 'flex', gap: 8, flexShrink: 0 },
+  branchActions: { display: 'flex', gap: 6, flexWrap: 'wrap', flexShrink: 0 },
   sectionHeading: {
     display: 'flex',
     alignItems: 'center',
@@ -560,12 +642,30 @@ const styles = stylex.create({
     borderBottomWidth: 1,
     borderBottomStyle: 'solid',
     borderBottomColor: colors.borderSubtle,
+    marginBottom: 12,
   },
+  repositoryList: { display: 'flex', flexDirection: 'column', gap: 10 },
+  repositoryHeading: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1', minWidth: 0 },
+  statusBadge: {
+    fontSize: typeScale.micro,
+    paddingInline: 8,
+    paddingBlock: 4,
+    borderRadius: 4,
+    backgroundColor: colors.inset,
+    color: colors.textMuted,
+    maxWidth: '45%',
+    overflowWrap: 'anywhere',
+  },
+  statusClean: { backgroundColor: colors.successSurface, color: colors.successText },
+  statusWarning: { backgroundColor: colors.warningSurface, color: colors.warningStrong },
+  branchType: { color: colors.textSecondary },
   repository: {
-    paddingBlock: 18,
-    borderBottomWidth: 1,
-    borderBottomStyle: 'solid',
-    borderBottomColor: colors.borderSubtle,
+    padding: 16,
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: colors.borderSubtle,
+    borderRadius: 7,
+    backgroundColor: colors.canvas,
   },
   repositoryTop: { display: 'flex', gap: 18, alignItems: 'center', justifyContent: 'space-between' },
   repoName: {
@@ -574,7 +674,7 @@ const styles = stylex.create({
     fontWeight: 550,
     overflowWrap: 'anywhere',
   },
-  repoKind: { color: colors.textQuiet, fontSize: typeScale.micro, marginLeft: 10 },
+  repoKind: { color: colors.textQuiet, fontSize: typeScale.micro },
   details: {
     display: 'flex',
     flexWrap: 'wrap',

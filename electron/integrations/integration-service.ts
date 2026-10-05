@@ -44,6 +44,7 @@ export interface IntegrationDependencies {
 
 export class IntegrationService {
   private pending = new Map<string, Promise<unknown>>();
+  private publishing = new Set<string>();
   private localRefreshes = new Map<string, Set<Promise<unknown>>>();
   private connectionChange: Promise<unknown> | null = null;
   private snapshots = new Map<string, ReviewSnapshot>();
@@ -128,6 +129,27 @@ export class IntegrationService {
     this.pending.set(id, operation);
     const cleanup = () => {
       if (this.pending.get(id) === operation) this.pending.delete(id);
+    };
+    void operation.then(cleanup, cleanup);
+    return operation;
+  }
+  /** Once publication intent is frozen, local edits can save during network delivery. */
+  private localEdit<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    if (!this.publishing.has(id)) return this.serial(id, fn);
+    const operation = Promise.resolve().then(() => {
+      if (this.connectionChange)
+        throw new Error('Wait for the connection change to finish before continuing.');
+      const review = this.reviews.getReview(id);
+      if (this.pending.has(`project:${review.projectId}`))
+        throw new Error('Wait for project integration settings to finish before reviewing.');
+      return fn();
+    });
+    const active = this.localRefreshes.get(id) ?? new Set<Promise<unknown>>();
+    active.add(operation);
+    this.localRefreshes.set(id, active);
+    const cleanup = () => {
+      active.delete(operation);
+      if (!active.size && this.localRefreshes.get(id) === active) this.localRefreshes.delete(id);
     };
     void operation.then(cleanup, cleanup);
     return operation;
@@ -701,7 +723,7 @@ export class IntegrationService {
     return operation;
   }
   addComment(id: string, input: NewComment, contextKey?: string) {
-    return this.serial(id, async () => {
+    return this.localEdit(id, async () => {
       const result = await this.reviewService.addComment(id, input, contextKey);
       if (result.remote) await this.publication.capture(id);
       return result;
@@ -713,10 +735,10 @@ export class IntegrationService {
     changes: { body?: string; resolved?: boolean },
     contextKey?: string,
   ) {
-    return this.serial(id, () => this.reviewService.updateComment(id, commentId, changes, contextKey));
+    return this.localEdit(id, () => this.reviewService.updateComment(id, commentId, changes, contextKey));
   }
   deleteComment(id: string, commentId: string, contextKey?: string) {
-    return this.serial(id, async () => {
+    return this.localEdit(id, async () => {
       const review = this.reviews.getReview(id);
       if (review.remote) {
         await this.publication.capture(id);
@@ -734,10 +756,10 @@ export class IntegrationService {
     approved: boolean,
     contextKey?: string,
   ) {
-    return this.serial(id, () => this.reviewService.setApprovals(id, files, approved, contextKey));
+    return this.localEdit(id, () => this.reviewService.setApprovals(id, files, approved, contextKey));
   }
   copyFeedback(id: string, contextKey?: string) {
-    return this.serial(id, () => this.reviewService.copyFeedback(id, contextKey));
+    return this.localEdit(id, () => this.reviewService.copyFeedback(id, contextKey));
   }
   previewFeedback(id: string) {
     return this.serial(id, () => {
@@ -746,9 +768,13 @@ export class IntegrationService {
     });
   }
   publishFeedback(id: string) {
-    return this.serial(id, () => {
+    return this.serial(id, async () => {
       this.requireLoaded(id);
-      return this.publication.publish(id);
+      try {
+        return await this.publication.publish(id, () => this.publishing.add(id));
+      } finally {
+        this.publishing.delete(id);
+      }
     });
   }
   reanchorComment(id: string, commentId: string, input: ReanchorInput) {

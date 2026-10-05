@@ -1307,3 +1307,35 @@ test('stale open-list entries cannot keep a freshly confirmed closed PR active f
   f.client.getBranch = async () => null;
   assert.deepEqual((await f.service.removeClosedReviews(f.project.id, [review.id], { automatic: true })).removedIds, [review.id]);
 });
+
+test('local feedback and markers save while publication is delivering frozen intent, and shutdown drains both', async t => {
+  const f = await fixture(t);
+  const review = await f.open(); const original = await f.add(review.id);
+  const create = f.client.createComment.bind(f.client);
+  let release!: () => void; const hold = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  f.client.createComment = async (pr, payload) => { entered(); await hold; return create(pr, payload); };
+  const publish = f.service.publishFeedback(review.id);
+  await started;
+  let drained = false; const idle = f.service.idle().then(() => { drained = true; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.all([
+        f.service.updateComment(review.id, original.id, { body: 'Edited while sending' }),
+        f.service.setApprovals(review.id, [{ fileId: file.id, fingerprint: file.fingerprint }], true),
+        f.service.addComment(review.id, { fileId: file.id, repoRelativePath: '.', path: file.path, side: 'additions', lineStart: 0, lineEnd: 0, body: 'Next batch', context: '', fingerprint: file.fingerprint }),
+      ]),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Publication blocked local feedback')), 1500); }),
+    ]);
+    assert.equal(drained, false); assert.equal(f.service.busy, true);
+    assert.equal(f.reviews.getReview(review.id).comments.find(c => c.id === original.id)?.body, 'Edited while sending');
+    assert.equal(f.reviews.getReview(review.id).approvals[file.id], file.fingerprint);
+  } finally { clearTimeout(timer); release(); }
+  await Promise.all([publish, idle]);
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].content.raw, 'Initial comment');
+  const preview = await f.service.previewFeedback(review.id);
+  assert.ok(preview.items.some(item => item.action === 'update' && item.body === 'Edited while sending'));
+  assert.ok(preview.items.some(item => item.action === 'create' && item.body === 'Next batch'));
+});

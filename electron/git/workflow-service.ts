@@ -3,6 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { GitWorkflowCache } from './workflow-cache';
+import { GitOperationQueue } from './operation-queue';
+import { mapConcurrent } from '../integrations/concurrency';
 import type { Project } from '../../shared/types';
 import type {
   GitActionInput,
@@ -34,6 +36,11 @@ interface BranchReadContext {
   tracking: Map<string, string>;
   urls: Map<string, Promise<string>>;
 }
+interface RepositoryTreeRead {
+  head: Promise<string>;
+  index: Promise<string>;
+  modules: Promise<string[]>;
+}
 interface Prepared {
   preview: GitActionPreview;
   input: GitActionInput;
@@ -60,7 +67,7 @@ const remoteCacheRef = (url: string, branch: string): string =>
 
 /** Owns local Git writes. Reads coexist; writes drain readers and protect overlapping projects. */
 export class GitWorkflowService {
-  private queue: Promise<unknown> = Promise.resolve();
+  private queue = new GitOperationQueue();
   private branchCache = new Map<
     string,
     {
@@ -73,7 +80,6 @@ export class GitWorkflowService {
   private version = 0;
   private published = new Map<string, GitWorkflowSnapshot>();
   private generations = new Map<string, number>();
-  private readers = new Set<Promise<unknown>>();
   private saving: Promise<void> = Promise.resolve();
   private plans = new Map<string, Prepared>();
   private listeners = new Set<(change: GitWorkflowChange) => void>();
@@ -126,37 +132,38 @@ export class GitWorkflowService {
     return () => this.listeners.delete(listener);
   }
 
-  private emit(projectId: string, busy: boolean): void {
-    const change = { projectId, busy, operation: this.journal.operations[projectId] };
+  private emit(projectId: string, busy: boolean, activity: GitWorkflowChange['activity'] = 'mutation'): void {
+    const change = { projectId, busy, activity, operation: this.journal.operations[projectId] };
     for (const listener of this.listeners) listener(structuredClone(change));
   }
 
-  /** A lightweight checkout guard can run while a long comparison is reading Git. */
-  read<T>(action: () => Promise<T>): Promise<T> {
-    const result = this.queue.catch(() => {}).then(action);
-    this.readers.add(result);
-    void result.then(
-      () => this.readers.delete(result),
-      () => this.readers.delete(result),
-    );
-    return result;
+  private async scope(repo: string): Promise<string[]> {
+    const root = await realpath(repo);
+    // Linked worktrees share refs even when their checkout paths are unrelated.
+    const common = await this.command(root, ['rev-parse', '--git-common-dir']);
+    return [root, await realpath(path.resolve(root, common))];
   }
 
-  private exclusive<T>(projectId: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.queue;
-    const readers = [...this.readers];
-    const result = Promise.all([previous.catch(() => {}), Promise.allSettled(readers)]).then(async () => {
+  /** A lightweight checkout guard can run while a long comparison is reading Git. */
+  read<T>(action: () => Promise<T>, repo?: string): Promise<T> {
+    return this.queue.run(false, repo ? this.scope(repo) : undefined, action);
+  }
+
+  private exclusive<T>(
+    projectId: string,
+    action: () => Promise<T>,
+    activity: GitWorkflowChange['activity'] = 'mutation',
+  ): Promise<T> {
+    return this.queue.run(true, this.scope(this.project(projectId).repoPath), async () => {
       this.invalidateReviews();
-      this.emit(projectId, true);
+      this.emit(projectId, true, activity);
       try {
         return await action();
       } finally {
         this.invalidateReviews();
-        this.emit(projectId, false);
+        this.emit(projectId, false, activity);
       }
     });
-    this.queue = result.catch(() => {});
-    return result;
   }
 
   private async command(directory: string, args: string[]): Promise<string> {
@@ -229,10 +236,14 @@ export class GitWorkflowService {
     return [ahead, behind];
   }
 
-  private async inspect(directory: string, relativePath: string): Promise<Repository> {
+  private async inspect(
+    directory: string,
+    relativePath: string,
+    tree?: RepositoryTreeRead,
+  ): Promise<Repository> {
     const [branch, head, refText, remoteText, porcelain] = await Promise.all([
       this.command(directory, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => ''),
-      this.command(directory, ['rev-parse', '--verify', 'HEAD']).catch(() => ''),
+      tree?.head ?? this.command(directory, ['rev-parse', '--verify', 'HEAD']).catch(() => ''),
       this.command(directory, [
         'for-each-ref',
         '--format=%(refname)%00%(objectname)',
@@ -255,8 +266,12 @@ export class GitWorkflowService {
         .filter(Boolean)
         .map((line) => line.split('\0') as [string, string]),
     );
-    const modules = head ? await this.modules(directory, head) : [];
-    const indexModules = (await this.command(directory, ['ls-files', '--stage', '-z']))
+    const [modules, index, gitDirectory] = await Promise.all([
+      tree?.modules ?? (head ? this.modules(directory, head) : []),
+      tree?.index ?? this.command(directory, ['ls-files', '--stage', '-z']),
+      this.command(directory, ['rev-parse', '--absolute-git-dir']),
+    ]);
+    const indexModules = index
       .split('\0')
       .filter((line) => line.startsWith('160000 '))
       .map((line) => line.slice(line.indexOf('\t') + 1));
@@ -301,9 +316,8 @@ export class GitWorkflowService {
         'sequencer',
         'BISECT_START',
       ].map(async (marker) => {
-        const location = await this.command(directory, ['rev-parse', '--git-path', marker]);
         if (
-          await stat(path.resolve(directory, location)).then(
+          await stat(path.join(gitDirectory, marker)).then(
             () => true,
             () => false,
           )
@@ -411,17 +425,20 @@ export class GitWorkflowService {
         visited.add(physical);
         const top = await realpath(await this.command(physical, ['rev-parse', '--show-toplevel']));
         if (top !== physical) throw new Error('Submodule is not initialized. Initialize it manually.');
-        const inspection = this.inspect(physical, relativePath).then(async (repository) => {
+        // Discovery and status inspect the same HEAD/index. Share those reads while
+        // still allowing children to load before a slow parent status check finishes.
+        const head = this.command(physical, ['rev-parse', '--verify', 'HEAD']).catch(() => '');
+        const tree: RepositoryTreeRead = {
+          head,
+          index: this.command(physical, ['ls-files', '--stage', '-z']),
+          modules: head.then((revision) => (revision ? this.modules(physical, revision) : [])),
+        };
+        const inspection = this.inspect(physical, relativePath, tree).then(async (repository) => {
           repositories.set(relativePath, repository);
           await onRepository?.(repository);
         });
         const children = (async () => {
-          const [index, modules] = await Promise.all([
-            this.command(physical, ['ls-files', '--stage', '-z']),
-            this.command(physical, ['rev-parse', '--verify', 'HEAD'])
-              .then((head) => this.modules(physical, head))
-              .catch(() => [] as string[]),
-          ]);
+          const [index, modules] = await Promise.all([tree.index, tree.modules.catch(() => [] as string[])]);
           const indexed = index
             .split('\0')
             .filter((line) => line.startsWith('160000 '))
@@ -640,6 +657,9 @@ export class GitWorkflowService {
     const generation = (this.generations.get(projectId) ?? 0) + 1;
     this.generations.set(projectId, generation);
     const cached = this.getCachedStatus(projectId);
+    // Only first load and network fetch need progressive results. Routine local
+    // checks publish one coherent snapshot, keeping coverage and selection stable.
+    const progressive = fetch || !this.published.has(projectId);
     const chunks = new Map<string, GitWorkflowSnapshot>();
     for (const repository of cached?.repositories ?? [])
       chunks.set(repository.path, {
@@ -682,22 +702,26 @@ export class GitWorkflowService {
       const snapshot = compose(true);
       this.published.set(projectId, snapshot);
       for (const listener of this.listeners) listener({ projectId, busy: fetch, snapshot });
-      await this.cache.put(project, snapshot).catch(() => {});
+      // Intermediate display caches must not hold up Git/network work. The final
+      // snapshot is persisted before scan completion below.
+      void this.cache.put(project, snapshot).catch(() => {});
     };
     const repositories = await this.discover(
       projectId,
-      async (repository) => {
-        chunks.set(repository.path, await this.snapshot(projectId, [repository]));
-        if (!fetch) pending.delete(repository.path);
-        await publish();
-        if (fetch && !repository.error) {
-          await this.fetchRepositories([repository]);
-          const updated = await this.inspect(repository.directory, repository.path);
-          chunks.set(repository.path, await this.snapshot(projectId, [updated]));
-        }
-        pending.delete(repository.path);
-        if (fetch) await publish();
-      },
+      progressive
+        ? async (repository) => {
+            chunks.set(repository.path, await this.snapshot(projectId, [repository]));
+            if (!fetch) pending.delete(repository.path);
+            await publish();
+            if (fetch && !repository.error) {
+              await this.fetchRepositories([repository]);
+              const updated = await this.inspect(repository.directory, repository.path);
+              chunks.set(repository.path, await this.snapshot(projectId, [updated]));
+            }
+            pending.delete(repository.path);
+            if (fetch) await publish();
+          }
+        : undefined,
       (relativePath) => pending.add(relativePath),
     );
     await this.reconcile(projectId, repositories);
@@ -711,6 +735,14 @@ export class GitWorkflowService {
       loading: false,
       pendingRepositories: [],
     });
+    const previous = this.published.get(projectId);
+    if (
+      previous &&
+      !previous.loading &&
+      JSON.stringify([previous.repositories, previous.branches, previous.operation]) ===
+        JSON.stringify([result.repositories, result.branches, result.operation])
+    )
+      return structuredClone(previous);
     if (this.generations.get(projectId) === generation) {
       this.published.set(projectId, result);
       await this.cache.put(project, result).catch(() => {});
@@ -721,45 +753,43 @@ export class GitWorkflowService {
   }
 
   getStatus(projectId: string): Promise<GitWorkflowSnapshot> {
-    return this.read(() => this.scan(projectId, false));
+    return this.read(() => this.scan(projectId, false), this.project(projectId).repoPath);
   }
 
   private async fetchRepositories(repositories: Repository[]): Promise<void> {
-    await Promise.all(
-      repositories.map(async (repository) => {
-        if (repository.error || !repository.remotes.length) return;
-        const previous = this.journal.fetched[repository.directory];
-        try {
-          for (const remote of repository.remotes) {
-            if (remote.startsWith('-')) throw new Error('Invalid remote name. Configure it manually.');
-            await this.command(repository.directory, [
-              '-c',
-              'fetch.pruneTags=false',
-              '-c',
-              `remote.${remote}.pruneTags=false`,
-              'fetch',
-              '--prune',
-              '--no-tags',
-              '--no-recurse-submodules',
-              '--no-write-fetch-head',
-              remote,
-              `+refs/heads/*:refs/remotes/${remote}/*`,
-            ]);
-          }
-          const updated = await this.inspect(repository.directory, repository.path);
-          if (updated.pushTarget)
-            await this.remoteCommit(updated, updated.pushTarget.remote, updated.pushTarget.branch);
-          this.journal.fetched[repository.directory] = { at: new Date().toISOString() };
-        } catch (error) {
-          this.journal.fetched[repository.directory] = { at: previous?.at, error: message(error) };
+    await mapConcurrent(repositories, 4, async (repository) => {
+      if (repository.error || !repository.remotes.length) return;
+      const previous = this.journal.fetched[repository.directory];
+      try {
+        for (const remote of repository.remotes) {
+          if (remote.startsWith('-')) throw new Error('Invalid remote name. Configure it manually.');
+          await this.command(repository.directory, [
+            '-c',
+            'fetch.pruneTags=false',
+            '-c',
+            `remote.${remote}.pruneTags=false`,
+            'fetch',
+            '--prune',
+            '--no-tags',
+            '--no-recurse-submodules',
+            '--no-write-fetch-head',
+            remote,
+            `+refs/heads/*:refs/remotes/${remote}/*`,
+          ]);
         }
-      }),
-    );
+        const updated = await this.inspect(repository.directory, repository.path);
+        if (updated.pushTarget)
+          await this.remoteCommit(updated, updated.pushTarget.remote, updated.pushTarget.branch);
+        this.journal.fetched[repository.directory] = { at: new Date().toISOString() };
+      } catch (error) {
+        this.journal.fetched[repository.directory] = { at: previous?.at, error: message(error) };
+      }
+    });
     await this.save();
   }
 
   fetch(projectId: string): Promise<GitWorkflowSnapshot> {
-    return this.exclusive(projectId, () => this.scan(projectId, true));
+    return this.exclusive(projectId, () => this.scan(projectId, true), 'fetch');
   }
 
   private async remoteCommit(repository: Repository, remote: string, branch: string): Promise<string | null> {
@@ -880,8 +910,7 @@ export class GitWorkflowService {
     checkChildren = true,
   ): Promise<GitActionRow[]> {
     const commonBranch = repositories[0]?.branch;
-    const rows: GitActionRow[] = [];
-    for (const repository of repositories) {
+    const rows = await mapConcurrent(repositories, 4, async (repository): Promise<GitActionRow> => {
       const row: GitActionRow = {
         path: repository.path,
         branch: repository.branch,
@@ -892,7 +921,6 @@ export class GitWorkflowService {
           (file) => `Pointer difference: ${file}. Pointer commits remain manual.`,
         ),
       };
-      rows.push(row);
       try {
         if (repository.error) throw new Error(repository.error);
         if (repository.inProgress)
@@ -988,7 +1016,8 @@ export class GitWorkflowService {
       } catch (error) {
         row.blockers.push(message(error));
       }
-    }
+      return row;
+    });
     // Before a parent push, each gitlink must already be published or included in a child push.
     if (input.action === 'push' && checkChildren) {
       for (let i = 0; i < repositories.length; i++) {
@@ -1024,34 +1053,38 @@ export class GitWorkflowService {
   preview(projectId: string, input: GitActionInput): Promise<GitActionPreview> {
     if (!input || !['checkout', 'pull', 'push', 'create', 'rename'].includes(input.action))
       return Promise.reject(new Error('Choose a supported Git action.'));
-    return this.exclusive(projectId, async () => {
-      this.project(projectId);
-      if (input.action === 'pull' || input.action === 'push')
-        await this.fetchRepositories(await this.discover(projectId));
-      const repositories = await this.discover(projectId);
-      await this.reconcile(projectId, repositories);
-      const rows = await this.rows(repositories, input, true);
-      if (this.uncertainOperation(repositories))
-        rows[0].blockers.push(
-          'Check the previous uncertain result, then acknowledge it before starting another action.',
-        );
-      const preview: GitActionPreview = {
-        id: randomUUID(),
-        projectId,
-        action: input.action,
-        rows,
-        ready: rows.every((row) => !row.blockers.length),
-      };
-      for (const [id, prepared] of this.plans)
-        if (Date.now() - prepared.created > 300_000) this.plans.delete(id);
-      this.plans.set(preview.id, {
-        preview,
-        input: structuredClone(input),
-        repositories,
-        created: Date.now(),
-      });
-      return preview;
-    });
+    return this.exclusive(
+      projectId,
+      async () => {
+        this.project(projectId);
+        if (input.action === 'pull' || input.action === 'push')
+          await this.fetchRepositories(await this.discover(projectId));
+        const repositories = await this.discover(projectId);
+        await this.reconcile(projectId, repositories);
+        const rows = await this.rows(repositories, input, true);
+        if (this.uncertainOperation(repositories))
+          rows[0].blockers.push(
+            'Check the previous uncertain result, then acknowledge it before starting another action.',
+          );
+        const preview: GitActionPreview = {
+          id: randomUUID(),
+          projectId,
+          action: input.action,
+          rows,
+          ready: rows.every((row) => !row.blockers.length),
+        };
+        for (const [id, prepared] of this.plans)
+          if (Date.now() - prepared.created > 300_000) this.plans.delete(id);
+        this.plans.set(preview.id, {
+          preview,
+          input: structuredClone(input),
+          repositories,
+          created: Date.now(),
+        });
+        return preview;
+      },
+      'preview',
+    );
   }
 
   private sameRepository(before: Repository, after: Repository, action: GitActionInput['action']): boolean {
@@ -1115,8 +1148,8 @@ export class GitWorkflowService {
       await this.save();
       this.emit(projectId, true);
       const order = current.map((repository, index) => ({ repository, index }));
-      if (operation.action === 'push') order.reverse();
-      for (const { repository, index } of order) {
+      const executeRow = async ({ repository, index }: (typeof order)[number]) => {
+        if (operation.state !== 'running') return;
         const row = operation.rows[index];
         let attempted = false;
         try {
@@ -1230,11 +1263,32 @@ export class GitWorkflowService {
           row.state = attempted ? 'unknown' : 'failed';
           row.message = message(error);
           operation.state = 'failed';
-          await this.reconcile(projectId, await this.discover(projectId));
           await this.save();
-          break;
+          this.emit(projectId, true);
+        }
+      };
+      if (operation.action === 'push') {
+        // Finish descendants before publishing a parent gitlink. Independent
+        // siblings share the network, with at most four active pushes.
+        const depth = (repository: Repository) =>
+          repository.path === '.' ? 0 : repository.path.split('/').length;
+        const levels = [...new Set(order.map(({ repository }) => depth(repository)))].sort((a, b) => b - a);
+        for (const level of levels) {
+          await mapConcurrent(
+            order.filter(({ repository }) => depth(repository) === level),
+            4,
+            executeRow,
+          );
+          if (operation.state !== 'running') break;
+        }
+      } else {
+        for (const item of order) {
+          await executeRow(item);
+          if (operation.state !== 'running') break;
         }
       }
+      // Drain all started writes before discovery/recovery observes their results.
+      if (operation.state === 'failed') await this.reconcile(projectId, await this.discover(projectId));
       if (operation.state === 'running') operation.state = 'completed';
       await this.save();
       return structuredClone(operation);

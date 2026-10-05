@@ -1,18 +1,30 @@
-import type { DiffFileInput, FileContents, FileDiffOptions, SelectedLineRange } from '@pierre/diffs';
-import { MultiFileDiff } from '@pierre/diffs/react';
+import type {
+  DiffFileInput,
+  FileContents,
+  FileDiffMetadata,
+  FileDiffOptions,
+  SelectedLineRange,
+} from '@pierre/diffs';
+import { DEFAULT_VIRTUAL_FILE_METRICS } from '@pierre/diffs';
+import { FileDiff } from '@pierre/diffs/react';
 import * as stylex from '@stylexjs/stylex';
 import { FileCode2, MessageSquare, X } from 'lucide-react';
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CommentPublication } from '../../../../shared/integrations';
 import { colors, radii, spacing, typeScale } from '../../../theme/tokens.stylex';
 import { captureCommentContext } from './commentPlacement';
 
+import { parseReviewDiff } from './diffParser';
+import { Spinner } from '../../../ui/Spinner';
 import { CommentContext } from './CommentContext';
 import { CommentEditor } from './CommentEditor';
 import { lineLabel } from './commentLineLabel';
 import { useCommentSessions, type CommentSessionOptions } from './useCommentSessions';
 import { useDiffAnnotations, type Annotation } from './useDiffAnnotations';
 interface DiffViewerProps extends CommentSessionOptions {
+  embedded?: boolean;
+  active?: boolean;
+  estimatedHeight?: number;
   theme: 'light' | 'dark';
   diffStyle: 'split' | 'unified';
   isRemote?: boolean;
@@ -22,11 +34,15 @@ interface DiffViewerProps extends CommentSessionOptions {
 
 const diffThemeBaseCSS =
   '--diffs-font-family: var(--branchline-code-font); --diffs-font-size: 12px; --diffs-line-height: 23px; --diffs-bg: var(--branchline-canvas); --diffs-fg: var(--branchline-text-default); --diffs-selection-number-fg: var(--branchline-text);';
+const diffMetrics = { ...DEFAULT_VIRTUAL_FILE_METRICS, lineHeight: 23 };
 const diffThemeCSS = {
   dark: `:host { ${diffThemeBaseCSS} --diffs-bg-addition-override: #213b2a; --diffs-bg-deletion-override: #3d2827; --diffs-modified-color-override: #b8b8b8; --diffs-selection-base: #b8b8b8; --diffs-bg-selection-override: #929292; --diffs-bg-selection-number-override: #777777; --diffs-bg-hover-override: #b8b8b8; }`,
   light: `:host { ${diffThemeBaseCSS} --diffs-bg-addition-override: #e6ffec; --diffs-bg-deletion-override: #ffebe9; --diffs-modified-color-override: #626262; --diffs-selection-base: #0969da; --diffs-bg-selection-override: #d8e8ff; --diffs-bg-selection-number-override: #bcd6ff; --diffs-bg-hover-override: var(--branchline-raised); }`,
 };
 export function DiffViewer({
+  embedded = false,
+  active = true,
+  estimatedHeight = 115,
   theme,
   file,
   comments,
@@ -54,14 +70,11 @@ export function DiffViewer({
     reanchorCommentId,
     onReanchorSelection,
   });
-  const {
-    hasTextDiff,
-    annotations,
-    collapsedComments,
-    collapsedCommentIds,
-    topComments,
-    trackVisibleComments,
-  } = useDiffAnnotations(file, allSessions);
+  const hasTextDiff =
+    !file.unavailable &&
+    !file.binary &&
+    !file.tooLarge &&
+    (file.oldContent ?? '') !== (file.newContent ?? '');
   const files = useMemo<DiffFileInput | null>(() => {
     const oldFile: FileContents | null =
       file.oldContent === null
@@ -78,6 +91,27 @@ export function DiffViewer({
     if (newFile === null) return oldFile === null ? null : { oldFile, newFile: null };
     return { oldFile, newFile };
   }, [file.id, file.path, file.oldPath, file.oldContent, file.newContent, file.fingerprint]);
+
+  const parseKey = `${file.id}:${file.fingerprint}`;
+  const [parsed, setParsed] = useState<{ key: string; diff?: FileDiffMetadata; error?: string }>();
+  useEffect(() => {
+    if (!hasTextDiff || !files) return;
+    let live = true;
+    void parseReviewDiff(parseKey, files).then(
+      (diff) => {
+        if (live) setParsed({ key: parseKey, diff });
+      },
+      (error) => {
+        if (live) setParsed({ key: parseKey, error: error.message });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [parseKey, files, hasTextDiff]);
+  const parsedDiff = parsed?.key === parseKey ? parsed.diff : undefined;
+  const { annotations, collapsedComments, collapsedCommentIds, topComments, trackVisibleComments } =
+    useDiffAnnotations(file, allSessions, parsedDiff);
 
   const startComment = useCallback(
     (range: SelectedLineRange | null) => {
@@ -133,7 +167,10 @@ export function DiffViewer({
   );
 
   return (
-    <div className={`review-diff-viewer ${stylex.props(styles.viewer).className}`} ref={scroller}>
+    <div
+      className={`review-file-diff ${!embedded ? 'review-diff-viewer' : ''} ${stylex.props(styles.viewer, embedded && styles.embedded).className}`}
+      ref={scroller}
+    >
       {error && (
         <div
           className={`review-component-error review-diff-error ${stylex.props(styles.componentError, styles.diffError).className}`}
@@ -214,24 +251,37 @@ export function DiffViewer({
               Feature branch{file.source === 'working-tree' ? ' + local changes' : ''}
             </span>
           </div>
-          <MultiFileDiff<Annotation>
-            {...files}
-            options={options}
-            lineAnnotations={annotations}
-            selectedLines={selectedLines}
-            renderAnnotation={(annotation) =>
-              collapsedCommentIds.has(annotation.metadata.session.id) ? null : (
-                <CommentEditor
-                  key={annotation.metadata.session.id}
-                  {...annotation.metadata}
-                  isRemote={isRemote}
-                  publication={publications?.[annotation.metadata.session.id]}
-                  onBeginReanchor={onBeginReanchor}
-                />
-              )
-            }
-            className={`review-code-diff ${stylex.props(styles.codeDiff).className}`}
-          />
+          {parsedDiff ? (
+            <FileDiff<Annotation>
+              fileDiff={parsedDiff}
+              metrics={diffMetrics}
+              options={options}
+              lineAnnotations={annotations}
+              selectedLines={selectedLines}
+              renderAnnotation={(annotation) =>
+                collapsedCommentIds.has(annotation.metadata.session.id) ? null : (
+                  <CommentEditor
+                    key={annotation.metadata.session.id}
+                    {...annotation.metadata}
+                    isRemote={isRemote}
+                    publication={publications?.[annotation.metadata.session.id]}
+                    onBeginReanchor={onBeginReanchor}
+                  />
+                )
+              }
+              className={`${active ? 'review-code-diff' : 'review-stack-code-diff'} ${stylex.props(styles.codeDiff).className}`}
+            />
+          ) : (
+            <div {...stylex.props(styles.parsing)} style={{ minHeight: estimatedHeight }} role="status">
+              {parsed?.key === parseKey && parsed.error ? (
+                parsed.error
+              ) : (
+                <>
+                  <Spinner size={16} /> Loading diff…
+                </>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <div className={`review-file-notice ${stylex.props(styles.fileNotice).className}`}>
@@ -290,6 +340,16 @@ export function DiffViewer({
   );
 }
 const styles = stylex.create({
+  parsing: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.lg,
+    minHeight: 115,
+    color: colors.textMuted,
+    fontSize: typeScale.small,
+  },
+  embedded: { height: 'auto', overflow: 'visible', flex: 'none' },
   viewer: {
     height: '100%',
     flex: '1',

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { mapConcurrent } from '../integrations/concurrency';
 import type {
   RepoInspection,
   RepoStatus,
@@ -46,20 +47,6 @@ async function gitText(cwd: string, args: string[]): Promise<string> {
 
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-async function mapLimit<T, R>(values: T[], limit: number, fn: (value: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(values.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, values.length) }, async () => {
-      while (next < values.length) {
-        const index = next++;
-        results[index] = await fn(values[index]);
-      }
-    }),
-  );
-  return results;
 }
 
 interface Entry {
@@ -248,7 +235,7 @@ async function readBlobs(repo: string, oids: string[]): Promise<Map<string, Buff
     groupSize += size;
   }
   if (group.length) groups.push(group);
-  for (const ids of groups) {
+  await mapConcurrent(groups, 3, async (ids) => {
     const data = await git(repo, ['cat-file', '--batch'], ids.join('\n') + '\n');
     let offset = 0;
     for (const expected of ids) {
@@ -262,7 +249,7 @@ async function readBlobs(repo: string, oids: string[]): Promise<Map<string, Buff
       cacheBlob(oid, content);
       offset = newline + size + 2;
     }
-  }
+  });
   return result;
 }
 
@@ -357,7 +344,13 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
   const warnings: string[] = [];
   const visited = new Set<string>();
 
-  async function visit(repo: string, relativePath: string, depth: number, initial?: Metadata): Promise<void> {
+  interface Visit {
+    repo: string;
+    relativePath: string;
+    depth: number;
+    initial?: Metadata;
+  }
+  async function visit({ repo, relativePath, depth, initial }: Visit): Promise<Visit[]> {
     const label = relativePath === '.' ? 'Root repository' : relativePath;
     const status: RepoStatus = { relativePath, currentBranch: null, workingTreeIncluded: false };
     repos.push(status);
@@ -376,7 +369,7 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
     } catch (error) {
       status.error = `Repository unavailable or uninitialized: ${(error as Error).message}`;
       warnings.push(`${label}: ${status.error}`);
-      return;
+      return [];
     }
 
     let headTree = new Map<string, Entry>();
@@ -471,7 +464,7 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
         repo,
         allChanges.flatMap((change) => [change.old.oid, ...(includeWorking ? [] : [change.new.oid])]),
       );
-      const reviewed = await mapLimit(allChanges, 6, async (change) => {
+      const reviewed = await mapConcurrent(allChanges, 6, async (change) => {
         const oldContent = change.old.mode === '000000' ? undefined : blobs.get(change.old.oid);
         let newEntry = change.new;
         let newContent: Buffer | null | undefined;
@@ -564,6 +557,7 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
         }
       }
     }
+    const children: Visit[] = [];
     for (const module of [...modulePaths].sort()) {
       const location = path.resolve(repo, module);
       const childRelative = relativePath === '.' ? module : `${relativePath}/${module}`;
@@ -571,11 +565,17 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
         warnings.push(`${label}: unsafe submodule path “${module}” skipped.`);
         continue;
       }
-      await visit(location, childRelative, depth + 1);
+      children.push({ repo: location, relativePath: childRelative, depth: depth + 1 });
     }
+    return children;
   }
 
-  await visit(rootInfo.root, '.', 0, rootInfo);
+  // Limit the whole traversal, rather than multiplying a per-parent limit at
+  // every nesting level. Sibling repositories are independent reads.
+  let pending: Visit[] = [{ repo: rootInfo.root, relativePath: '.', depth: 0, initial: rootInfo }];
+  while (pending.length) pending = (await mapConcurrent(pending, 4, visit)).flat();
+  repos.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  warnings.sort();
   files.sort((a, b) => a.id.localeCompare(b.id));
   return {
     reviewId: config.id,

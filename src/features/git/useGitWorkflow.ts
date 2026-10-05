@@ -1,27 +1,29 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from 'react';
 import type { GitWorkflowSnapshot } from '../../../shared/git-workflow';
 import { errorMessage } from '../../lib/errorMessage';
+import { mergeGitSnapshot } from './snapshotState';
 
 const fetchInterval = 5 * 60 * 1000;
 
 export function useGitWorkflow(projectId: string | null, active: boolean, onChanged: () => void) {
   const [snapshot, setSnapshot] = useState<GitWorkflowSnapshot>();
   const [busy, setBusy] = useState(false);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string>();
   const currentProject = useRef(projectId);
   const changed = useRef(onChanged);
   const enabled = useRef(active);
   const inFlight = useRef(new Map<string, Promise<void>>());
   const queuedFetch = useRef(new Map<string, Promise<void>>());
-  const queuedRead = useRef(new Set<string>());
+  const fetchingProjects = useRef(new Set<string>());
   const lastAttempt = useRef(0);
+  const latestVersion = useRef(new Map<string, number>());
   const applySnapshot = useCallback((result: GitWorkflowSnapshot) => {
     if (currentProject.current !== result.projectId) return;
-    setSnapshot((previous) =>
-      previous?.projectId === result.projectId && (previous.version ?? -1) > (result.version ?? 0)
-        ? previous
-        : result,
-    );
+    const version = result.version ?? 0;
+    if ((latestVersion.current.get(result.projectId) ?? -1) > version) return;
+    latestVersion.current.set(result.projectId, version);
+    setSnapshot((previous) => mergeGitSnapshot(previous, result));
   }, []);
   currentProject.current = projectId;
   changed.current = onChanged;
@@ -32,8 +34,7 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
       if (!projectId) return;
       const existing = inFlight.current.get(projectId);
       if (existing) {
-        if (!fetch) {
-          queuedRead.current.add(projectId);
+        if (!fetch || fetchingProjects.current.has(projectId)) {
           return existing;
         }
         const queued = queuedFetch.current.get(projectId);
@@ -43,7 +44,10 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
         void request.finally(() => queuedFetch.current.delete(projectId));
         return request;
       }
-      if (fetch) lastAttempt.current = Date.now();
+      if (fetch) {
+        fetchingProjects.current.add(projectId);
+        if (currentProject.current === projectId) lastAttempt.current = Date.now();
+      }
       const request = (async () => {
         try {
           const result = await (fetch
@@ -60,13 +64,7 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
           }
         } finally {
           inFlight.current.delete(projectId);
-          if (
-            queuedRead.current.delete(projectId) &&
-            !queuedFetch.current.has(projectId) &&
-            currentProject.current === projectId &&
-            enabled.current
-          )
-            void reload();
+          fetchingProjects.current.delete(projectId);
         }
       })();
       inFlight.current.set(projectId, request);
@@ -77,8 +75,11 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
 
   useEffect(() => {
     setSnapshot(undefined);
+    setBusy(false);
+    setFetching(false);
     setError(undefined);
     lastAttempt.current = 0;
+    if (projectId) latestVersion.current.delete(projectId);
     if (projectId)
       void window.reviewAPI
         .getCachedGitStatus(projectId)
@@ -95,13 +96,18 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
           applySnapshot(change.snapshot);
           return;
         }
-        // All local scans share the desktop Git queue, including overlapping projects.
-        setBusy(change.busy);
+        // Background work in another project does not lock this workspace.
+        if (change.projectId === currentProject.current) {
+          setBusy(change.busy);
+          setFetching(change.busy && change.activity === 'fetch');
+        }
         if (change.projectId === currentProject.current && !change.busy) {
           if (change.operation)
             setSnapshot((previous) => previous && { ...previous, operation: change.operation });
-          changed.current();
-          if (enabled.current) void reload();
+          if (change.activity !== 'preview') changed.current();
+          // A fetch already returns its final snapshot. Avoid starting another scan
+          // from its completion event while that request is still in flight.
+          if (enabled.current && !inFlight.current.has(change.projectId)) void reload();
         } else if (change.projectId === currentProject.current && change.operation) {
           setSnapshot((previous) => previous && { ...previous, operation: change.operation });
         }
@@ -140,6 +146,7 @@ export function useGitWorkflow(projectId: string | null, active: boolean, onChan
     snapshot: snapshot?.projectId === projectId ? snapshot : undefined,
     setSnapshot: updateSnapshot,
     busy,
+    fetching,
     error,
     reload,
   };

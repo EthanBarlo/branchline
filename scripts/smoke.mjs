@@ -159,7 +159,7 @@ async function waitForComment(page, id, body) {
 
 async function commentOnGreeting(page, body) {
   // Click an actual rendered line number in Diffs' shadow DOM.
-  await page.locator('[data-column-number="2"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').click();
   await page.getByRole('textbox', { name: 'Comment text', exact: true }).fill(body);
   await waitForComment(page, await picker(page, 'Select review').getAttribute('data-value'), body);
   await page.locator('.diff-file-name').click();
@@ -283,7 +283,7 @@ try {
   assert.ok(snapshot.repos[0].workingTreeIncluded);
 
   const editor = page.getByRole('textbox', { name: 'Comment text', exact: true });
-  await page.locator('[data-column-number="2"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').click();
   await editor.fill('Handle an empty name.');
   const firstAutosave = await waitForComment(page, reviewId, 'Handle an empty name.');
   assert.equal(await editor.isVisible(), true, 'Autosave should not interrupt typing.');
@@ -295,22 +295,22 @@ try {
   await page.locator('.diff-file-name').click();
   await editor.waitFor({ state: 'hidden' });
   await page.getByText(feedback, { exact: true }).first().waitFor();
-  await page.getByRole('button', { name: 'Resolve comment', exact: true }).click();
-  await page.getByRole('button', { name: 'Reopen comment', exact: true }).waitFor();
+  await page.locator('[data-active-diff]').getByRole('button', { name: 'Resolve comment', exact: true }).click();
+  await page.locator('[data-active-diff]').getByRole('button', { name: 'Reopen comment', exact: true }).waitFor();
   assert.equal((await readState(page)).reviews.find(review => review.id === reviewId).comments[0].resolved, true);
-  await page.getByRole('button', { name: 'Reopen comment', exact: true }).click();
-  await page.getByRole('button', { name: 'Resolve comment', exact: true }).waitFor();
+  await page.locator('[data-active-diff]').getByRole('button', { name: 'Reopen comment', exact: true }).click();
+  await page.locator('[data-active-diff]').getByRole('button', { name: 'Resolve comment', exact: true }).waitFor();
 
   // Leaving a file immediately must flush its pending comment before navigation.
   const temporaryFeedback = 'This comment must survive an immediate file switch.';
   await page.locator('[data-item-path="docs/notes.md"]').click();
-  await page.locator('[data-column-number="1"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="1"][data-line-type="change-addition"]').click();
   await editor.fill(temporaryFeedback);
   await selectGreeting(page);
   const flushedComment = await waitForComment(page, reviewId, temporaryFeedback);
   await page.locator('[data-item-path="docs/notes.md"]').click();
   await page.getByText(temporaryFeedback, { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Delete comment', exact: true }).click();
+  await page.locator('[data-active-diff]').getByRole('button', { name: 'Delete comment', exact: true }).click();
   await waitForState(page, ({ reviews }) => {
     const review = reviews.find(item => item.id === reviewId);
     return review && !review.comments.some(comment => comment.id === flushedComment.id);
@@ -371,7 +371,7 @@ try {
   // The same Current review follows checkout, isolating empty editors and saved feedback.
   const greetingContext = JSON.stringify(['feature/greeting', 'release']);
   await page.locator('[data-item-path="docs/notes.md"]').click();
-  await page.locator('[data-column-number="1"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="1"][data-line-type="change-addition"]').click();
   await editor.waitFor();
   git('checkout', '-b', 'feature/next');
   await waitCurrentBranch(page, 'feature/next'); // Deliberately waits for automatic refresh.
@@ -433,7 +433,7 @@ try {
 
   // Saved comparisons remain explicit and fixed while Current follows checkout.
   await selectGreeting(page);
-  await page.locator('[data-column-number="2"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').click();
   await editor.waitFor();
   await page.getByRole('button', { name: 'Review another branch', exact: true }).click();
   const dialog = page.getByRole('dialog');
@@ -540,7 +540,7 @@ try {
   // Closing the real window must save pending typing before destroying its renderer.
   const closingFeedback = 'Check that this timeout also covers a slow service response.';
   await page.locator('[data-item-path="service.ts"]').click();
-  await page.locator('[data-column-number="1"][data-line-type="change-addition"]').click();
+  await page.locator('.review-code-diff').locator('[data-column-number="1"][data-line-type="change-addition"]').click();
   const closingCommentId = await editor.evaluate(input => input.closest('[data-comment-id]')?.getAttribute('data-comment-id'));
   assert.ok(closingCommentId);
   const windowClosed = page.waitForEvent('close');
@@ -636,7 +636,7 @@ try {
 
   // Earlier comments follow edited code after insertions and remain inline after restart.
   await row('zeta/part1.ts').click();
-  await reopened.locator('[data-column-number="2"][data-line-type="change-addition"]').click();
+  await reopened.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').click();
   const movingFeedback = 'Verify this value before returning it.';
   await reopened.getByRole('textbox', { name: 'Comment text', exact: true }).fill(movingFeedback);
   const movingComment = await waitForComment(reopened, actionReviewId, movingFeedback);
@@ -678,7 +678,8 @@ try {
   const expandedCount = await restoredActions.locator('.review-code-diff [data-line]').count();
   assert.ok(expandedCount > collapsedCount && expandedCount < 300, 'A manual expansion should reveal only the selected unchanged region.');
   const unchangedComment = await sparseComment(restoredActions, sparseReviewId, unchangedSelector, 'Keep feedback on manually expanded unchanged code.', 'manually expanded');
-  assert.equal(unchangedComment.renderedLines, expandedCount, 'Adding feedback must retain the exact manual expansion.');
+  await restoredActions.locator(unchangedSelector).first().waitFor();
+  assert.ok(await restoredActions.locator('.review-code-diff [data-line]').count() < 300, 'Adding feedback keeps the manually expanded region and a bounded virtual window.');
   await restoredActions.screenshot({ path: 'artifacts/compact-diff-comments.png', animations: 'disabled' });
 
   // Reopening restores the normal collapsed view without hiding saved feedback.
@@ -694,13 +695,14 @@ try {
   await collapsedComments.getByText(unchangedComment.body, { exact: true }).waitFor();
   assert.equal(await unchangedArticle.count(), 1, 'A collapsed-line comment must have exactly one editor.');
   assert.equal(await restoredSparse.locator(unchangedSelector).count(), 0, 'Restoring comments must keep unchanged code collapsed.');
-  assert.equal(await restoredSparse.locator('.review-code-diff [data-line]').count(), collapsedCount);
+  assert.ok(await restoredSparse.locator('.review-code-diff [data-line]').count() < 300, 'Restart retains collapsed context and a bounded virtual window.');
   assert.match(await collapsedComments.innerText(), /360/, 'Collapsed feedback must retain its line reference.');
   await restoredSparse.screenshot({ path: 'artifacts/collapsed-line-feedback.png', animations: 'disabled' });
   await restoredSparse.locator('[data-expand-index="4"] [data-expand-button]').first().click();
   await restoredSparse.locator(`.review-code-diff [data-comment-id="${unchangedComment.id}"]`).getByText(unchangedComment.body, { exact: true }).waitFor();
   assert.equal(await unchangedArticle.count(), 1, 'Revealing the line must move its editor inline without duplicating feedback.');
-  assert.equal(await restoredSparse.locator('.review-code-diff [data-line]').count(), expandedCount);
+  await restoredSparse.locator(unchangedSelector).first().waitFor();
+  assert.ok(await restoredSparse.locator('.review-code-diff [data-line]').count() < 300, 'Expanding one region retains a bounded virtual window.');
 
   // Folder actions must cover hidden nested files, without opening the folder or moving the active diff.
   await addProject(restoredSparse, foldersRepo, 'Folder actions');

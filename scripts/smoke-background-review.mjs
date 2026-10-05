@@ -99,7 +99,7 @@ try {
   const blocked = await until(counters, state => state.held, 'a full comparison to pause in the background');
   // Leave an editor dirty and immediately click Mark reviewed. This covers the
   // real flush-before-navigation path, not just calling an approval API directly.
-  await page.locator('[data-column-number="2"][data-line-type="change-addition"]').first().click();
+  await page.locator('.review-code-diff').locator('[data-column-number="2"][data-line-type="change-addition"]').first().click();
   await page.getByRole('textbox', { name: 'Comment text', exact: true }).fill(feedback);
   const started = Date.now();
   await page.getByRole('button', { name: 'Mark reviewed', exact: true }).click();
