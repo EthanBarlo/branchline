@@ -30,7 +30,39 @@ const controlRequests = new Set<ReviewRequestName>([
   'update-install',
 ]);
 
-/** All review requests pass through the same sender check and shutdown gates. */
+/** Disposable reads, previews and caches must not hold the window open. */
+const disposableCloseRequests = new Set<ReviewRequestName>([
+  'git-cache',
+  'git-history',
+  'git-project-history',
+  'git-status',
+  'git-fetch',
+  'git-preview',
+  'integrations-state',
+  'integration-diagnostics',
+  'integration-log-open',
+  'connection-copy-scopes',
+  'connection-test',
+  'integrations-discover',
+  'pullrequests-list',
+  'pullrequests-state',
+  'jira-issue',
+  'jira-ticket-suggestions',
+  'jira-ticket-link',
+  'jira-browser-resize',
+  'jira-browser-focus',
+  'feedback-preview',
+  'merge-preview',
+  'closed-review-check',
+  'integration-open',
+  'jira-open',
+  'choose-repo',
+  'inspect',
+  'refresh',
+  'copy',
+]);
+
+/** Trust every request; protect writes on close and all work during update installation. */
 export function createReviewHandlerRegistrar(dependencies: RegistrarDependencies): ReviewHandlerRegistrar {
   return <Name extends ReviewRequestName>(name: Name, handler: ReviewRequestHandler<Name>) => {
     dependencies.register(`review:${name}`, (event, ...args) => {
@@ -45,9 +77,11 @@ export function createReviewHandlerRegistrar(dependencies: RegistrarDependencies
         throw new Error('This request did not come from the review window.');
       }
       const invoke = () => handler(...(args as ReviewRequestArguments<Name>));
-      return controlRequests.has(name)
-        ? invoke()
-        : dependencies.closeGate.run(name, () => dependencies.installGate.run(name, invoke));
+      if (controlRequests.has(name)) return invoke();
+      const installProtected = () => dependencies.installGate.run(name, invoke);
+      return disposableCloseRequests.has(name)
+        ? installProtected()
+        : dependencies.closeGate.run(name, installProtected);
     });
   };
 }

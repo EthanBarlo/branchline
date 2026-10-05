@@ -99,9 +99,35 @@ try {
   await page.getByText('Restart to install. Your review work will be saved first. macOS may ask for an administrator password.', { exact: true }).waitFor();
   await page.screenshot({ path: 'artifacts/update-ready.png', animations: 'disabled' });
   await page.getByRole('button', { name: 'Later', exact: true }).click();
-  const closed = page.waitForEvent('close');
+  // Stall a real read inside its handler, after the shutdown gate has seen the request.
+  await desktop.evaluate(async (_, repoPath) => {
+    const fs = process.getBuiltinModule('fs/promises');
+    const original = fs.realpath;
+    const physicalRepo = await original(repoPath);
+    let release;
+    const waiting = new Promise(resolve => { release = resolve; });
+    globalThis.closeReadSmoke = { held: false, release, restore: () => { fs.realpath = original; } };
+    fs.realpath = async (path, ...args) => {
+      if (String(path) === repoPath || String(path) === physicalRepo) {
+        globalThis.closeReadSmoke.held = true;
+        await waiting;
+      }
+      return original(path, ...args);
+    };
+  }, repo);
+  await page.evaluate(repoPath => { void window.reviewAPI.inspectRepo(repoPath).catch(() => {}); }, repo);
+  await desktop.evaluate(async () => {
+    const deadline = Date.now() + 5000;
+    while (!globalThis.closeReadSmoke.held) {
+      if (Date.now() >= deadline) throw new Error('The inspection did not enter its handler.');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  });
+  const closed = page.waitForEvent('close', { timeout: 5000 });
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   await closed;
+  await desktop.evaluate(() => { globalThis.closeReadSmoke.restore(); globalThis.closeReadSmoke.release(); });
+  console.log('Normal close finished while a repository inspection remained stalled.');
   assert.equal(await desktop.evaluate(({ app }) => app.branchlineUpdateTest.installs), 0, 'Ordinary close must not install.');
   const reopened = desktop.waitForEvent('window');
   await desktop.evaluate(({ app }) => app.emit('activate'));

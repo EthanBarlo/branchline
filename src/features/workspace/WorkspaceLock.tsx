@@ -1,4 +1,5 @@
 import * as stylex from '@stylexjs/stylex';
+import { useEffect, useState } from 'react';
 import type { UpdateState } from '../../../shared/updates';
 import { colors, typeScale } from '../../theme/tokens.stylex';
 import { Spinner } from '../../ui/Spinner';
@@ -14,7 +15,16 @@ export function WorkspaceLock({
   closePreparing: boolean;
   phase?: UpdateState['phase'];
 }) {
-  if (!closingReview && !updatePreparing && !closePreparing) return null;
+  const [showClose, setShowClose] = useState(false);
+  useEffect(() => {
+    if (!closePreparing) {
+      setShowClose(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowClose(true), 200);
+    return () => clearTimeout(timer);
+  }, [closePreparing]);
+  if (!closingReview && !updatePreparing && !(closePreparing && showClose)) return null;
   const title = closePreparing
     ? 'Closing your workspace…'
     : updatePreparing
