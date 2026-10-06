@@ -94,6 +94,8 @@ export interface GitActionPreview {
   action: GitAction;
   rows: GitActionRow[];
   ready: boolean;
+  /** Display-only, server-confirmed counterparts for optional local+remote deletion. */
+  remoteDeletionCandidates?: Record<string, GitDestination[]>;
 }
 
 export interface GitOperation {

@@ -1346,6 +1346,29 @@ export class GitWorkflowService {
           rows,
           ready: rows.every((row) => !row.blockers.length),
         };
+        if (input.action === 'delete' && input.branch?.kind !== 'remote') {
+          const candidates = await mapConcurrent(repositories, 4, async (repository) => {
+            if (repository.error) return [repository.path, []] as const;
+            const targets = await Promise.all(
+              repository.remotes.map(async (remote) => {
+                try {
+                  return await this.localRemoteDeletion(repository, {
+                    ...input,
+                    deleteRemotes: { [repository.path]: remote },
+                  });
+                } catch {
+                  // Optional remote discovery must not prevent a local-only deletion.
+                  return undefined;
+                }
+              }),
+            );
+            return [
+              repository.path,
+              targets.filter((target): target is GitDestination => Boolean(target?.commit)),
+            ] as const;
+          });
+          preview.remoteDeletionCandidates = Object.fromEntries(candidates);
+        }
         for (const [id, prepared] of this.plans)
           if (Date.now() - prepared.created > 300_000) this.plans.delete(id);
         this.plans.set(preview.id, {

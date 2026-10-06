@@ -5,6 +5,7 @@ import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import { ErrorBanner } from '../reviews/ErrorBanner';
 import { UpdateDetails } from '../settings/UpdateControls';
 import { Dialog } from '../../ui/Dialog';
+import { AppToaster } from '../../ui/AppToaster';
 import { errorMessage } from '../../lib/errorMessage';
 import { AppChrome } from './AppChrome';
 import { WorkspaceLock } from './WorkspaceLock';
@@ -29,6 +30,7 @@ function Shell() {
     lifecycle,
     closingReviewId,
     closingReviewRef,
+    resolvedTheme,
   } = useWorkspace();
   const {
     updateState,
@@ -87,6 +89,7 @@ function Shell() {
           </Dialog>
         )}
       </div>
+      <AppToaster theme={resolvedTheme} />
       <WorkspaceLock
         closingReview={!!closingReviewId}
         updatePreparing={updatePreparing}

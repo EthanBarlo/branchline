@@ -1335,6 +1335,35 @@ test('remote deletion blocks ambiguous choices, mirror remotes, and multiple pus
   assert.ok(git(remote, 'rev-parse', 'feature'));
 });
 
+test('local deletion previews offer only server-confirmed remote counterparts, including stale refs', async () => {
+  const { local, remote, service } = await fixture();
+  git(local, 'branch', 'feature');
+  const input: GitActionInput = { action: 'delete', branch: { name: 'feature', kind: 'local' } };
+  let preview = await service.preview('project', input);
+  assert.equal(preview.ready, true);
+  assert.deepEqual(preview.remoteDeletionCandidates, { '.': [] });
+  git(local, 'push', '-q', 'origin', 'feature');
+  preview = await service.preview('project', input);
+  assert.equal(preview.remoteDeletionCandidates?.['.'][0]?.branch, 'feature');
+  assert.equal(preview.remoteDeletionCandidates?.['.'][0]?.commit, git(remote, 'rev-parse', 'feature'));
+  // Simulate another client removing the branch without pruning our tracking ref.
+  git(remote, 'update-ref', '-d', 'refs/heads/feature');
+  assert.ok(git(local, 'rev-parse', 'refs/remotes/origin/feature'));
+  preview = await service.preview('project', input);
+  assert.deepEqual(preview.remoteDeletionCandidates, { '.': [] });
+  assert.equal((await service.run('project', preview.id)).state, 'completed');
+});
+
+test('optional counterpart lookup does not block local deletion when the remote is unavailable', async () => {
+  const { local, directory, service } = await fixture();
+  git(local, 'branch', 'feature');
+  git(local, 'remote', 'set-url', 'origin', path.join(directory, 'missing.git'));
+  const preview = await service.preview('project', { action: 'delete', branch: { name: 'feature', kind: 'local' } });
+  assert.equal(preview.ready, true);
+  assert.deepEqual(preview.remoteDeletionCandidates, { '.': [] });
+  assert.equal((await service.run('project', preview.id)).state, 'completed');
+});
+
 test('optional remote deletion removes local and corresponding remote branches across nested repositories', async () => {
   const { local, child, remote, directory, service } = await withChild();
   const childRemote = path.join(directory, 'child-source');
@@ -1362,6 +1391,7 @@ test('optional remote deletion follows differently named upstreams and keeps the
   assert.equal(preview.ready, true, JSON.stringify(preview));
   assert.equal(preview.rows[0].unmergedCommits, 0);
   assert.equal(preview.rows[0].remoteDeletion?.branch, 'topic-remote');
+  assert.equal(preview.remoteDeletionCandidates?.['.'][0]?.branch, 'topic-remote');
   const result = await service.run('project', preview.id);
   assert.equal(result.state, 'completed', JSON.stringify(result));
   assert.throws(() => git(local, 'rev-parse', '--verify', 'refs/heads/topic-local'));

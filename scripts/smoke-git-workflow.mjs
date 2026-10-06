@@ -304,7 +304,18 @@ try {
   await confirmation.waitFor();
   assert.equal(await confirmation.getByText('Create local branch', { exact: true }).count(), 3);
   await confirmation.getByRole('button', { name: 'Confirm create branch', exact: true }).click();
-  await panel.getByText('Last create branch · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Branch created', { exact: true }).first().waitFor();
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await page.locator('[data-sonner-toaster][data-sonner-theme="dark"]').waitFor({ state: 'attached' });
+  assert.equal(await page.locator('[data-sonner-toast]').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(30, 30, 30)', 'toasts inherit the dark app theme');
+  await page.screenshot({ path: '/tmp/branchline-git-toast-dark.png', animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  assert.equal(await page.locator('[data-sonner-toast]').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(247, 247, 246)', 'toasts inherit the light app theme');
+  await page.reload();
+  assert.equal(await page.locator('[data-sonner-toast]').count(), 0, 'restored operation journals never replay success toasts');
+  await page.getByRole('button', { name: 'Project Git workflow', exact: true }).click();
   for (const repo of [local, child, leaf]) {
     assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
     assert.equal(git(repo, 'rev-parse', 'topic/context-created'), git(repo, 'rev-parse', 'feature/demo'));
@@ -321,12 +332,21 @@ try {
   await confirmation.waitFor();
   assert.equal(await confirmation.getByText('Rename local branch', { exact: true }).count(), 3);
   await confirmation.getByRole('button', { name: 'Confirm rename', exact: true }).click();
-  await panel.getByText('Last rename · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Branch renamed', { exact: true }).first().waitFor();
+  assert.equal(await page.locator('[data-sonner-toast]').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(247, 247, 246)', 'toasts inherit the light app theme');
   for (const repo of [local, child, leaf]) {
     assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
     assert.equal(git(repo, 'rev-parse', 'topic/context-renamed'), git(repo, 'rev-parse', 'feature/demo'));
     assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/context-created'));
   }
+  assert.equal(await panel.getByRole('region', { name: 'Git operation results', exact: true }).count(), 0, 'completed operations leave the graph at full height');
+  await waitForGitIdle();
+  await panel.getByRole('textbox', { name: 'Find a branch' }).fill('topic/context-renamed');
+  await branchAction('topic/context-renamed', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.getByRole('status').waitFor({ state: 'hidden' });
+  assert.equal(await confirmation.getByRole('checkbox', { name: 'Also delete remote branch', exact: true }).count(), 0, 'local-only branches never offer remote deletion');
+  await confirmation.getByRole('button', { name: 'Cancel preview', exact: true }).click();
   // Combined deletion is opt-in, with explicit force for unmerged feature commits.
   git(local, 'push', '-q', 'origin', 'topic/context-renamed');
   for (const repo of [childSource, leafSource]) git(repo, 'branch', 'topic/context-renamed');
@@ -352,7 +372,7 @@ try {
     return button && !button.disabled;
   });
   await confirmation.getByRole('button', { name: 'Confirm delete branch', exact: true }).click();
-  await panel.getByText('Last delete · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Branch deleted', { exact: true }).first().waitFor();
   await waitForGitIdle();
   for (const repo of [local, child, leaf]) {
     assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/context-renamed'));
@@ -413,6 +433,12 @@ try {
   for (const repo of [remote, childSource, leafSource]) assert.throws(() => git(repo, 'rev-parse', '--verify', 'refs/heads/topic/delete-remote'));
   for (const repo of [local, child, leaf]) assert.ok(git(repo, 'rev-parse', 'topic/delete-remote'));
   await tree.getByRole('treeitem', { name: 'origin/topic/delete-remote', exact: true }).waitFor({ state: 'hidden' });
+  await branchAction('topic/delete-remote', 'Delete branch…');
+  confirmation = page.getByRole('dialog', { name: 'Delete branch preview', exact: true });
+  await confirmation.getByRole('status').waitFor({ state: 'hidden' });
+  assert.equal(await confirmation.getByRole('checkbox', { name: 'Also delete remote branch', exact: true }).count(), 0, 'deleted remote counterparts are not offered again');
+  await confirmation.getByRole('button', { name: 'Cancel preview', exact: true }).click();
+
   await panel.getByRole('textbox', { name: 'Find a branch' }).fill('');
   const mainRow = tree.getByRole('treeitem', { name: 'main', exact: true });
   await mainRow.evaluate(element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: innerWidth - 1, clientY: innerHeight - 1 })));
@@ -434,7 +460,7 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).waitFor({ state: 'visible' });
   await page.waitForFunction(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Confirm pull'); return button && !button.disabled; });
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).click();
-  await panel.getByText('Last pull · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Pull completed', { exact: true }).first().waitFor();
   assert.equal(git(local, 'rev-parse', 'HEAD'), incomingHead);
   await page.getByRole('button', { name: 'Reviews', exact: true }).click();
 
@@ -463,7 +489,7 @@ try {
   await panel.getByRole('treeitem', { name: 'feature/demo', exact: true }).press('Shift+F10');
   await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Check out…', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm checkout', exact: true }).click();
-  await panel.getByText('Last checkout · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Branch checked out', { exact: true }).first().waitFor();
   assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   assert.equal(git(child, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   assert.equal(git(leaf, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
@@ -474,7 +500,7 @@ try {
   await pushPreview.getByRole('combobox', { name: 'Publish remote for .', exact: true }).click();
   await page.getByRole('option', { name: 'origin', exact: true }).click();
   await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).click();
-  await panel.getByText('Last push · completed', { exact: true }).waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Push completed', { exact: true }).first().waitFor();
   assert.equal(git(remote, 'rev-parse', 'feature/demo'), git(local, 'rev-parse', 'HEAD'));
   // Renaming a current branch also updates nested checkouts and keeps remote tracking destinations.
   for (const [source, target] of [['feature/demo', 'feature/context-current'], ['feature/context-current', 'feature/demo']]) {

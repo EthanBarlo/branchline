@@ -65,17 +65,21 @@ export function GitActionConfirmation({
             </p>
           )}
           {error && <FormError>{error}</FormError>}
-          {preview.action === 'delete' && deletionBranch && !deletionBranch.remote && (
-            <label {...stylex.props(styles.forceChoice)}>
-              <input
-                type="checkbox"
-                checked={deleteRemote}
-                disabled={executing}
-                onChange={(event) => onDeleteRemote(event.target.checked)}
-              />
-              Also delete remote branch
-            </label>
-          )}
+          {preview.action === 'delete' &&
+            deletionBranch &&
+            !deletionBranch.remote &&
+            (deleteRemote ||
+              Object.values(preview.remoteDeletionCandidates ?? {}).some((targets) => targets.length)) && (
+              <label {...stylex.props(styles.forceChoice)}>
+                <input
+                  type="checkbox"
+                  checked={deleteRemote}
+                  disabled={executing}
+                  onChange={(event) => onDeleteRemote(event.target.checked)}
+                />
+                Also delete remote branch
+              </label>
+            )}
           {preview.rows.map((row) => {
             const publication = publicationRepositories.find((repo) => repo.path === row.path);
             return (

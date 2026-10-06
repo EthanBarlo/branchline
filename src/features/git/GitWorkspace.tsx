@@ -1,5 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { useMemo, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import type { GitAction, GitActionInput, GitActionPreview } from '../../../shared/git-workflow';
 import type { Project } from '../../../shared/types';
 import { errorMessage } from '../../lib/errorMessage';
@@ -168,6 +169,21 @@ export function GitWorkspace({
       const operation = await window.reviewAPI.runGitAction(project.id, preview.id);
       setSnapshot((previous) => previous && { ...previous, operation });
       setPreview(undefined);
+      if (operation.state === 'completed') {
+        const titles: Record<GitAction, string> = {
+          create: 'Branch created',
+          rename: 'Branch renamed',
+          delete: 'Branch deleted',
+          checkout: 'Branch checked out',
+          pull: 'Pull completed',
+          push: 'Push completed',
+        };
+        const count = operation.rows.filter((row) => !row.noop).length;
+        toast.success(titles[operation.action], {
+          id: operation.id,
+          description: `${project.name} · ${count} ${count === 1 ? 'repository' : 'repositories'}`,
+        });
+      }
       if (
         operation.state === 'completed' &&
         (operation.action === 'create' || operation.action === 'rename') &&
@@ -238,7 +254,7 @@ export function GitWorkspace({
                 {repo.path === '.' ? project.name : repo.path}: {repo.error || 'No branch available'}
               </p>
             ))}
-          {snapshot?.operation && (
+          {snapshot?.operation && snapshot.operation.state !== 'completed' && (
             <section aria-label="Git operation results" aria-live="polite" {...stylex.props(styles.results)}>
               <strong {...stylex.props(styles.repoName)}>
                 Last {snapshot.operation.action === 'create' ? 'create branch' : snapshot.operation.action} ·{' '}
