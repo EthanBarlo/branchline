@@ -163,6 +163,7 @@ interface FileSidebarProps {
   review: Review;
   files: ReviewFile[];
   selectedFileId: string | null;
+  visibleFileId?: string | null;
   historicalFiles: Record<string, string>;
   reviewedVersions: Record<string, string>;
   pendingCount: number;
@@ -188,6 +189,7 @@ export function FileSidebar({
   review,
   files,
   selectedFileId,
+  visibleFileId,
   historicalFiles,
   reviewedVersions,
   pendingCount,
@@ -279,6 +281,7 @@ export function FileSidebar({
             theme={theme}
             files={files}
             selectedFileId={selectedFileId}
+            visibleFileId={visibleFileId}
             approvals={review.approvals}
             historicalFiles={historicalFiles}
             reviewedVersions={reviewedVersions}

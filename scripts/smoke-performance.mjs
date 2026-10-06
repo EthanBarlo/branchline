@@ -56,6 +56,53 @@ try {
   assert.ok(collapsedHeight < initial.height / 2, 'Collapsing a large file must release its layout height.');
   await page.getByRole('button', { name: `Expand ${largeFile}`, exact: true }).click();
   await page.locator('.review-code-diff [data-line]').first().waitFor();
+  const treeRow = path => page.locator(`[data-item-path="${path}"]`).first();
+  async function waitHighlighted(path) {
+    await page.waitForFunction(expected => {
+      const tree = document.querySelector('.review-tree-host')?.shadowRoot;
+      return [...(tree?.querySelectorAll('[data-item-path]') || [])].some(row =>
+        row.getAttribute('data-item-path') === expected && row.getAttribute('aria-selected') === 'true');
+    }, path);
+  }
+  async function scrollToFile(path, offset = 120) {
+    const section = page.locator(`.review-diff-accordion[data-file-id="${path}"]`);
+    await section.evaluate((node, offset) => {
+      const scroller = node.closest('.review-diff-stack');
+      scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + offset;
+    }, offset);
+    await section.locator('diffs-container [data-line]').first().waitFor();
+    // Lazy parsing can replace estimated heights, so position within the
+    // installed body before checking that passive highlighting stays still.
+    const position = await section.evaluate((node, offset) => {
+      const scroller = node.closest('.review-diff-stack');
+      scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + offset;
+      return scroller.scrollTop;
+    }, offset);
+    await waitHighlighted(path);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.ok(Math.abs(await page.locator('.review-diff-stack').evaluate(node => node.scrollTop) - position) <= 2,
+      'Updating the tree highlight must not move the diff scroll position.');
+  }
+  // Scrolling inside a huge virtualized file and across lazily loaded files
+  // follows the viewport in both directions, without navigation or expansion.
+  await scrollToFile(largeFile, 15000);
+  await scrollToFile('file-10.ts');
+  await scrollToFile('file-09.ts');
+  // Re-selecting the last explicitly selected file must still navigate back.
+  await treeRow(largeFile).click();
+  await page.waitForFunction(expected => {
+    const section = document.querySelector(`.review-diff-accordion[data-file-id="${expected}"]`);
+    return Math.abs(section.getBoundingClientRect().top - section.closest('.review-diff-stack').getBoundingClientRect().top) < 5;
+  }, largeFile);
+  await waitHighlighted(largeFile);
+  await page.getByRole('button', { name: 'Collapse file-10.ts', exact: true }).click();
+  await page.locator('.review-diff-accordion[data-file-id="file-10.ts"]').evaluate(node => {
+    const scroller = node.closest('.review-diff-stack');
+    scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  });
+  await waitHighlighted('file-10.ts');
+  assert.equal(await page.getByRole('button', { name: 'Expand file-10.ts', exact: true }).count(), 1,
+    'Passive highlighting must leave collapsed files closed.');
   // Deep navigation must expand/load its file without parsing every intervening body.
   await page.locator('.review-file-header button[title="file-44.ts"]').click();
   await page.locator('.diff-file-name').filter({ hasText: 'file-44.ts' }).waitFor();
@@ -74,7 +121,7 @@ try {
   await mkdir('artifacts', { recursive: true });
   await page.screenshot({ path: 'artifacts/performance-stacked-diffs.png', animations: 'disabled' });
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ fixture: { files: paths.length, largeFileLines: lineCount }, initial, collapsedHeight, result: 'virtualized rows, lazy offscreen bodies, accordion collapse/expand, deep selection and durable file-bound draft passed' }, null, 2));
+  console.log(JSON.stringify({ fixture: { files: paths.length, largeFileLines: lineCount }, initial, collapsedHeight, result: 'virtualized rows, lazy offscreen bodies, scroll-following tree highlights without jumps or expansion, repeated file navigation, accordion collapse/expand, deep selection and durable file-bound draft passed' }, null, 2));
 } catch (error) {
   const page = desktop?.windows()[0];
   if (page) {

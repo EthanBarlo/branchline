@@ -63,10 +63,19 @@ export function useReviewTreeModel(props: ReviewTreeProps) {
   const paths = useMemo(() => [...byPath.keys()], [pathsKey]);
   const preparedInput = useMemo(() => prepareFileTreeInput(paths), [paths]);
   const directories = useMemo(() => directoryPaths(paths), [paths]);
-  const selectedFile = visibleFiles.find((file) => file.id === props.selectedFileId);
+  const selectedFile = visibleFiles.find((file) => file.id === (props.visibleFileId ?? props.selectedFileId));
   const activePath = selectedFile ? reviewFilePath(selectedFile) : null;
   const latest = useRef({ props, byPath, commentCounts });
   latest.current = { props, byPath, commentCounts };
+
+  function navigateToFile(file: ReviewFile | undefined) {
+    const { props } = latest.current;
+    if (
+      file &&
+      (file.id !== props.selectedFileId || (props.visibleFileId && file.id !== props.visibleFileId))
+    )
+      props.onSelect(file.id);
+  }
 
   function syncProjection() {
     const tree = modelRef.current;
@@ -120,7 +129,7 @@ export function useReviewTreeModel(props: ReviewTreeProps) {
           if (!tree || tree.getSelectedPaths().includes(item.path)) return;
           selectOnly(item.path);
           const file = latest.current.byPath.get(item.path);
-          if (file && file.id !== latest.current.props.selectedFileId) latest.current.props.onSelect(file.id);
+          navigateToFile(file);
         },
       },
     },
@@ -140,7 +149,7 @@ export function useReviewTreeModel(props: ReviewTreeProps) {
             ? focused
             : [...selected].reverse().find((item) => latest.current.byPath.has(item));
         const file = path ? latest.current.byPath.get(path) : undefined;
-        if (file && file.id !== latest.current.props.selectedFileId) latest.current.props.onSelect(file.id);
+        navigateToFile(file);
       });
     },
     renderRowDecoration: ({ item }) => {
@@ -276,6 +285,12 @@ export function useReviewTreeModel(props: ReviewTreeProps) {
     if (!path) return;
     if (!event.shiftKey) {
       selectionAnchor.current = path;
+      // Scroll tracking may already highlight this row. Pierre then emits no
+      // selection change, but clicking it still requests diff navigation.
+      if (!event.metaKey && !event.ctrlKey && model.getSelectedPaths().includes(path)) {
+        const file = byPath.get(path);
+        if (file) props.onSelect(file.id);
+      }
       return;
     }
     // Public item.select() does not reset Pierre's private range anchor.
@@ -304,7 +319,7 @@ export function useReviewTreeModel(props: ReviewTreeProps) {
     const endpointOrder = end >= start ? [...range].reverse() : range;
     const endpoint = endpointOrder.find((item) => byPath.has(item.path));
     const file = endpoint ? byPath.get(endpoint.path) : undefined;
-    if (file && file.id !== props.selectedFileId) props.onSelect(file.id);
+    navigateToFile(file);
   };
 
   return {

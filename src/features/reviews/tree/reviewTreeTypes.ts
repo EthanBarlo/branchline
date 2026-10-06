@@ -3,6 +3,7 @@ export interface ReviewTreeProps {
   theme: 'light' | 'dark';
   files: ReviewFile[];
   selectedFileId: string | null;
+  visibleFileId?: string | null;
   approvals: Record<string, string>;
   reviewedVersions: Record<string, string>;
   historicalFiles?: Record<string, string>;

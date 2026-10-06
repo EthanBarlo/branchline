@@ -11,6 +11,7 @@ import { isApproved } from '../session/reviewSession';
 import { orderReviewFiles } from '../tree/reviewFileOrder';
 import { flushPendingComments } from './commentAutosave';
 import { DiffViewer } from './DiffViewer';
+import { useVisibleDiffFile } from './useVisibleDiffFile';
 
 interface DiffStackProps {
   files: ReviewFile[];
@@ -21,11 +22,16 @@ interface DiffStackProps {
   actions: Pick<ReviewActions, 'addCommentForFile' | 'reviewFiles' | 'selectFile'>;
   approvalBusy: boolean;
   anchorRevision: number;
+  navigationRevision: number;
+  onVisibleFileChange: (fileId: string) => void;
   onError: (message: string) => void;
 }
 
 export function DiffStack(props: DiffStackProps) {
   const ordered = useMemo(() => orderReviewFiles(props.files), [props.files]);
+  const root = useRef<HTMLDivElement>(null);
+  const fileIds = useMemo(() => ordered.map((file) => file.id), [ordered]);
+  useVisibleDiffFile(root, fileIds, props.onVisibleFileChange);
   const comments = useMemo(() => {
     const grouped = new Map<string, Review['comments']>();
     for (const comment of props.review.comments) {
@@ -36,7 +42,7 @@ export function DiffStack(props: DiffStackProps) {
     return grouped;
   }, [props.review.comments]);
   return (
-    <div {...stylex.props(styles.root)}>
+    <div ref={root} {...stylex.props(styles.root)}>
       <Virtualizer
         className={`review-diff-viewer review-diff-stack ${stylex.props(styles.scroller).className}`}
       >
@@ -75,18 +81,18 @@ const DiffAccordion = memo(function DiffAccordion({
       setExpanded(true);
       setLoaded(true);
     }
-  }, [selected]);
+  }, [selected, props.navigationRevision]);
   useEffect(() => {
     if (!selected || !expanded || !loaded) return;
     // Give the worker result and virtualizer a frame to install the body before
     // scrolling. Reopening the last file then reveals its code, too.
     let frame = requestAnimationFrame(() => {
       frame = requestAnimationFrame(() => {
-        container.current?.querySelector('.review-file-header')?.scrollIntoView({ block: 'start' });
+        container.current?.scrollIntoView({ block: 'start' });
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [selected, expanded, loaded]);
+  }, [selected, expanded, loaded, props.navigationRevision]);
   useEffect(() => {
     if (loaded || !expanded || !container.current) return;
     const observer = new IntersectionObserver(
@@ -115,6 +121,7 @@ const DiffAccordion = memo(function DiffAccordion({
       ref={container}
       className={`review-diff-accordion ${stylex.props(styles.file).className}`}
       data-active-diff={selected || undefined}
+      data-file-id={file.id}
     >
       <div
         className={`review-file-header ${stylex.props(styles.header, selected && styles.selectedHeader).className}`}

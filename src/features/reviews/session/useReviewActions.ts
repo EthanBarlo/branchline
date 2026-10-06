@@ -42,6 +42,7 @@ export function useReviewActions({
 }: ReviewActionsOptions) {
   const [reanchorId, setReanchorId] = useState<string | null>(null);
   const [anchorRevision, setAnchorRevision] = useState(0);
+  const [navigationRevision, setNavigationRevision] = useState(0);
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle');
   const [approvalBusy, setApprovalBusy] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -191,6 +192,7 @@ export function useReviewActions({
     try {
       await flushPendingComments();
       data.selectFile(review, id);
+      setNavigationRevision((value) => value + 1);
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -207,6 +209,7 @@ export function useReviewActions({
     reanchorId,
     setReanchorId,
     anchorRevision,
+    navigationRevision,
     copyState,
     approvalBusy,
     resetView,

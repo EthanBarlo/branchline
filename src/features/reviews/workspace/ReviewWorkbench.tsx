@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex';
-import { useMemo, type ReactNode } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { reviewFilePath } from '../tree/reviewFileOrder';
 import { isApproved } from '../session/reviewSession';
 import type { ResolvedTheme } from '../../../theme/theme';
@@ -60,6 +60,7 @@ export function ReviewWorkbench({
   const {
     reanchorId,
     anchorRevision,
+    navigationRevision,
     approvalBusy,
     addComment,
     updateComment,
@@ -98,6 +99,18 @@ export function ReviewWorkbench({
       }),
     [files, selectedFile?.id, filter, historicalFiles, review, query],
   );
+  const [visibleFile, setVisibleFile] = useState<{ viewKey: string; fileId: string }>();
+  const onVisibleFileChange = useCallback(
+    (fileId: string) =>
+      setVisibleFile((previous) =>
+        previous?.viewKey === viewKey && previous.fileId === fileId ? previous : { viewKey, fileId },
+      ),
+    [viewKey],
+  );
+  const highlightedFileId =
+    visibleFile?.viewKey === viewKey && stackFiles.some((file) => file.id === visibleFile.fileId)
+      ? visibleFile.fileId
+      : (selectedFile?.id ?? null);
   if (!review) return null;
 
   return (
@@ -111,6 +124,7 @@ export function ReviewWorkbench({
           review={review}
           files={files}
           selectedFileId={selectedFile?.id ?? null}
+          visibleFileId={highlightedFileId}
           historicalFiles={historicalFiles}
           reviewedVersions={reviewedVersions}
           pendingCount={pendingReviewFiles.length}
@@ -138,6 +152,8 @@ export function ReviewWorkbench({
           actions,
           approvalBusy,
           anchorRevision,
+          navigationRevision,
+          onVisibleFileChange,
           onError,
         }}
         selectedFile={selectedFile}
