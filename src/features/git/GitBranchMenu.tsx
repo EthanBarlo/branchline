@@ -156,7 +156,7 @@ export function GitBranchMenu({
         disabled={busy}
         onClick={() => perform('checkout')}
       >
-        <GitBranch size={14} /> Check out…
+        <GitBranch size={14} /> Check out
       </button>
       <div role="separator" {...stylex.props(styles.separator)} />
       <button
@@ -173,20 +173,20 @@ export function GitBranchMenu({
         type="button"
         {...stylex.props(styles.item)}
         disabled={busy || !checkedOut}
-        title={reason || 'Preview a fast-forward pull across every repository.'}
+        title={reason || 'Fetch, then fast-forward every repository.'}
         onClick={() => perform('pull')}
       >
-        <ArrowDown size={14} /> Pull project…
+        <ArrowDown size={14} /> Pull project
       </button>
       <button
         role="menuitem"
         type="button"
         {...stylex.props(styles.item)}
         disabled={busy || !checkedOut}
-        title={reason || 'Preview a push across every repository.'}
+        title={reason || 'Fetch, check, then push every repository.'}
         onClick={() => perform('push')}
       >
-        <ArrowUp size={14} /> Push project…
+        <ArrowUp size={14} /> Push project
       </button>
       <div role="separator" {...stylex.props(styles.separator)} />
       <button

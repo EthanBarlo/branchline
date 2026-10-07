@@ -92,6 +92,22 @@ try {
   let panel = page.getByRole('region', { name: 'Git · Git fixture', exact: true });
   const waitForGitIdle = () => page.waitForFunction(() =>
     document.querySelector('[aria-label="Git · Git fixture"]')?.getAttribute('aria-busy') === 'false');
+  // Loading toasts can be brief, so record every toast state the page renders.
+  const recordToasts = () => {
+    if (window.gitToastSmoke) return;
+    const seen = window.gitToastSmoke = [];
+    const start = () => new MutationObserver(() => {
+      for (const node of document.querySelectorAll('[data-sonner-toast]')) {
+        const entry = `${node.dataset.type}:${node.querySelector('[data-title]')?.textContent ?? ''}`;
+        if (!seen.includes(entry)) seen.push(entry);
+      }
+    }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);
+  };
+  await page.addInitScript(recordToasts);
+  await page.evaluate(recordToasts);
+  const toastSeen = (entry) => page.evaluate(entry => window.gitToastSmoke.includes(entry), entry);
+  const toast = (title) => page.locator('[data-sonner-toast]').getByText(title, { exact: true }).first();
   const branchAction = async (branch, action) => {
     await panel.getByRole('treeitem', { name: branch, exact: true }).click({ button: 'right' });
     await page.getByRole('menu', { name: `Branch actions for ${branch}`, exact: true })
@@ -246,16 +262,20 @@ try {
   await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).click({ button: 'right' });
   let menu = page.getByRole('menu', { name: 'Branch actions for codex/submodule-only', exact: true });
   assert.equal(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).getAttribute('aria-selected'), 'true');
-  for (const name of ['Review branch…', 'Pull project…', 'Push project…']) assert.equal(await menu.getByRole('menuitem', { name, exact: true }).isDisabled(), true);
+  for (const name of ['Review branch…', 'Pull project', 'Push project']) assert.equal(await menu.getByRole('menuitem', { name, exact: true }).isDisabled(), true);
   await page.keyboard.press('Escape');
   assert.equal(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).evaluate(element => element === document.activeElement), true);
   assert.match(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).innerText(), /\[packages\/core\]/);
-  await branchAction('codex/submodule-only', 'Check out…');
-  let confirmation = page.getByRole('dialog', { name: 'Checkout preview', exact: true });
-  assert.equal(await confirmation.getByRole('button', { name: 'Confirm checkout', exact: true }).isDisabled(), true);
+  await branchAction('codex/submodule-only', 'Check out');
+  // A blocked action reports through its toast; details open only on request.
+  await toast('Checkout blocked').waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  await page.locator('[data-sonner-toast]').getByRole('button', { name: 'Details', exact: true }).click();
+  let confirmation = page.getByRole('dialog', { name: 'Checkout blocked', exact: true });
+  assert.equal(await confirmation.getByRole('button', { name: 'Confirm checkout', exact: true }).count(), 0);
   assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'main');
   assert.equal(git(child, 'symbolic-ref', '--short', 'HEAD'), 'main');
-  await confirmation.getByRole('button', { name: 'Cancel preview' }).click();
+  await confirmation.getByRole('button', { name: 'Close', exact: true }).click();
   await panel.getByRole('textbox', { name: 'Find a branch' }).fill('codex/nested/leaf-only');
   await tree.getByRole('treeitem', { name: 'codex/nested/leaf-only', exact: true }).click();
   assert.match(await tree.innerText(), /\[packages\/core\/nested\]/);
@@ -280,7 +300,7 @@ try {
   menu = page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true });
   assert.equal(await featureRow.getAttribute('aria-selected'), 'true');
   assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'main');
-  assert.equal(await menu.getByRole('menuitem', { name: 'Pull project…', exact: true }).isDisabled(), true);
+  assert.equal(await menu.getByRole('menuitem', { name: 'Pull project', exact: true }).isDisabled(), true);
   await page.keyboard.press('End');
   assert.equal(await menu.getByRole('menuitem', { name: 'Add to favourites', exact: true }).evaluate(element => element === document.activeElement), true);
   await page.keyboard.press('Home');
@@ -299,12 +319,11 @@ try {
   await menu.getByRole('menuitem', { name: "New branch from 'feature/demo'…", exact: true }).click();
   let nameDialog = page.getByRole('dialog', { name: 'New branch', exact: true });
   await nameDialog.getByRole('textbox', { name: 'Branch name', exact: true }).fill('topic/context-created');
-  await nameDialog.getByRole('button', { name: 'Preview new branch', exact: true }).click();
-  confirmation = page.getByRole('dialog', { name: 'Create branch preview', exact: true });
-  await confirmation.waitFor();
-  assert.equal(await confirmation.getByText('Create local branch', { exact: true }).count(), 3);
-  await confirmation.getByRole('button', { name: 'Confirm create branch', exact: true }).click();
-  await page.locator('[data-sonner-toast]').getByText('Branch created', { exact: true }).first().waitFor();
+  await nameDialog.getByRole('button', { name: 'Create branch', exact: true }).click();
+  // A ready create runs straight from the name dialog.
+  await toast('Branch created').waitFor();
+  await page.locator('[data-sonner-toast]').getByText('Git fixture · 3 repositories', { exact: true }).first().waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 0);
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
   await page.locator('[data-sonner-toaster][data-sonner-theme="dark"]').waitFor({ state: 'attached' });
@@ -327,12 +346,11 @@ try {
   nameDialog = page.getByRole('dialog', { name: 'Rename branch', exact: true });
   assert.equal(await nameDialog.getByRole('textbox', { name: 'New branch name', exact: true }).inputValue(), 'topic/context-created');
   await nameDialog.getByRole('textbox', { name: 'New branch name', exact: true }).fill('topic/context-renamed');
-  await nameDialog.getByRole('button', { name: 'Preview rename', exact: true }).click();
-  confirmation = page.getByRole('dialog', { name: 'Rename preview', exact: true });
-  await confirmation.waitFor();
-  assert.equal(await confirmation.getByText('Rename local branch', { exact: true }).count(), 3);
-  await confirmation.getByRole('button', { name: 'Confirm rename', exact: true }).click();
-  await page.locator('[data-sonner-toast]').getByText('Branch renamed', { exact: true }).first().waitFor();
+  await nameDialog.getByRole('button', { name: 'Rename branch', exact: true }).click();
+  await toast('Branch renamed').waitFor();
+  // Caveats shared by every repository appear once in the result.
+  await page.locator('[data-sonner-toast]').getByText('Remote branch names stay unchanged. Existing upstream tracking is retained.', { exact: true }).first().waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(await page.locator('[data-sonner-toast]').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(247, 247, 246)', 'toasts inherit the light app theme');
   for (const repo of [local, child, leaf]) {
     assert.equal(git(repo, 'symbolic-ref', '--short', 'HEAD'), 'main');
@@ -453,14 +471,16 @@ try {
   await mainRow.press('Shift+F10');
   await menu.getByRole('menuitem', { name: 'Fetch project', exact: true }).click();
   await menu.waitFor({ state: 'hidden' });
+  await toast('Fetch completed').waitFor();
+  assert.equal(await toastSeen('loading:Fetching Git fixture…'), true);
   await waitForGitIdle();
   if (process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT });
   await mainRow.click({ button: 'right' });
-  await menu.getByRole('menuitem', { name: 'Pull project…', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).waitFor({ state: 'visible' });
-  await page.waitForFunction(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Confirm pull'); return button && !button.disabled; });
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).click();
-  await page.locator('[data-sonner-toast]').getByText('Pull completed', { exact: true }).first().waitFor();
+  await menu.getByRole('menuitem', { name: 'Pull project', exact: true }).click();
+  // A ready pull runs without confirmation and reports progress in its toast.
+  await toast('Pull completed').waitFor();
+  assert.equal(await toastSeen('loading:Pulling main…'), true);
+  assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(git(local, 'rev-parse', 'HEAD'), incomingHead);
   await page.getByRole('button', { name: 'Reviews', exact: true }).click();
 
@@ -487,20 +507,22 @@ try {
   await page.getByRole('button', { name: 'Project Git workflow', exact: true }).click();
   panel = page.getByRole('region', { name: 'Git · Git fixture', exact: true });
   await panel.getByRole('treeitem', { name: 'feature/demo', exact: true }).press('Shift+F10');
-  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Check out…', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Confirm checkout', exact: true }).click();
-  await page.locator('[data-sonner-toast]').getByText('Branch checked out', { exact: true }).first().waitFor();
+  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Check out', exact: true }).click();
+  await toast('Branch checked out').waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   assert.equal(git(child, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   assert.equal(git(leaf, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   await panel.getByRole('treeitem', { name: 'feature/demo', exact: true }).click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Push project…', exact: true }).click();
+  await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Push project', exact: true }).click();
+  // Only the missing publish remote choice interrupts a push; choosing it starts the push.
   const pushPreview = page.getByRole('dialog', { name: 'Push preview', exact: true });
   assert.equal(await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).isDisabled(), true);
   await pushPreview.getByRole('combobox', { name: 'Publish remote for .', exact: true }).click();
   await page.getByRole('option', { name: 'origin', exact: true }).click();
-  await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).click();
-  await page.locator('[data-sonner-toast]').getByText('Push completed', { exact: true }).first().waitFor();
+  await toast('Push completed').waitFor();
+  assert.equal(await toastSeen('loading:Pushing feature/demo…'), true);
+  assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(git(remote, 'rev-parse', 'feature/demo'), git(local, 'rev-parse', 'HEAD'));
   // Renaming a current branch also updates nested checkouts and keeps remote tracking destinations.
   for (const [source, target] of [['feature/demo', 'feature/context-current'], ['feature/context-current', 'feature/demo']]) {
@@ -508,10 +530,8 @@ try {
     await page.getByRole('menu', { name: `Branch actions for ${source}`, exact: true }).getByRole('menuitem', { name: 'Rename…', exact: true }).click();
     nameDialog = page.getByRole('dialog', { name: 'Rename branch', exact: true });
     await nameDialog.getByRole('textbox', { name: 'New branch name', exact: true }).fill(target);
-    await nameDialog.getByRole('button', { name: 'Preview rename', exact: true }).click();
-    confirmation = page.getByRole('dialog', { name: 'Rename preview', exact: true });
-    await confirmation.getByRole('button', { name: 'Confirm rename', exact: true }).click();
-    await confirmation.waitFor({ state: 'hidden' });
+    await nameDialog.getByRole('button', { name: 'Rename branch', exact: true }).click();
+    await nameDialog.waitFor({ state: 'hidden' });
     await panel.getByRole('treeitem', { name: target, exact: true }).waitFor();
     await page.waitForFunction(name => document.querySelector(`[role="treeitem"][aria-label="${name}"]`)?.getAttribute('aria-selected') === 'true', target);
     for (const repo of [local, child, leaf]) {
@@ -545,12 +565,20 @@ try {
   git(peer, 'switch', '-qc', 'feature/demo', '--track', 'origin/feature/demo');
   await commit(peer, 'remote-only.ts', 'export const remoteOnly = true;\n');
   git(peer, 'push', '-q');
-  await branchAction('feature/demo', 'Pull project…');
-  await page.getByRole('dialog').getByText('Branches have diverged. Merge or rebase manually, then refresh.', { exact: true }).waitFor();
-  assert.equal(await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).isDisabled(), true);
+  await branchAction('feature/demo', 'Pull project');
+  await toast('Pull blocked').waitFor();
+  await page.locator('[data-sonner-toast]').getByRole('button', { name: 'Details', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Pull blocked', exact: true }).getByText('Branches have diverged. Merge or rebase manually, then refresh.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('dialog').getByRole('button', { name: 'Confirm pull', exact: true }).count(), 0);
   await page.screenshot({ path: join(fixture, 'git-panel.png') });
   if (process.env.BRANCHLINE_GIT_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_SCREENSHOT });
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel preview', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+  // Push explains remote history that needs pulling instead of asking to confirm.
+  await branchAction('feature/demo', 'Push project');
+  const pushPull = page.getByRole('dialog', { name: 'Push needs a pull', exact: true });
+  await pushPull.getByText('Diverged · 1 local, 1 remote', { exact: true }).waitFor();
+  assert.equal(await pushPull.getByRole('button', { name: 'Confirm push', exact: true }).count(), 0);
+  await pushPull.getByRole('button', { name: 'Close', exact: true }).click();
   // Project tabs stay in Git and restore each project's inspected branch.
   const other = join(fixture, 'other');
   await mkdir(other);
@@ -585,7 +613,7 @@ try {
     });
   });
   await panel.getByRole('treeitem', { name: 'main', exact: true }).click();
-  await branchAction('main', 'Check out…');
+  await branchAction('main', 'Check out');
   for (let attempt = 0; attempt < 100 && !await desktop.evaluate(() => globalThis.gitPreviewSmoke.held); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(await desktop.evaluate(() => globalThis.gitPreviewSmoke.held), true);
   await page.getByRole('tab', { name: 'Other Git fixture', exact: true }).click();
@@ -597,6 +625,8 @@ try {
   assert.equal(await otherPanel.locator('[data-branch-key]').count(), 1);
   assert.equal(await otherPanel.getByRole('treeitem', { name: 'main', exact: true }).getAttribute('aria-selected'), 'true');
   assert.equal(await page.getByRole('dialog').count(), 0);
+  // The started action still finishes and reports in a toast rather than in the new project.
+  await page.locator('[data-sonner-toast]:not([data-type="loading"])').getByText(/^(Branch checked out|Checkout blocked)$/).first().waitFor();
   await desktop.evaluate(({ ipcMain }) => {
     const driver = globalThis.gitCacheSmoke = { calls: 0, reads: {}, release: null };
     const held = new Promise(resolve => { driver.release = resolve; });

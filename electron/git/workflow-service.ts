@@ -19,6 +19,7 @@ import type {
   GitOperation,
   GitRepositoryStatus,
   GitWorkflowChange,
+  GitWorkflowProgress,
   GitWorkflowSnapshot,
   GitCommit,
   GitHistory,
@@ -144,6 +145,11 @@ export class GitWorkflowService {
 
   private emit(projectId: string, busy: boolean, activity: GitWorkflowChange['activity'] = 'mutation'): void {
     const change = { projectId, busy, activity, operation: this.journal.operations[projectId] };
+    for (const listener of this.listeners) listener(structuredClone(change));
+  }
+
+  private emitProgress(projectId: string, progress: GitWorkflowProgress): void {
+    const change: GitWorkflowChange = { projectId, busy: true, activity: 'preview', progress };
     for (const listener of this.listeners) listener(structuredClone(change));
   }
 
@@ -913,9 +919,17 @@ export class GitWorkflowService {
     }, this.project(projectId).repoPath);
   }
 
-  private async fetchRepositories(repositories: Repository[]): Promise<void> {
+  private async fetchRepositories(
+    repositories: Repository[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
+    let done = 0;
+    onProgress?.(done, repositories.length);
     await mapConcurrent(repositories, 4, async (repository) => {
-      if (repository.error || !repository.remotes.length) return;
+      if (repository.error || !repository.remotes.length) {
+        onProgress?.(++done, repositories.length);
+        return;
+      }
       const previous = this.journal.fetched[repository.directory];
       try {
         for (const remote of repository.remotes) {
@@ -941,6 +955,7 @@ export class GitWorkflowService {
       } catch (error) {
         this.journal.fetched[repository.directory] = { at: previous?.at, error: message(error) };
       }
+      onProgress?.(++done, repositories.length);
     });
     await this.save();
   }
@@ -1269,10 +1284,14 @@ export class GitWorkflowService {
           };
           row.createTracking = !repository.upstream;
           row.noop = commit === repository.head;
-          if (commit && !(await this.ancestor(repository.directory, commit, repository.head)))
+          if (commit && !(await this.ancestor(repository.directory, commit, repository.head))) {
+            [row.outgoing, row.incoming] = await this.counts(repository.directory, repository.head, commit);
             throw new Error(
-              'The push destination has incoming or diverged history. Pull safely or resolve it manually first.',
+              row.outgoing
+                ? `Branches have diverged (${row.outgoing} local, ${row.incoming} remote). Merge or rebase manually first.`
+                : `${row.incoming} incoming ${row.incoming === 1 ? 'commit' : 'commits'}. Pull first.`,
             );
+          }
         }
         if (
           (input.action === 'checkout' || input.action === 'pull') &&
@@ -1331,9 +1350,12 @@ export class GitWorkflowService {
       async () => {
         this.project(projectId);
         if (input.action === 'pull' || input.action === 'push')
-          await this.fetchRepositories(await this.discover(projectId));
+          await this.fetchRepositories(await this.discover(projectId), (done, total) =>
+            this.emitProgress(projectId, { stage: 'fetching', done, total }),
+          );
         const repositories = await this.discover(projectId);
         await this.reconcile(projectId, repositories);
+        this.emitProgress(projectId, { stage: 'checking', done: 0, total: repositories.length });
         const rows = await this.rows(repositories, input, true);
         if (this.uncertainOperation(repositories))
           rows[0].blockers.push(

@@ -51,7 +51,22 @@ export function GitBranchNameDialog({
         newBranch: name.trim(),
       };
       const preview = await window.reviewAPI.previewGitAction(projectId, input);
-      if (active.current) onPrepared(preview);
+      if (!active.current) return;
+      if (preview.ready) {
+        onPrepared(preview);
+        return;
+      }
+      // Keep the dialog open so the name can be corrected without starting over.
+      setError(
+        [
+          ...new Set(
+            preview.rows.flatMap((row) =>
+              row.blockers.map((blocker) => (row.path === '.' ? blocker : `${row.path}: ${blocker}`)),
+            ),
+          ),
+        ].join(' '),
+      );
+      setPending(false);
     } catch (reason) {
       setError(errorMessage(reason));
       setPending(false);
@@ -129,7 +144,7 @@ export function GitBranchNameDialog({
             variant="primary"
             disabled={pending || !name.trim() || (action === 'rename' && name.trim() === branch.name)}
           >
-            Preview {action === 'create' ? 'new branch' : 'rename'}
+            {action === 'create' ? 'Create branch' : 'Rename branch'}
           </Button>
         </DialogFooter>
       </form>

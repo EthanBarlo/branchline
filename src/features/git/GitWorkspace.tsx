@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import type { GitAction, GitActionInput, GitActionPreview } from '../../../shared/git-workflow';
 import type { Project } from '../../../shared/types';
@@ -10,11 +10,22 @@ import { FormError } from '../../ui/Field';
 import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import type { GitBranchMenuAction } from './GitBranchMenu';
 import { GitBranchNameDialog } from './GitBranchNameDialog';
-import { GitActionConfirmation } from './GitActionConfirmation';
+import { GitActionConfirmation, type GitPreviewMode } from './GitActionConfirmation';
 import { GitBranchSidebar } from './GitBranchSidebar';
 import { branchKey, sidebarBranches, type GitSidebarBranch } from './branchTree';
 import { useGitBranchFavourites } from './useGitBranchFavourites';
 import type { GitWorkflow } from './useGitWorkflow';
+import {
+  previewBranch,
+  showFetchLoading,
+  showFetchResult,
+  showGitBlocked,
+  showGitError,
+  showGitLoading,
+  showGitNoop,
+  showGitResult,
+  type GitActionToast,
+} from './gitActionToast';
 import { GitCommitGraph } from './GitCommitGraph';
 
 export function GitWorkspace({
@@ -26,10 +37,14 @@ export function GitWorkspace({
   workflow: GitWorkflow;
   onReview: (branch: string) => void;
 }) {
-  const { snapshot, busy, fetching, error, reload, setSnapshot } = workflow;
+  const { snapshot, busy, fetching, progress, error, reload, setSnapshot } = workflow;
   const { favourites, toggleFavourite } = useGitBranchFavourites(project.id);
   const selectionVersion = useRef(0);
   const preparationVersion = useRef(0);
+  const toastCount = useRef(0);
+  // Only toasts for actions started in this view follow progress, never restored journal operations.
+  const activeToast = useRef<GitActionToast>(undefined);
+  const fetchToast = useRef<string>(undefined);
   const [selectedName, setSelectedName] = useState(
     () => sessionStorage.getItem(`branchline.git.branch.${project.id}`) || '',
   );
@@ -46,6 +61,7 @@ export function GitWorkspace({
   }>();
   const [checking, setChecking] = useState(false);
   const [preview, setPreview] = useState<GitActionPreview>();
+  const [previewMode, setPreviewMode] = useState<GitPreviewMode>('confirm');
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const branches = useMemo(() => sidebarBranches(snapshot?.branches ?? []), [snapshot?.branches]);
@@ -65,17 +81,53 @@ export function GitWorkspace({
     return root.remotes[0] ? `${root.remotes[0]}/${branch.name}` : undefined;
   }
   const disabled = busy || pending;
-  const repositoryCount = new Set([
+  const repositoryTotal = new Set([
     ...repositories.map((repo) => repo.path),
     ...(snapshot?.pendingRepositories ?? []),
   ]).size;
+  const publicationRepositories = repositories.filter(
+    (repo) => !repo.upstream && !repo.pushTarget && repo.branch && !repo.error,
+  );
   const publicationChoices = Object.fromEntries(
     repositories.map((repo) => [
       repo.path,
       publishRemotes[repo.path] || (repo.remotes.length === 1 ? repo.remotes[0] : ''),
     ]),
   );
-  async function prepare(
+  const pendingRepositories = snapshot?.pendingRepositories?.length ?? 0;
+  useEffect(() => {
+    const target = activeToast.current;
+    const operation = snapshot?.operation;
+    if (target?.phase === 'run') {
+      if (operation?.state !== 'running' || operation.action !== target.action) return;
+      const changing = operation.rows.filter((row) => !row.noop);
+      const rows = changing.length ? changing : operation.rows;
+      showGitLoading(target, {
+        kind: 'running',
+        done: rows.filter((row) => row.state === 'done').length,
+        total: rows.length,
+      });
+    } else if (target?.phase === 'preview' && progress) {
+      showGitLoading(target, { kind: 'progress', progress });
+    }
+  }, [snapshot?.operation, progress]);
+  useEffect(() => {
+    if (fetchToast.current && repositoryTotal)
+      showFetchLoading(
+        fetchToast.current,
+        project.name,
+        repositoryTotal - pendingRepositories,
+        repositoryTotal,
+      );
+  }, [pendingRepositories, repositoryTotal, project.name]);
+  function nextToastId() {
+    return `git-${project.id}-${++toastCount.current}`;
+  }
+  function needsRemoteChoice(path: string, remoteChoices: Record<string, string>) {
+    const repository = publicationRepositories.find((repo) => repo.path === path);
+    return !!repository && repository.remotes.length > 1 && !remoteChoices[path];
+  }
+  async function start(
     action: GitAction,
     branch = selectedBranch,
     remoteChoices = publicationChoices,
@@ -83,6 +135,22 @@ export function GitWorkspace({
   ) {
     const version = selectionVersion.current;
     const request = ++preparationVersion.current;
+    const cancel = () => {
+      if (request === preparationVersion.current) cancelPreview();
+    };
+    // Delete keeps its confirmation dialog, which shows its own checking state.
+    const target: GitActionToast | undefined =
+      action === 'delete'
+        ? undefined
+        : {
+            id: nextToastId(),
+            action,
+            branch: branch ? `${branch.remote ? `${branch.remote}/` : ''}${branch.name}` : '',
+            phase: 'preview',
+            onCancel: cancel,
+          };
+    activeToast.current = target;
+    if (target) showGitLoading(target, { kind: 'preparing' });
     setPending(true);
     setChecking(true);
     setActionError(undefined);
@@ -99,10 +167,46 @@ export function GitWorkspace({
         publishRemotes: remoteChoices,
         ...(action === 'delete' ? deletionOptions : {}),
       });
-      if (version === selectionVersion.current && request === preparationVersion.current)
-        setPreview(prepared);
+      if (request !== preparationVersion.current) return;
+      if (!target) {
+        if (version === selectionVersion.current) setPreview(prepared);
+        return;
+      }
+      activeToast.current = undefined;
+      if (!prepared.ready) {
+        const openDialog = (mode: GitPreviewMode) => {
+          toast.dismiss(target.id);
+          setPreviewMode(mode);
+          setPreview(prepared);
+        };
+        if (action === 'push' && prepared.rows.some((row) => row.incoming)) openDialog('incoming');
+        else if (
+          action === 'push' &&
+          prepared.rows.some((row) => row.blockers.length && needsRemoteChoice(row.path, remoteChoices))
+        )
+          openDialog('confirm');
+        else {
+          setPreview(undefined);
+          showGitBlocked(target, prepared, project.name, () => {
+            setPreviewMode('details');
+            setPreview(prepared);
+          });
+        }
+        return;
+      }
+      setPreview(undefined);
+      if (prepared.rows.every((row) => row.noop && !row.createTracking)) {
+        showGitNoop(target, project.name);
+        return;
+      }
+      setChecking(false);
+      await execute(prepared, { ...target, onCancel: undefined });
     } catch (reason) {
-      if (request === preparationVersion.current) setActionError(errorMessage(reason));
+      if (request !== preparationVersion.current) return;
+      if (target) {
+        activeToast.current = undefined;
+        showGitError(target, errorMessage(reason));
+      } else setActionError(errorMessage(reason));
     } finally {
       if (request === preparationVersion.current) {
         setPending(false);
@@ -112,6 +216,11 @@ export function GitWorkspace({
   }
   function cancelPreview() {
     preparationVersion.current++;
+    const target = activeToast.current;
+    if (target?.phase === 'preview') {
+      activeToast.current = undefined;
+      toast.dismiss(target.id);
+    }
     setChecking(false);
     setPending(false);
     setPreview(undefined);
@@ -122,11 +231,23 @@ export function GitWorkspace({
     const next = { ...deletion, ...changes };
     setDeletion(next);
     setPreview({ ...preview, ready: false });
-    void prepare('delete', next.branch, publicationChoices, {
+    void start('delete', next.branch, publicationChoices, {
       force: next.force,
       deleteRemote: next.deleteRemote,
       deleteRemotes: next.remotes,
     });
+  }
+  function fetchProject() {
+    const id = nextToastId();
+    fetchToast.current = id;
+    showFetchLoading(id, project.name);
+    setPending(true);
+    void reload(true)
+      .then((result) => {
+        fetchToast.current = undefined;
+        showFetchResult(id, project.name, result);
+      })
+      .finally(() => setPending(false));
   }
   function branchAction(name: string, action: GitBranchMenuAction) {
     if (action === 'favourite') {
@@ -143,8 +264,7 @@ export function GitWorkspace({
       const ref = reviewRefFor(branch);
       if (ref) onReview(ref);
     } else if (action === 'fetch') {
-      setPending(true);
-      void reload(true).finally(() => setPending(false));
+      fetchProject();
     } else {
       if (
         (action === 'pull' || action === 'push') &&
@@ -154,36 +274,36 @@ export function GitWorkspace({
         return;
       if (action === 'delete') {
         setDeletion({ branch, force: false, deleteRemote: false, remotes: {} });
+        setPreviewMode('confirm');
         setPreview({ id: '', projectId: project.id, action: 'delete', rows: [], ready: false });
       }
-      void prepare(action, branch);
+      void start(action, branch);
     }
   }
-  async function execute() {
-    if (!preview) return;
+  async function execute(
+    prepared: GitActionPreview,
+    target: GitActionToast = {
+      id: nextToastId(),
+      action: prepared.action,
+      branch: previewBranch(prepared),
+      phase: 'run',
+    },
+  ) {
     const version = selectionVersion.current;
+    const running: GitActionToast = { ...target, phase: 'run' };
+    activeToast.current = running;
+    showGitLoading(running, { kind: 'starting' });
     setPending(true);
     setActionError(undefined);
+    setPreview(undefined);
+    setDeletion(undefined);
     try {
       await flushPendingComments();
-      const operation = await window.reviewAPI.runGitAction(project.id, preview.id);
+      const operation = await window.reviewAPI.runGitAction(project.id, prepared.id);
+      // Clear first so a late progress event cannot turn the result back into a loading toast.
+      activeToast.current = undefined;
       setSnapshot((previous) => previous && { ...previous, operation });
-      setPreview(undefined);
-      if (operation.state === 'completed') {
-        const titles: Record<GitAction, string> = {
-          create: 'Branch created',
-          rename: 'Branch renamed',
-          delete: 'Branch deleted',
-          checkout: 'Branch checked out',
-          pull: 'Pull completed',
-          push: 'Push completed',
-        };
-        const count = operation.rows.filter((row) => !row.noop).length;
-        toast.success(titles[operation.action], {
-          id: operation.id,
-          description: `${project.name} · ${count} ${count === 1 ? 'repository' : 'repositories'}`,
-        });
-      }
+      showGitResult(running, operation, project.name);
       if (
         operation.state === 'completed' &&
         (operation.action === 'create' || operation.action === 'rename') &&
@@ -205,8 +325,8 @@ export function GitWorkspace({
       }
       await reload();
     } catch (reason) {
-      setActionError(errorMessage(reason));
-      setPreview(undefined);
+      activeToast.current = undefined;
+      showGitError(running, errorMessage(reason));
     } finally {
       setPending(false);
     }
@@ -217,7 +337,7 @@ export function GitWorkspace({
         <GitBranchSidebar
           projectId={project.id}
           branches={branches}
-          repositoryCount={repositoryCount}
+          repositoryCount={repositoryTotal}
           projectName={project.name}
           busy={disabled}
           favourites={favourites}
@@ -236,7 +356,7 @@ export function GitWorkspace({
           }}
         />
         <div {...stylex.props(styles.main)}>
-          {(actionError || error) && <FormError>{actionError || error}</FormError>}
+          {error && <FormError>{error}</FormError>}
           <GitCommitGraph
             projectId={project.id}
             projectName={project.name}
@@ -274,7 +394,9 @@ export function GitWorkspace({
                     void window.reviewAPI
                       .acknowledgeGitOperation(project.id)
                       .then(setSnapshot)
-                      .catch((reason) => setActionError(errorMessage(reason)))
+                      .catch((reason) =>
+                        toast.error('Acknowledgement failed', { description: errorMessage(reason) }),
+                      )
                       .finally(() => setPending(false));
                   }}
                 >
@@ -294,13 +416,14 @@ export function GitWorkspace({
           onClose={() => setNameAction(undefined)}
           onPrepared={(prepared) => {
             setNameAction(undefined);
-            setPreview(prepared);
+            void execute(prepared);
           }}
         />
       )}
       {preview && (
         <GitActionConfirmation
           preview={preview}
+          mode={previewMode}
           projectName={project.name}
           pending={disabled}
           checking={checking}
@@ -313,19 +436,17 @@ export function GitWorkspace({
           onDeletionRemote={(path, remote) =>
             recheckDeletion({ remotes: { ...deletion?.remotes, [path]: remote } })
           }
-          publicationRepositories={repositories.filter(
-            (repo) => !repo.upstream && !repo.pushTarget && repo.branch && !repo.error,
-          )}
+          publicationRepositories={publicationRepositories}
           publicationChoices={publicationChoices}
           onPublicationRemote={(path, remote) => {
             const choices = { ...publicationChoices, [path]: remote };
             setPublishRemotes(choices);
-            void prepare('push', selectedBranch, choices);
+            void start('push', selectedBranch, choices);
           }}
           forceDelete={deletion?.force ?? false}
           onForceDelete={(force) => recheckDeletion({ force })}
           onCancel={cancelPreview}
-          onConfirm={() => void execute()}
+          onConfirm={() => void execute(preview)}
         />
       )}
     </section>

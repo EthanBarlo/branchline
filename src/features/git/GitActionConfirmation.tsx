@@ -6,8 +6,12 @@ import { Dialog, DialogBody, DialogFooter } from '../../ui/Dialog';
 import { FormError } from '../../ui/Field';
 import { Select } from '../../ui/Select';
 
+/** `confirm` asks before running; `incoming` and `details` only explain why an action cannot run. */
+export type GitPreviewMode = 'confirm' | 'incoming' | 'details';
+
 export function GitActionConfirmation({
   preview,
+  mode = 'confirm',
   projectName,
   pending,
   checking,
@@ -27,6 +31,7 @@ export function GitActionConfirmation({
   onConfirm,
 }: {
   preview: GitActionPreview;
+  mode?: GitPreviewMode;
   projectName: string;
   pending: boolean;
   checking: boolean;
@@ -49,8 +54,20 @@ export function GitActionConfirmation({
     preview.action === 'create' || preview.action === 'delete' ? `${preview.action} branch` : preview.action;
   const title = verb.charAt(0).toUpperCase() + verb.slice(1);
   const executing = pending && !checking;
+  const diverged = preview.rows.some((row) => row.incoming && row.outgoing);
   return (
-    <Dialog title={`${title} preview`} onClose={onCancel} busy={executing} wide>
+    <Dialog
+      title={
+        mode === 'incoming'
+          ? 'Push needs a pull'
+          : mode === 'details'
+            ? `${title} blocked`
+            : `${title} preview`
+      }
+      onClose={onCancel}
+      busy={executing}
+      wide
+    >
       <DialogBody>
         <section aria-label="Git action preview" aria-busy={checking}>
           {deletionBranch && (
@@ -65,6 +82,13 @@ export function GitActionConfirmation({
             </p>
           )}
           {error && <FormError>{error}</FormError>}
+          {mode === 'incoming' && (
+            <p {...stylex.props(styles.note)}>
+              {diverged
+                ? 'Local and remote history have diverged. Merge or rebase manually, then push again.'
+                : 'The remote has commits you do not have yet. Pull them first, then push again.'}
+            </p>
+          )}
           {preview.action === 'delete' &&
             deletionBranch &&
             !deletionBranch.remote &&
@@ -100,21 +124,27 @@ export function GitActionConfirmation({
                     )}
                   </span>
                   <span {...stylex.props(styles.note)}>
-                    {row.noop
-                      ? preview.action === 'delete'
-                        ? 'Not present; skipped'
-                        : 'Already up to date'
-                      : row.createTracking
-                        ? 'Set tracking branch'
-                        : preview.action === 'create'
-                          ? 'Create local branch'
-                          : preview.action === 'delete'
-                            ? row.source?.remote
-                              ? 'Delete remote branch'
-                              : 'Delete local branch'
-                            : preview.action === 'rename'
-                              ? 'Rename local branch'
-                              : 'Update branch'}
+                    {row.incoming
+                      ? row.outgoing
+                        ? `Diverged · ${row.outgoing} local, ${row.incoming} remote`
+                        : `${row.incoming} incoming`
+                      : row.blockers.length && mode !== 'confirm'
+                        ? 'Blocked'
+                        : row.noop
+                          ? preview.action === 'delete'
+                            ? 'Not present; skipped'
+                            : 'Already up to date'
+                          : row.createTracking
+                            ? 'Set tracking branch'
+                            : preview.action === 'create'
+                              ? 'Create local branch'
+                              : preview.action === 'delete'
+                                ? row.source?.remote
+                                  ? 'Delete remote branch'
+                                  : 'Delete local branch'
+                                : preview.action === 'rename'
+                                  ? 'Rename local branch'
+                                  : 'Update branch'}
                   </span>
                 </div>
                 {(row.destination?.url || row.source?.url) && (
@@ -190,28 +220,38 @@ export function GitActionConfirmation({
               )}
             </>
           )}
-          <p {...stylex.props(styles.note)}>
-            Every repository must pass checks before starting. Completed steps remain if a later step fails.
-          </p>
+          {preview.action === 'delete' && (
+            <p {...stylex.props(styles.note)}>
+              Every repository must pass checks before starting. Completed steps remain if a later step fails.
+            </p>
+          )}
         </section>
       </DialogBody>
       <DialogFooter>
-        <Button disabled={executing} onClick={onCancel}>
-          Cancel preview
-        </Button>
-        <Button
-          variant={preview.action === 'delete' ? 'danger' : 'primary'}
-          disabled={
-            pending ||
-            checking ||
-            !preview.id ||
-            !preview.ready ||
-            preview.rows.every((row) => row.noop && !row.createTracking)
-          }
-          onClick={onConfirm}
-        >
-          Confirm {verb}
-        </Button>
+        {mode === 'confirm' ? (
+          <>
+            <Button disabled={executing} onClick={onCancel}>
+              Cancel preview
+            </Button>
+            <Button
+              variant={preview.action === 'delete' ? 'danger' : 'primary'}
+              disabled={
+                pending ||
+                checking ||
+                !preview.id ||
+                !preview.ready ||
+                preview.rows.every((row) => row.noop && !row.createTracking)
+              }
+              onClick={onConfirm}
+            >
+              Confirm {verb}
+            </Button>
+          </>
+        ) : (
+          <Button variant="primary" onClick={onCancel}>
+            Close
+          </Button>
+        )}
       </DialogFooter>
     </Dialog>
   );

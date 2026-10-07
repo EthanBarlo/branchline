@@ -89,6 +89,33 @@ test('conflict-free divergent history is blocked without creating merge state', 
   assert.throws(() => git(local, 'rev-parse', '--verify', 'MERGE_HEAD'));
 });
 
+test('push previews count incoming and diverged commits and report progress', async () => {
+  const { local, peer, service } = await fixture();
+  await commit(peer, 'remote-1.txt', 'remote\n');
+  await commit(peer, 'remote-2.txt', 'remote\n');
+  git(peer, 'push', '-q');
+  const progress: unknown[] = [];
+  const unsubscribe = service.subscribe((change) => {
+    if (change.progress) progress.push(change.progress);
+  });
+  const behind = await service.preview('project', { action: 'push' });
+  unsubscribe();
+  assert.equal(behind.ready, false);
+  assert.equal(behind.rows[0].incoming, 2);
+  assert.equal(behind.rows[0].outgoing, 0);
+  assert.match(behind.rows[0].blockers.join(' '), /2 incoming commits\. Pull first/);
+  assert.deepEqual(progress, [
+    { stage: 'fetching', done: 0, total: 1 },
+    { stage: 'fetching', done: 1, total: 1 },
+    { stage: 'checking', done: 0, total: 1 },
+  ]);
+  await commit(local, 'local.txt', 'local\n');
+  const diverged = await service.preview('project', { action: 'push' });
+  assert.equal(diverged.rows[0].incoming, 2);
+  assert.equal(diverged.rows[0].outgoing, 1);
+  assert.match(diverged.rows[0].blockers.join(' '), /diverged \(1 local, 2 remote\)/);
+});
+
 test('ahead-only pull is a no-op; dirty files block pull and checkout but not push', async () => {
   const { local, service } = await fixture();
   await commit(local, 'ahead.txt', 'ahead\n');

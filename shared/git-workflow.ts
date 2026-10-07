@@ -83,6 +83,10 @@ export interface GitActionRow {
   unmergedCommits?: number;
   remoteDeletion?: GitDestination;
   createTracking?: boolean;
+  /** Push only: commits on the destination that the local branch lacks. */
+  incoming?: number;
+  /** Push only: local commits missing from a destination with incoming history. */
+  outgoing?: number;
   noop: boolean;
   blockers: string[];
   warnings: string[];
@@ -121,10 +125,17 @@ export interface GitWorkflowSnapshot {
   operation?: GitOperation;
 }
 
+export interface GitWorkflowProgress {
+  stage: 'fetching' | 'checking';
+  done: number;
+  total: number;
+}
+
 export interface GitWorkflowChange {
   projectId: string;
   activity?: 'fetch' | 'preview' | 'mutation';
   busy: boolean;
+  progress?: GitWorkflowProgress;
   snapshot?: GitWorkflowSnapshot;
   operation?: GitOperation;
 }
