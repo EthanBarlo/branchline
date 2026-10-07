@@ -55,7 +55,7 @@ export interface PullRequest {
   mergeBaseHash?: string;
   author: { id: string; name: string };
   reviewers: { id: string; name: string }[];
-  participants: { id: string; approved: boolean }[];
+  participants: { id: string; approved: boolean; changesRequested?: boolean }[];
   state: string;
   draft: boolean;
   mergeStrategies: string[];
@@ -222,6 +222,21 @@ export interface FeedbackPreview {
   items: FeedbackItem[];
   blockers: string[];
 }
+export interface FeedbackPreviewOptions {
+  /** False skips Bitbucket reads so the dialog can list drafts immediately. */
+  remote?: boolean;
+}
+export interface PublishFeedbackOptions {
+  /** Mark each PR that received new or edited feedback as "changes requested". */
+  requestChanges?: boolean;
+}
+export interface PublishFeedbackResult {
+  state: RemoteReviewState;
+  preview: FeedbackPreview;
+  /** PR IDs left in the "changes requested" state by this publish. */
+  requestedChanges: number[];
+  warnings: string[];
+}
 export interface MergePreview {
   pullRequests: PullRequest[];
   repositories?: BranchReviewRepository[];
@@ -347,8 +362,8 @@ export interface IntegrationAPI {
   onJiraBrowserClosed(callback: (id: string) => void): () => void;
   onJiraBrowserClearTicket(callback: (id: string) => void): () => void;
   setReviewTicket(reviewId: string, key: string | null, expectedBranch?: string | null): Promise<void>;
-  previewFeedback(reviewId: string): Promise<FeedbackPreview>;
-  publishFeedback(reviewId: string): Promise<RemoteReviewState>;
+  previewFeedback(reviewId: string, options?: FeedbackPreviewOptions): Promise<FeedbackPreview>;
+  publishFeedback(reviewId: string, options?: PublishFeedbackOptions): Promise<PublishFeedbackResult>;
   reanchorComment(reviewId: string, commentId: string, input: ReanchorInput): Promise<Review>;
   resolveCommentConflict(reviewId: string, commentId: string, choice: 'local' | 'remote'): Promise<Review>;
   resolveUnknownPublication(

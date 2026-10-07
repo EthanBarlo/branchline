@@ -38,7 +38,7 @@ function fixtureBridge() {
   ].map(([id, name]) => ({ ...local, id, name, kind: 'saved', remote: true, includeWorkingTree: false, comments: id === 'closed-merged' ? [comment(6, 'An unpublished local note.')] : [] }));
   const state = { projects: [project], reviews: [local, ...cleanupReviews], settings: { jiraBaseUrl: '', jiraTicketView: 'summary', theme: 'system' } };
   const integrations = { connections: [], projects: {} };
-  const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
+  const calls = { scopeCopies: [], filters: [], opens: [], actions: [], publish: 0, requestChanges: [], reanchors: [], links: [], unknown: [], conflicts: [], refreshes: [], logOpens: 0, completed: [], mergePreviews: 0 };
   Object.assign(calls, { cleanupChecks: [], cleanupRemovals: [], activeCleanupChecks: 0, maxCleanupChecks: 0 });
   let holdCleanupChecks = true;
   const cleanupWaiters = [];
@@ -191,7 +191,7 @@ function fixtureBridge() {
     reanchorComment: async (_, id, input) => { const comment = review.comments.find(item => item.id === id); Object.assign(comment, input); remote.publications[id].anchor = anchor(comment); calls.reanchors.push({ id, ...input }); return clone(review); },
     resolveCommentConflict: async (_, id, choice) => { const publication = remote.publications[id]; const comment = review.comments.find(item => item.id === id); if (choice === 'remote') Object.assign(comment, publication.remote); publication.acknowledged = clone(publication.remote); publication.state = 'synced'; delete publication.remote; calls.conflicts.push(choice); return clone(review); },
     resolveUnknownPublication: async (_, id, remoteId) => { const publication = remote.publications[id]; publication.state = remoteId ? 'synced' : 'draft'; if (remoteId) { publication.remoteId = remoteId; const comment = review.comments.find(item => item.id === id); publication.acknowledged = { body: comment.body, resolved: comment.resolved, deleted: false }; } calls.unknown.push({ id, remoteId }); return clone(remote); },
-    publishFeedback: async () => { calls.publish++; if (failNextPublication) { failNextPublication = false; throw new Error('Bitbucket is temporarily unavailable. Try publishing again.'); } if (!remote.pullRequests.some(pr => pr.repository.repoSlug === 'docs')) { remote.repositories[2].creation = { state: 'sending' }; emitRemote(); await new Promise(resolve => setTimeout(resolve, 50)); remote.pullRequests.push(pr(13, mappings[2])); Object.assign(remote.repositories[2], { status: 'pull-request', prId: 13 }); delete remote.repositories[2].creation; } for (const comment of review.comments) Object.assign(remote.publications[comment.id], { state: 'synced', remoteId: remote.publications[comment.id].remoteId || 200 + Number(comment.id.at(-1)), acknowledged: { body: comment.body, resolved: comment.resolved, deleted: false } }); return clone(remote); },
+    publishFeedback: async (_, options) => { calls.publish++; calls.requestChanges.push(options?.requestChanges === true); if (failNextPublication) { failNextPublication = false; throw new Error('Bitbucket is temporarily unavailable. Try publishing again.'); } if (!remote.pullRequests.some(pr => pr.repository.repoSlug === 'docs')) { remote.repositories[2].creation = { state: 'sending' }; emitRemote(); await new Promise(resolve => setTimeout(resolve, 50)); remote.pullRequests.push(pr(13, mappings[2])); Object.assign(remote.repositories[2], { status: 'pull-request', prId: 13 }); delete remote.repositories[2].creation; } for (const comment of review.comments) Object.assign(remote.publications[comment.id], { state: 'synced', remoteId: remote.publications[comment.id].remoteId || 200 + Number(comment.id.at(-1)), acknowledged: { body: comment.body, resolved: comment.resolved, deleted: false } }); return { state: clone(remote), preview: clone(previewFeedback()), requestedChanges: options?.requestChanges ? remote.pullRequests.map(pr => pr.id) : [], warnings: [] }; },
     previewMerge: async () => {
       calls.mergePreviews++;
       for (const row of remote.repositories) row.check = { state: 'checking' };
@@ -609,9 +609,10 @@ try {
   await page.getByRole('button', { name: 'Publish feedback', exact: true }).click();
   panel = await dialog(page, 'Publish feedback');
   await panel.getByText('The PR changed. Choose current lines before publishing.', { exact: true }).first().waitFor();
-  assert.equal(await refreshCount('remote-review'), refreshesBeforePublicationPreview + 1, 'Opening publication refreshes the reviewed snapshot before validating feedback anchors.');
+  assert.equal(await refreshCount('remote-review'), refreshesBeforePublicationPreview, 'Opening publication validates feedback without reloading the reviewed snapshot.');
+  assert.equal(await panel.getByRole('checkbox', { name: /^Request changes on the pull request/ }).isChecked(), true, 'Requesting changes is on by default.');
   assert.equal(await panel.getByRole('region', { name: 'Pull requests in Bitbucket', exact: true }).getByRole('link', { name: /^Open PR\s*:/ }).count(), 2, 'Each grouped PR is accessible even when publication is blocked.');
-  assert.equal(await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).isDisabled(), true);
+  assert.equal(await panel.getByRole('button', { name: 'Publish and request changes', exact: true }).isDisabled(), true);
   const stale = panel.locator('.feedback-publication').filter({ hasText: 'This comment needs current lines.' });
   await stale.getByRole('button', { name: 'Choose current lines…', exact: true }).click();
   await page.locator('.reanchor-banner').waitFor();
@@ -632,13 +633,14 @@ try {
   await panel.getByText('modules/docs · Create PR on publish', { exact: true }).waitFor();
   assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().remote.pullRequests)).length, 2, 'Draft comments do not create a PR.');
   await page.evaluate(() => window.integrationSmoke.failNextPublication());
-  await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).click();
+  await panel.getByRole('button', { name: 'Publish and request changes', exact: true }).click();
   await panel.getByText('Bitbucket is temporarily unavailable. Try publishing again.', { exact: true }).waitFor();
   await panel.getByRole('link', { name: /^Open PR\s*:\s*platform #11$/ }).click();
   assert.equal((await page.evaluate(() => window.integrationSmoke.inspect().calls.links)).at(-1), 'https://bitbucket.org/acme/platform/pull-requests/11', 'Publication failures retain the actual PR link for manual inspection.');
-  await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).click();
-  await panel.getByText('Feedback published to Bitbucket.', { exact: true }).waitFor();
-  assert.equal(await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).isDisabled(), true, 'Already-published comments cannot be posted twice.');
+  await panel.getByRole('button', { name: 'Publish and request changes', exact: true }).click();
+  await panel.getByText('Feedback published to Bitbucket. Changes requested on PR #11, PR #12, PR #13.', { exact: true }).waitFor();
+  assert.equal(await panel.getByRole('button', { name: 'Publish and request changes', exact: true }).isDisabled(), true, 'Already-published comments cannot be posted twice.');
+  assert.deepEqual((await page.evaluate(() => window.integrationSmoke.inspect().calls.requestChanges)).slice(-1), [true]);
   assert.equal(await panel.locator('.feedback-publication').count(), 0);
   await panel.getByRole('link', { name: /^Open PR\s*:\s*platform #11$/ }).click();
   await panel.getByRole('link', { name: /^Open PR\s*:\s*core #12$/ }).click();
@@ -656,8 +658,10 @@ try {
   await page.getByRole('button', { name: 'Publish feedback', exact: true }).click();
   panel = await dialog(page, 'Publish feedback');
   await panel.getByText('Updated feedback after the first publication.', { exact: true }).waitFor();
+  await panel.getByRole('checkbox', { name: /^Request changes on the pull request/ }).uncheck();
   await panel.getByRole('button', { name: 'Publish to Bitbucket', exact: true }).click();
   await panel.getByText('Feedback published to Bitbucket.', { exact: true }).waitFor();
+  assert.deepEqual((await page.evaluate(() => window.integrationSmoke.inspect().calls.requestChanges)).slice(-1), [false], 'Unchecking the option publishes without requesting changes.');
   await panel.getByRole('button', { name: 'Close dialog', exact: true }).click();
 
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1050, 680));

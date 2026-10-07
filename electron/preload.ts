@@ -79,8 +79,8 @@ const api: ReviewAPI = {
     return () => ipcRenderer.removeListener(reviewEvents.jiraBrowserClearTicket, listener);
   },
   setReviewTicket: (...args) => invoke('jira-ticket', ...args),
-  previewFeedback: (id) => invoke('feedback-preview', id),
-  publishFeedback: (id) => invoke('feedback-publish', id),
+  previewFeedback: (...args) => invoke('feedback-preview', ...args),
+  publishFeedback: (...args) => invoke('feedback-publish', ...args),
   reanchorComment: (...args) => invoke('feedback-reanchor', ...args),
   resolveCommentConflict: (...args) => invoke('feedback-conflict', ...args),
   resolveUnknownPublication: (...args) => invoke('feedback-unknown', ...args),

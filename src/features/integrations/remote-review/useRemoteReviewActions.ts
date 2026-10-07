@@ -30,6 +30,7 @@ export function useRemoteReviewActions({
   const [jiraError, setJiraError] = useState('');
   const [unknownIds, setUnknownIds] = useState<Record<string, string>>({});
   const [checkedDelivery, setCheckedDelivery] = useState<Record<string, boolean>>({});
+  const [requestChanges, setRequestChanges] = useState(true);
   const onRemoteRef = useRef(onRemote);
   onRemoteRef.current = onRemote;
   useEffect(() => {
@@ -63,10 +64,10 @@ export function useRemoteReviewActions({
         return;
       }
       if (action === 'publish') {
-        if (!(await onChanged())) {
-          setDialog(null);
-          return;
-        }
+        setRequestChanges(true);
+        // Publishing leaves the diff unchanged, so list local drafts at once and
+        // confirm them against Bitbucket instead of reloading every file.
+        setFeedback(await window.reviewAPI.previewFeedback(reviewId, { remote: false }));
         setFeedback(await window.reviewAPI.previewFeedback(reviewId));
       } else setMerge(await window.reviewAPI.previewMerge(reviewId, action));
       const state = await window.reviewAPI.getRemoteReview(reviewId);
@@ -89,10 +90,22 @@ export function useRemoteReviewActions({
         setDialog(null);
         return;
       }
-      const state =
-        dialog === 'publish'
-          ? await window.reviewAPI.publishFeedback(reviewId)
-          : await window.reviewAPI.runPullRequestAction(reviewId, dialog);
+      if (dialog === 'publish') {
+        const published = await window.reviewAPI.publishFeedback(reviewId, { requestChanges });
+        onRemote(published.state);
+        setFeedback(published.preview);
+        if (published.warnings.length) setError(published.warnings.join('\n'));
+        const requested = published.requestedChanges.length
+          ? ` Changes requested on ${published.requestedChanges.map((id) => `PR #${id}`).join(', ')}.`
+          : '';
+        setResult(
+          published.preview.items.length
+            ? `Completed items are saved.${requested} Review the remaining items below.`
+            : `Feedback published to Bitbucket.${requested}`,
+        );
+        return;
+      }
+      const state = await window.reviewAPI.runPullRequestAction(reviewId, dialog);
       onRemote(state);
       if (dialog === 'merge' && isMergeComplete(state)) {
         await onMergeComplete(state);
@@ -103,17 +116,7 @@ export function useRemoteReviewActions({
         setDialog(null);
         return;
       }
-      if (dialog === 'publish') {
-        const next = await window.reviewAPI.previewFeedback(reviewId);
-        setFeedback(next);
-        setResult(
-          next.items.length
-            ? 'Completed items are saved. Review the remaining items below.'
-            : 'Feedback published to Bitbucket.',
-        );
-      } else {
-        setMerge(await window.reviewAPI.previewMerge(reviewId, dialog));
-      }
+      setMerge(await window.reviewAPI.previewMerge(reviewId, dialog));
     } catch (reason) {
       setError(errorMessage(reason));
       const state = await window.reviewAPI.getRemoteReview(reviewId).catch(() => null);
@@ -179,6 +182,8 @@ export function useRemoteReviewActions({
     jiraError,
     unknownIds,
     checkedDelivery,
+    requestChanges,
+    setRequestChanges,
     view,
     preview,
     run,

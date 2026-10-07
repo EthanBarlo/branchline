@@ -23,10 +23,14 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const state = new IntegrationStore(join(directory, 'integrations.json')); await state.load();
   await state.setReview(review.id, { connectionId: 'bb', pullRequests: [structuredClone(basePR)], publications: {} });
   const live = { pr: structuredClone(basePR), file: structuredClone(baseFile), comments: [] as RemoteComment[], sent: [] as InlinePayload[], changes: [] as string[], nextId: 1,
-    fail: undefined as undefined | ((kind: string) => void), account: 'reviewer' };
+    fail: undefined as undefined | ((kind: string) => void), account: 'reviewer', calls: { get: 0, list: 0, requestChanges: 0 } };
   const client = {
-    async getPullRequest() { return structuredClone(live.pr); },
-    async listComments() { return structuredClone(live.comments); },
+    async getPullRequest() { live.calls.get++; return structuredClone(live.pr); },
+    async listComments() { live.calls.list++; return structuredClone(live.comments); },
+    async requestChanges() {
+      live.calls.requestChanges++; live.fail?.('requestChanges');
+      live.pr.participants = [...live.pr.participants.filter(p => p.id !== live.account), { id: live.account, approved: false, changesRequested: true }];
+    },
     async createComment(_pr: PullRequest, payload: InlinePayload) {
       live.sent.push(structuredClone(payload)); live.fail?.('beforeCreate');
       const comment: RemoteComment = { id: live.nextId++, authorId: live.account, body: payload.content.raw, resolved: false, deleted: false,
@@ -79,7 +83,7 @@ test('a push between preview and sending keeps drafts and sends no stale comment
   const f = await fixture(t); await f.add(); f.live.pr.sourceHash = hash('d');
   const result = await f.service.publish(f.review.id);
   assert.equal(f.live.sent.length, 0);
-  assert.match(Object.values(result.publications)[0].error!, /changed/);
+  assert.match(Object.values(result.state.publications)[0].error!, /changed/);
 });
 
 test('edits, resolutions and deletion update the same owned comment', async t => {
@@ -253,4 +257,99 @@ test('independent comments publish concurrently with three active deliveries and
   assert.equal(f.state.review(f.review.id)!.publications[comments[0].id].acknowledged?.body, 'note 0');
   assert.equal(f.reviews.getReview(f.review.id).comments[0].body, 'edited during delivery');
   assert.ok((await f.service.preview(f.review.id)).items.some(item => item.commentId === comments[0].id && item.action === 'update'));
+});
+
+test('publishing requests changes once per PR that received new feedback', async t => {
+  const f = await fixture(t);
+  await f.add(); await f.add({ body: 'Second note' });
+  const result = await f.service.publish(f.review.id, undefined, { requestChanges: true });
+  assert.equal(f.live.calls.requestChanges, 1);
+  assert.deepEqual(result.requestedChanges, [7]);
+  assert.deepEqual(result.warnings, []);
+  assert.ok(result.state.pullRequests[0].participants.some(p => p.id === 'reviewer' && p.changesRequested));
+  assert.equal(result.preview.items.length, 0);
+});
+
+test('request changes is skipped when off, already requested, or the reviewer authored the PR', async t => {
+  const f = await fixture(t);
+  await f.add();
+  await f.service.publish(f.review.id, undefined, { requestChanges: false });
+  assert.equal(f.live.calls.requestChanges, 0);
+  f.live.pr.participants = [{ id: 'reviewer', approved: false, changesRequested: true }];
+  await f.add({ body: 'Already requested' });
+  assert.deepEqual((await f.service.publish(f.review.id, undefined, { requestChanges: true })).requestedChanges, [7]);
+  assert.equal(f.live.calls.requestChanges, 0);
+  f.live.pr.participants = []; f.live.pr.author = { id: 'reviewer', name: 'Reviewer' };
+  await f.state.updateReview(f.review.id, r => { r.pullRequests[0] = structuredClone(f.live.pr); });
+  await f.add({ body: 'Own PR' });
+  assert.deepEqual((await f.service.publish(f.review.id, undefined, { requestChanges: true })).requestedChanges, []);
+  assert.equal(f.live.calls.requestChanges, 0);
+});
+
+test('request changes waits for every comment and ignores resolve-only batches', async t => {
+  const f = await fixture(t);
+  const comment = await f.add();
+  f.live.fail = kind => { if (kind === 'beforeCreate') throw Object.assign(new Error('Forbidden'), { status: 403 }); };
+  const failed = await f.service.publish(f.review.id, undefined, { requestChanges: true });
+  assert.equal(f.live.calls.requestChanges, 0);
+  assert.equal(failed.state.publications[comment.id].state, 'failed');
+  f.live.fail = undefined;
+  await f.service.publish(f.review.id, undefined, { requestChanges: false });
+  await f.reviews.updateComment(f.review.id, comment.id, { resolved: true });
+  await f.service.publish(f.review.id, undefined, { requestChanges: true });
+  assert.deepEqual(f.live.changes, ['resolve']);
+  assert.equal(f.live.calls.requestChanges, 0);
+});
+
+test('a failed change request keeps published feedback and reports a warning', async t => {
+  const f = await fixture(t);
+  const comment = await f.add();
+  f.live.fail = kind => { if (kind === 'requestChanges') throw new Error('Bitbucket unavailable'); };
+  const result = await f.service.publish(f.review.id, undefined, { requestChanges: true });
+  assert.equal(result.state.publications[comment.id].state, 'synced');
+  assert.deepEqual(result.requestedChanges, []);
+  assert.match(result.warnings[0], /requesting changes on PR #7 failed: Bitbucket unavailable/);
+});
+
+test('publishing reads each PR once before and once after its writes', async t => {
+  const f = await fixture(t);
+  for (let index = 0; index < 6; index++) await f.add({ body: `note ${index}` });
+  await f.service.publish(f.review.id);
+  assert.equal(f.live.sent.length, 6);
+  assert.equal(f.live.calls.list, 1, 'one comment baseline for the whole batch');
+  assert.equal(f.live.calls.get, 2, 'one revision check before and one after the batch');
+  const baselines = Object.values(f.state.review(f.review.id)!.publications).map(p => p.baselineIds!.length);
+  assert.equal(Math.max(...baselines) > 0, true, 'later creates exclude comments created earlier in the batch');
+});
+
+test('preview lists drafts without network reads and flags new PR commits', async t => {
+  const f = await fixture(t);
+  await f.add();
+  const local = await f.service.preview(f.review.id, { remote: false });
+  assert.equal(local.items.length, 1);
+  assert.deepEqual(f.live.calls, { get: 0, list: 0, requestChanges: 0 });
+  f.live.pr.sourceHash = hash('d');
+  const remote = await f.service.preview(f.review.id);
+  assert.match(remote.blockers.join('\n'), /New commits were pushed to PR #7/);
+  assert.match(remote.items[0].error!, /New commits/);
+  f.live.pr.sourceHash = hash('a'); f.live.pr.state = 'MERGED';
+  assert.match((await f.service.preview(f.review.id)).blockers.join('\n'), /no longer open/);
+});
+
+test('a moved target branch is adopted: published comments still update and drafts move to current lines', async t => {
+  const f = await fixture(t);
+  const published = await f.add();
+  await f.service.publish(f.review.id);
+  await f.reviews.updateComment(f.review.id, published.id, { body: 'Edited after main moved' });
+  const draft = await f.add({ body: 'Drafted before main moved' });
+  f.live.pr.targetHash = hash('e');
+  const preview = await f.service.preview(f.review.id);
+  assert.equal(f.state.review(f.review.id)!.pullRequests[0].targetHash, hash('e'));
+  assert.doesNotMatch(preview.blockers.join('\n'), /New commits/);
+  assert.equal(preview.items.find(item => item.commentId === published.id)!.error, undefined);
+  assert.match(preview.items.find(item => item.commentId === draft.id)!.error!, /Move this draft/);
+  await f.reviews.deleteComment(f.review.id, draft.id);
+  await f.service.publish(f.review.id);
+  assert.deepEqual(f.live.changes, ['update']);
+  assert.equal(f.live.comments[0].body, 'Edited after main moved');
 });

@@ -8,8 +8,10 @@ import type {
   ClosedReviewCheck,
   ClosedReviewCleanupResult,
   ConnectionInput,
+  FeedbackPreviewOptions,
   IntegrationState,
   ProjectIntegration,
+  PublishFeedbackOptions,
   PullRequestFilter,
   PullRequestRef,
   ReanchorInput,
@@ -761,17 +763,19 @@ export class IntegrationService {
   copyFeedback(id: string, contextKey?: string) {
     return this.localEdit(id, () => this.reviewService.copyFeedback(id, contextKey));
   }
-  previewFeedback(id: string) {
+  previewFeedback(id: string, options?: FeedbackPreviewOptions) {
     return this.serial(id, () => {
       this.requireLoaded(id);
-      return this.publication.preview(id);
+      return this.publication.preview(id, { remote: options?.remote !== false });
     });
   }
-  publishFeedback(id: string) {
+  publishFeedback(id: string, options?: PublishFeedbackOptions) {
     return this.serial(id, async () => {
       this.requireLoaded(id);
       try {
-        return await this.publication.publish(id, () => this.publishing.add(id));
+        return await this.publication.publish(id, () => this.publishing.add(id), {
+          requestChanges: options?.requestChanges === true,
+        });
       } finally {
         this.publishing.delete(id);
       }

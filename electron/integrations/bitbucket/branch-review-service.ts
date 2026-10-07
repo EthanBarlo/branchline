@@ -409,9 +409,14 @@ export class BranchReviewService {
       );
   }
 
-  async ensurePullRequests(id: string, repositoryPaths: string[]): Promise<void> {
+  /** `checked` skips the group preflight when the caller ran it in the same review operation. */
+  async ensurePullRequests(
+    id: string,
+    repositoryPaths: string[],
+    options: { checked?: boolean } = {},
+  ): Promise<void> {
     if (!repositoryPaths.length) return;
-    const blockers = await this.preflight(id);
+    const blockers = options.checked ? [] : await this.preflight(id);
     if (blockers.length) throw new Error(blockers.join('\n'));
     const client = this.client(this.binding(id).connectionId);
     await mapConcurrent([...new Set(repositoryPaths)], 4, async (repositoryPath) => {

@@ -263,6 +263,7 @@ export class BitbucketClient {
         ? value.participants.map((participant: any) => ({
             id: identity(participant.user),
             approved: participant.approved === true,
+            changesRequested: participant.state === 'changes_requested',
           }))
         : [],
       state: typeof value.state === 'string' ? value.state : 'UNKNOWN',
@@ -634,6 +635,10 @@ export class BitbucketClient {
   }
   async approve(pr: PullRequest): Promise<void> {
     await this.json(`${this.prPath(pr)}/approve`, { method: 'POST' });
+  }
+  /** Bitbucket keeps one review state per participant, so this replaces an approval. */
+  async requestChanges(pr: PullRequest): Promise<void> {
+    await this.json(`${this.prPath(pr)}/request-changes`, { method: 'POST' });
   }
   async merge(pr: PullRequest): Promise<{ pr?: PullRequest; taskId?: string }> {
     const response = await this.request(`${this.prPath(pr)}/merge`, {

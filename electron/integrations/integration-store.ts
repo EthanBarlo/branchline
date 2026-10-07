@@ -98,7 +98,11 @@ function validateState(value: unknown): asserts value is StoredIntegrations {
           pr.reviewers.every(person) &&
           Array.isArray(pr.participants) &&
           pr.participants.every(
-            (p: unknown) => record(p) && string(p.id) && typeof p.approved === 'boolean',
+            (p: unknown) =>
+              record(p) &&
+              string(p.id) &&
+              typeof p.approved === 'boolean' &&
+              (p.changesRequested === undefined || typeof p.changesRequested === 'boolean'),
           ) &&
           string(pr.state) &&
           typeof pr.draft === 'boolean' &&

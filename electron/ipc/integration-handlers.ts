@@ -99,8 +99,8 @@ export function registerIntegrationHandlers(
   handle('jira-ticket-suggestions', (id, query) => integrations.getJiraTicketSuggestions(id, query));
   handle('jira-ticket-link', (id) => integrations.getJiraTicketLink(id));
   handle('jira-ticket', (id, key, expectedBranch) => integrations.setReviewTicket(id, key, expectedBranch));
-  handle('feedback-preview', (id) => integrations.previewFeedback(id));
-  handle('feedback-publish', (id) => integrations.publishFeedback(id));
+  handle('feedback-preview', (id, options) => integrations.previewFeedback(id, options));
+  handle('feedback-publish', (id, options) => integrations.publishFeedback(id, options));
   handle('feedback-reanchor', (id, commentId, input) => integrations.reanchorComment(id, commentId, input));
   handle('feedback-conflict', (id, commentId, choice) =>
     integrations.resolveCommentConflict(id, commentId, choice),

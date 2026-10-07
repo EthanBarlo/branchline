@@ -41,6 +41,18 @@ const styles = stylex.create({
   pointerPreview: { display: 'block', marginTop: '13px' },
   modalChrome: { flexShrink: '0' },
   mergeJiraButton: { marginRight: 'auto' },
+  requestChanges: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '9px',
+    marginRight: 'auto',
+    maxWidth: '340px',
+    fontSize: typeScale.small,
+    color: colors.textPrimary,
+  },
+  requestChangesInput: { accentColor: colors.accent, marginTop: spacing.xxs, flexShrink: '0' },
+  requestChangesContent: { display: 'flex', flexDirection: 'column', gap: spacing.xxs },
+  requestChangesHint: { color: colors.textQuiet, fontSize: typeScale.caption },
   linkIcon: { flexShrink: '0' },
 });
 
@@ -62,9 +74,14 @@ const dialogContent = {
   },
 } satisfies Record<RemoteReviewAction, { title: string; introduction: string }>;
 
-function submitLabel(action: RemoteReviewAction, busy: boolean, view: RemoteReviewView): string {
+function submitLabel(
+  action: RemoteReviewAction,
+  busy: boolean,
+  view: RemoteReviewView,
+  requestChanges: boolean,
+): string {
   if (busy) return 'Working…';
-  if (action === 'publish') return 'Publish to Bitbucket';
+  if (action === 'publish') return requestChanges ? 'Publish and request changes' : 'Publish to Bitbucket';
   if (view.completed) return 'Complete';
   if (action === 'merge' && view.readyToFinish) return 'Finish review';
   if (view.visibleOperation && view.resumeNeeded) return 'Resume operation';
@@ -94,6 +111,8 @@ export function RemoteReviewDialog({
     error,
     result,
     jiraError,
+    requestChanges,
+    setRequestChanges,
     preview,
     run,
     openTicket,
@@ -121,7 +140,7 @@ export function RemoteReviewDialog({
         {loading && dialog === 'publish' && (
           <p className={`integration-loading ${stylex.props(styles.loading).className}`} role="status">
             <Spinner size={15} />
-            Checking the branch across all repositories…
+            Checking Bitbucket for changes…
           </p>
         )}
         {error && <Problem>{error}</Problem>}
@@ -186,6 +205,23 @@ export function RemoteReviewDialog({
         )}
       </div>
       <DialogFooter {...stylex.props(styles.modalChrome)}>
+        {dialog === 'publish' && (
+          <label {...stylex.props(styles.requestChanges)}>
+            <input
+              {...stylex.props(styles.requestChangesInput)}
+              type="checkbox"
+              checked={requestChanges}
+              disabled={busy}
+              onChange={(event) => setRequestChanges(event.target.checked)}
+            />
+            <span {...stylex.props(styles.requestChangesContent)}>
+              Request changes on the pull request
+              <span {...stylex.props(styles.requestChangesHint)}>
+                Applies to PRs that receive new or edited feedback and replaces your approval.
+              </span>
+            </span>
+          </label>
+        )}
         {dialog !== 'publish' && jiraLink && (
           <Button
             variant="secondary"
@@ -211,7 +247,7 @@ export function RemoteReviewDialog({
           onClick={() => void run()}
         >
           {busy && <Spinner size={13} />}
-          {submitLabel(dialog, busy, view)}
+          {submitLabel(dialog, busy, view, requestChanges)}
         </Button>
       </DialogFooter>
     </IntegrationDialog>
