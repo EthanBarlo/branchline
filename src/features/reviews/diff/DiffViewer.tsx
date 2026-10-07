@@ -16,9 +16,7 @@ import { captureCommentContext } from './commentPlacement';
 
 import { parseReviewDiff } from './diffParser';
 import { Spinner } from '../../../ui/Spinner';
-import { CommentContext } from './CommentContext';
 import { CommentEditor } from './CommentEditor';
-import { lineLabel } from './commentLineLabel';
 import { useCommentSessions, type CommentSessionOptions } from './useCommentSessions';
 import { useDiffAnnotations, type Annotation } from './useDiffAnnotations';
 interface DiffViewerProps extends CommentSessionOptions {
@@ -219,16 +217,13 @@ export function DiffViewer({
               .slice(placement.lineStart - 1, Math.min(placement.lineEnd, placement.lineStart + 7));
             return (
               <div key={session.id} {...stylex.props(index > 0 && styles.laterCollapsedComment)}>
-                <CommentContext label={lineLabel(placement)}>
-                  {lines.join('\n')}
-                  {placement.lineEnd - placement.lineStart >= 8 ? '\n…' : ''}
-                </CommentContext>
                 <CommentEditor
                   {...metadata}
                   isRemote={isRemote}
                   publication={publications?.[session.id]}
                   onBeginReanchor={onBeginReanchor}
                   inTopComments
+                  lineContext={`${lines.join('\n')}${placement.lineEnd - placement.lineStart >= 8 ? '\n…' : ''}`}
                 />
               </div>
             );

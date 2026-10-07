@@ -8,6 +8,14 @@ import { IconButton } from '../../ui/Button';
 import { errorMessage } from '../../lib/errorMessage';
 import { Spinner } from '../../ui/Spinner';
 import { PublicationStatus } from '../integrations/PublicationStatus';
+import {
+  CommentActionButton,
+  CommentActions,
+  commentCardProps,
+  EarlierVersionBadge,
+} from './comments/CommentChrome';
+import { ResolvedComment } from './comments/ResolvedComment';
+import { CommentContext } from './diff/CommentContext';
 import { flushPendingComments } from './diff/commentAutosave';
 import { fileLocation } from './fileLocation';
 
@@ -78,17 +86,23 @@ const styles = stylex.create({
   'feedback-card': {
     backgroundColor: colors.raised,
     borderWidth: '1px',
+    borderLeftWidth: '2px',
     borderStyle: 'solid',
     borderColor: colors.borderStrong,
+    borderLeftColor: colors.textFaint,
     borderRadius: radii.lg,
-    paddingTop: '11px',
-    paddingRight: '11px',
-    paddingBottom: '0',
+    paddingTop: '8px',
+    paddingRight: '8px',
+    paddingBottom: '9px',
     paddingLeft: '11px',
     marginBottom: '10px',
   },
-  'feedback-card.resolved': {
-    opacity: '.6',
+  staleCard: { borderLeftColor: colors.warningBorder },
+  feedbackCardHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: spacing.sm,
+    minHeight: 22,
   },
   'feedback-location': {
     display: 'flex',
@@ -99,7 +113,8 @@ const styles = stylex.create({
     borderWidth: 0,
     borderStyle: 'none',
     padding: '0',
-    width: '100%',
+    flex: '1',
+    minWidth: 0,
     textAlign: 'left',
   },
   'feedback-card-path': {
@@ -110,29 +125,19 @@ const styles = stylex.create({
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    marginBlock: '7px',
+    marginTop: '3px',
     marginInline: '0',
   },
   'feedback-card-meta': {
     display: 'flex',
+    flexWrap: 'wrap',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    fontSize: typeScale.micro,
+    fontSize: typeScale.caption,
+    lineHeight: '16px',
     color: colors.textQuiet,
-    gap: '10px',
-    marginBlock: '9px',
-    marginInline: '0',
   },
-  'feedback-card-actions': {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBlock: '9px',
-    paddingInline: '0',
-    borderTopWidth: '1px',
-    borderTopStyle: 'solid',
-    borderTopColor: colors.borderStrong,
-  },
+  metaItem: { display: 'inline-flex', alignItems: 'center' },
+  metaSeparator: { paddingInline: 6, color: colors.textFaint },
   'feedback-empty': {
     display: 'flex',
     flexDirection: 'column',
@@ -150,20 +155,6 @@ const styles = stylex.create({
     borderTopWidth: '1px',
     borderTopStyle: 'solid',
     borderTopColor: colors.borderStrong,
-  },
-  'saved-context': {
-    fontSize: typeScale.caption,
-    color: colors.textSubtle,
-    marginBottom: spacing.lg,
-  },
-  'comment-publication-row': {
-    display: 'flex',
-    gap: 10,
-    alignItems: 'center',
-    marginTop: 3,
-    marginRight: 0,
-    marginBottom: 5,
-    marginLeft: 0,
   },
   feedbackHeadingTitle: {
     display: 'flex',
@@ -204,9 +195,9 @@ const styles = stylex.create({
     lineHeight: 1.75,
     whiteSpace: 'pre-wrap',
     overflowWrap: 'anywhere',
-    marginTop: '11px',
+    marginTop: '4px',
     marginRight: '0',
-    marginBottom: '13px',
+    marginBottom: '6px',
     marginLeft: '0',
     color: colors.textDefault,
   },
@@ -217,29 +208,6 @@ const styles = stylex.create({
     color: colors.textTertiary,
     fontSize: typeScale.caption,
   },
-  savedContextSummary: { cursor: 'pointer' },
-  savedContextCode: {
-    whiteSpace: 'pre-wrap',
-    fontSize: typeScale.caption,
-    lineHeight: 1.7,
-    overflowWrap: 'anywhere',
-    padding: spacing.md,
-    backgroundColor: colors.panel,
-    borderRadius: radii.md,
-    maxHeight: 170,
-    overflowY: 'auto',
-  },
-  feedbackActionButton: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: spacing.xs,
-    padding: 0,
-    borderWidth: 0,
-    backgroundColor: 'transparent',
-    color: { default: colors.textMuted, ':hover': colors.textDefault },
-    fontSize: typeScale.caption,
-  },
-  resolvedFeedbackAction: { color: colors.textDefault },
   feedbackEmptyTitle: {
     fontSize: typeScale.base,
     fontWeight: 500,
@@ -337,87 +305,96 @@ export function FeedbackPanel({
           comments.map((comment) => {
             const file = files.find((item) => item.id === comment.fileId);
             const stale = !file || file.fingerprint !== comment.fingerprint;
+            const lines =
+              comment.lineStart === 0
+                ? 'File'
+                : `L${comment.lineStart}${comment.lineEnd !== comment.lineStart ? `–${comment.lineEnd}` : ''}`;
+            const publication = review.remote && (
+              <PublicationStatus publication={remote?.publications[comment.id]} comment={comment} />
+            );
+            const savedContext = stale && comment.context && (
+              <CommentContext reference={fileLocation(comment)}>{comment.context}</CommentContext>
+            );
+            const toggleResolved = () =>
+              void action(comment.id, () => onUpdate(comment.id, { resolved: !comment.resolved }));
+            const remove = () => void action(comment.id, () => onDelete(comment.id));
+            if (comment.resolved)
+              return (
+                <ResolvedComment
+                  key={comment.id}
+                  className="feedback-card resolved"
+                  variant="block"
+                  location={`${comment.path.split('/').pop()} · ${lines}`}
+                  body={comment.body}
+                  context={savedContext || undefined}
+                  status={publication || undefined}
+                  busy={busy === comment.id}
+                  onReopen={toggleResolved}
+                  onDelete={remove}
+                />
+              );
             return (
-              <article
+              <FeedbackCard
                 key={comment.id}
-                className={`feedback-card ${comment.resolved ? 'resolved' : ''} ${stylex.props(styles['feedback-card'], comment.resolved && styles['feedback-card.resolved']).className}`}
-              >
-                <button
-                  className={`feedback-location ${stylex.props(styles['feedback-location']).className}`}
-                  onClick={() => onSelect(comment.fileId)}
-                  disabled={!file}
-                  title={fileLocation(comment)}
-                >
-                  <FileCode2 size={13} className={stylex.props(styles.feedbackLocationIcon).className} />
-                  <span {...stylex.props(styles.feedbackLocationName)}>{comment.path.split('/').pop()}</span>
-                  <code {...stylex.props(styles.feedbackLocationCode)}>
-                    {comment.lineStart === 0
-                      ? 'File'
-                      : `L${comment.lineStart}${comment.lineEnd !== comment.lineStart ? `–${comment.lineEnd}` : ''}`}
-                  </code>
-                  <ArrowDownLeft size={12} className={stylex.props(styles.feedbackLocationIcon).className} />
-                </button>
-                <span
-                  className={`feedback-card-path ${stylex.props(styles['feedback-card-path']).className}`}
-                  title={fileLocation(comment)}
-                >
-                  {fileLocation(comment)}
-                </span>
-                <div className={`feedback-card-meta ${stylex.props(styles['feedback-card-meta']).className}`}>
-                  <span>{comment.side === 'deletions' ? 'Original version' : 'Feature version'}</span>
-                  {stale && (
-                    <span className={`stale-label ${stylex.props(styles.staleLabel).className}`}>
-                      Earlier revision
+                stale={stale}
+                savedContext={savedContext || undefined}
+                header={
+                  <button
+                    className={`feedback-location ${stylex.props(styles['feedback-location']).className}`}
+                    onClick={() => onSelect(comment.fileId)}
+                    disabled={!file}
+                    title={fileLocation(comment)}
+                  >
+                    <FileCode2 size={13} className={stylex.props(styles.feedbackLocationIcon).className} />
+                    <span {...stylex.props(styles.feedbackLocationName)}>
+                      {comment.path.split('/').pop()}
                     </span>
-                  )}
-                </div>
-                <p {...stylex.props(styles.feedbackBody)}>{comment.body}</p>
-                {review.remote && (
-                  <div
-                    className={`comment-publication-row ${stylex.props(styles['comment-publication-row']).className}`}
-                  >
-                    <PublicationStatus publication={remote?.publications[comment.id]} comment={comment} />
-                    {!remote?.publications[comment.id]?.remoteId && (
-                      <button
-                        type="button"
-                        {...stylex.props(styles.publicationButton)}
-                        onClick={() => onReanchor(comment.id)}
-                      >
-                        Choose current lines…
-                      </button>
-                    )}
-                  </div>
-                )}
-                {stale && comment.context && (
-                  <details className={`saved-context ${stylex.props(styles['saved-context']).className}`}>
-                    <summary {...stylex.props(styles.savedContextSummary)}>Saved line context</summary>
-                    <pre {...stylex.props(styles.savedContextCode)}>{comment.context}</pre>
-                  </details>
-                )}
-                <div
-                  className={`feedback-card-actions ${stylex.props(styles['feedback-card-actions']).className}`}
-                >
-                  <button
-                    className={`${comment.resolved ? 'comment-resolved' : ''} ${stylex.props(styles.feedbackActionButton, comment.resolved && styles.resolvedFeedbackAction).className}`}
-                    disabled={busy === comment.id}
-                    onClick={() =>
-                      void action(comment.id, () => onUpdate(comment.id, { resolved: !comment.resolved }))
-                    }
-                  >
-                    {busy === comment.id ? <Spinner size={13} /> : <Check size={13} />}
-                    {comment.resolved ? 'Reopen' : 'Resolve'}
+                    <code {...stylex.props(styles.feedbackLocationCode)}>{lines}</code>
+                    <ArrowDownLeft
+                      size={12}
+                      className={stylex.props(styles.feedbackLocationIcon).className}
+                    />
                   </button>
-                  <button
-                    {...stylex.props(styles.feedbackActionButton)}
-                    disabled={busy === comment.id}
-                    onClick={() => void action(comment.id, () => onDelete(comment.id))}
-                    aria-label={`Delete comment on ${comment.path} line ${comment.lineStart}`}
-                    title="Delete comment"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              </article>
+                }
+                actions={
+                  <CommentActions visible={busy === comment.id}>
+                    <CommentActionButton
+                      disabled={busy === comment.id}
+                      onClick={toggleResolved}
+                      aria-label={`Resolve comment on ${comment.path} line ${comment.lineStart}`}
+                      title="Resolve"
+                    >
+                      {busy === comment.id ? <Spinner size={13} /> : <Check size={13} />}
+                    </CommentActionButton>
+                    <CommentActionButton
+                      disabled={busy === comment.id}
+                      onClick={remove}
+                      aria-label={`Delete comment on ${comment.path} line ${comment.lineStart}`}
+                      title="Delete comment"
+                    >
+                      <Trash2 size={12} />
+                    </CommentActionButton>
+                  </CommentActions>
+                }
+                path={fileLocation(comment)}
+                body={comment.body}
+                meta={[
+                  <span key="side">
+                    {comment.side === 'deletions' ? 'Original version' : 'Feature version'}
+                  </span>,
+                  publication && <span key="publication">{publication}</span>,
+                  review.remote && !remote?.publications[comment.id]?.remoteId && (
+                    <button
+                      key="reanchor"
+                      type="button"
+                      {...stylex.props(styles.publicationButton)}
+                      onClick={() => onReanchor(comment.id)}
+                    >
+                      Choose current lines…
+                    </button>
+                  ),
+                ]}
+              />
             );
           })
         ) : (
@@ -437,5 +414,65 @@ export function FeedbackPanel({
         <span {...stylex.props(styles.feedbackFootnote)}>Unresolved comments · paths · line references</span>
       </div>
     </aside>
+  );
+}
+
+function FeedbackCard({
+  stale,
+  savedContext,
+  header,
+  actions,
+  path,
+  body,
+  meta,
+}: {
+  stale: boolean;
+  savedContext?: React.ReactNode;
+  header: React.ReactNode;
+  actions: React.ReactNode;
+  path: string;
+  body: string;
+  meta: React.ReactNode[];
+}) {
+  const [showEarlier, setShowEarlier] = useState(false);
+  const items = meta.filter(Boolean);
+  return (
+    <article
+      {...commentCardProps}
+      className={`feedback-card ${stylex.props(stylex.defaultMarker(), styles['feedback-card'], stale && styles.staleCard).className}`}
+    >
+      <div {...stylex.props(styles.feedbackCardHeader)}>
+        {header}
+        {actions}
+      </div>
+      <span
+        className={`feedback-card-path ${stylex.props(styles['feedback-card-path']).className}`}
+        title={path}
+      >
+        {path}
+      </span>
+      <p {...stylex.props(styles.feedbackBody)}>{body}</p>
+      {showEarlier && savedContext}
+      <div className={`feedback-card-meta ${stylex.props(styles['feedback-card-meta']).className}`}>
+        {stale &&
+          (savedContext ? (
+            <EarlierVersionBadge expanded={showEarlier} onToggle={() => setShowEarlier((value) => !value)} />
+          ) : (
+            <span className={`stale-label ${stylex.props(styles.staleLabel).className}`}>
+              Earlier version
+            </span>
+          ))}
+        {items.map((item, index) => (
+          <span key={index} {...stylex.props(styles.metaItem)}>
+            {(index > 0 || stale) && (
+              <span aria-hidden {...stylex.props(styles.metaSeparator)}>
+                ·
+              </span>
+            )}
+            {item}
+          </span>
+        ))}
+      </div>
+    </article>
   );
 }
