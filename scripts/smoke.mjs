@@ -296,10 +296,18 @@ try {
   await editor.waitFor({ state: 'hidden' });
   await page.getByText(feedback, { exact: true }).first().waitFor();
   await page.locator('[data-active-diff]').getByRole('button', { name: 'Resolve comment', exact: true }).click();
-  await page.locator('[data-active-diff]').getByRole('button', { name: 'Reopen comment', exact: true }).waitFor();
+  // Resolved feedback collapses to a marker on its line; the comment lives in a popover.
+  const resolvedMarker = page.locator('[data-active-diff]').getByRole('button', { name: 'Show resolved comment', exact: true });
+  await resolvedMarker.waitFor();
   assert.equal((await readState(page)).reviews.find(review => review.id === reviewId).comments[0].resolved, true);
-  await page.locator('[data-active-diff]').getByRole('button', { name: 'Reopen comment', exact: true }).click();
+  assert.equal(await page.locator('.review-code-diff').getByText(feedback, { exact: true }).count(), 0, 'Resolved feedback should not stay expanded in the diff.');
+  await resolvedMarker.hover();
+  const resolvedPopover = page.getByRole('dialog', { name: /^Resolved comment/ });
+  await resolvedPopover.getByText(feedback, { exact: true }).waitFor();
+  await page.screenshot({ path: 'artifacts/resolved-comment.png', animations: 'disabled' });
+  await resolvedPopover.getByRole('button', { name: 'Reopen comment', exact: true }).click();
   await page.locator('[data-active-diff]').getByRole('button', { name: 'Resolve comment', exact: true }).waitFor();
+  await resolvedPopover.waitFor({ state: 'detached' });
 
   // Leaving a file immediately must flush its pending comment before navigation.
   const temporaryFeedback = 'This comment must survive an immediate file switch.';

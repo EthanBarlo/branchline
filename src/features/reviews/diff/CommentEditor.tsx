@@ -1,9 +1,16 @@
 import * as stylex from '@stylexjs/stylex';
-import { Check, RotateCcw, Trash2 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
+import { Check, Trash2 } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { CommentPublication } from '../../../../shared/integrations';
 import { colors, fonts, radii, spacing, typeScale } from '../../../theme/tokens.stylex';
 import { PublicationStatus } from '../../integrations/PublicationStatus';
+import {
+  CommentActionButton,
+  CommentActions,
+  commentCardProps,
+  EarlierVersionBadge,
+} from '../comments/CommentChrome';
+import { ResolvedComment } from '../comments/ResolvedComment';
 import { CommentAutosave } from './commentAutosave';
 import { type CommentPlacement } from './commentPlacement';
 
@@ -17,6 +24,7 @@ export function CommentEditor({
   publication,
   onBeginReanchor,
   inTopComments = false,
+  lineContext,
 }: {
   session: CommentAutosave;
   outdated?: boolean;
@@ -25,10 +33,13 @@ export function CommentEditor({
   publication?: CommentPublication;
   onBeginReanchor?: (id: string) => void;
   inTopComments?: boolean;
+  /** Current code for comments shown away from their line. */
+  lineContext?: string;
 }) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const container = useRef<HTMLElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const [showEarlier, setShowEarlier] = useState(false);
   useEffect(() => session.mount(), [session]);
   useLayoutEffect(() => {
     const input = textarea.current;
@@ -50,23 +61,115 @@ export function CommentEditor({
   }, [state.editing, session]);
 
   if (state.removed) return null;
+  const label = lineLabel(placement ?? session.anchor);
+  const location = label.charAt(0).toUpperCase() + label.slice(1);
+  const earlier = outdated && (
+    <CommentContext reference={`${session.anchor.path} · ${lineLabel(session.anchor)}`}>
+      {session.anchor.context || undefined}
+    </CommentContext>
+  );
+  const publicationStatus = isRemote && (
+    <PublicationStatus publication={publication} comment={{ body: state.body, resolved: state.resolved }} />
+  );
+  const dataAttributes = {
+    'data-comment-id': session.id,
+    'data-comment-side': placement?.side,
+    'data-comment-line': placement?.lineEnd,
+    'aria-label': `Comment, ${lineLabel(session.anchor)}`,
+  };
+
+  if (state.resolved && !state.editing) {
+    return (
+      <ResolvedComment
+        {...dataAttributes}
+        className="review-comment compact-comment is-resolved"
+        variant={inTopComments ? 'block' : 'inline'}
+        location={outdated ? `${location} · earlier version` : location}
+        body={state.body}
+        context={
+          (lineContext || outdated) && (
+            <>
+              {lineContext && <CommentContext>{lineContext}</CommentContext>}
+              {earlier}
+            </>
+          )
+        }
+        status={
+          state.error ? (
+            <span role="alert" {...stylex.props(styles.saveError)}>
+              {state.error}
+            </span>
+          ) : (
+            publicationStatus || undefined
+          )
+        }
+        busy={state.busy}
+        onReopen={() => void session.resolve().catch(() => {})}
+        onDelete={() => void session.delete().catch(() => {})}
+      />
+    );
+  }
+
+  const saveStatus = state.error
+    ? 'Not saved'
+    : state.saving || session.hasUnsavedText()
+      ? 'Saving…'
+      : state.persisted
+        ? 'Saved'
+        : '';
+  const canReanchor =
+    isRemote &&
+    outdated &&
+    !publication?.remoteId &&
+    publication?.state !== 'unknown' &&
+    publication?.state !== 'sending';
+  const meta: ReactNode[] = [];
+  if (publicationStatus) meta.push(publicationStatus);
+  if (canReanchor)
+    meta.push(
+      <button
+        type="button"
+        {...stylex.props(styles.publicationButton)}
+        disabled={state.busy}
+        onClick={() => onBeginReanchor?.(session.id)}
+      >
+        Choose current lines…
+      </button>,
+    );
+
   return (
     <article
       ref={container}
-      data-comment-id={session.id}
-      data-comment-side={placement?.side}
-      data-comment-line={placement?.lineEnd}
-      className={`review-comment compact-comment ${state.editing ? 'is-editing' : ''} ${state.resolved ? 'is-resolved' : ''} ${stylex.props(styles.comment, inTopComments && styles.topComment, state.editing && styles.editingComment, state.resolved && styles.resolvedComment).className}`}
-      aria-label={`Comment, ${lineLabel(session.anchor)}`}
+      {...dataAttributes}
+      {...commentCardProps}
+      className={`review-comment compact-comment ${state.editing ? 'is-editing' : ''} ${stylex.props(stylex.defaultMarker(), styles.comment, inTopComments && styles.topComment, outdated && styles.outdatedComment, state.editing && styles.editingComment).className}`}
     >
-      {outdated && (
-        <CommentContext
-          label="Earlier version"
-          reference={`${session.anchor.path} · ${lineLabel(session.anchor)}`}
-        >
-          {session.anchor.context || undefined}
-        </CommentContext>
-      )}
+      <header {...stylex.props(styles.header)}>
+        <span {...stylex.props(styles.location)}>{location}</span>
+        {outdated && (
+          <EarlierVersionBadge expanded={showEarlier} onToggle={() => setShowEarlier((value) => !value)} />
+        )}
+        <CommentActions visible={state.editing}>
+          <CommentActionButton
+            aria-label="Resolve comment"
+            title="Resolve"
+            disabled={state.busy || (!state.persisted && !state.body.trim())}
+            onClick={() => void session.resolve().catch(() => {})}
+          >
+            <Check size={13} />
+          </CommentActionButton>
+          <CommentActionButton
+            aria-label="Delete comment"
+            title="Delete"
+            disabled={state.busy}
+            onClick={() => void session.delete().catch(() => {})}
+          >
+            <Trash2 size={12} />
+          </CommentActionButton>
+        </CommentActions>
+      </header>
+      {lineContext && <CommentContext>{lineContext}</CommentContext>}
+      {showEarlier && earlier}
       {state.editing ? (
         <textarea
           ref={textarea}
@@ -87,7 +190,7 @@ export function CommentEditor({
         />
       ) : (
         <button
-          className={`review-comment-body ${stylex.props(styles.commentBody, state.resolved && styles.resolvedCommentBody).className}`}
+          className={`review-comment-body ${stylex.props(styles.commentBody).className}`}
           type="button"
           aria-label="Edit comment"
           onClick={() => session.edit()}
@@ -95,67 +198,28 @@ export function CommentEditor({
           {state.body}
         </button>
       )}
-      <div className={`compact-comment-actions ${stylex.props(styles.commentActions).className}`}>
+      <footer className={`comment-meta ${stylex.props(styles.meta).className}`}>
         <span
           className={`comment-save-status ${state.error ? 'has-error' : ''} ${stylex.props(styles.saveStatus, Boolean(state.error) && styles.saveError).className}`}
           role="status"
         >
-          {state.error
-            ? 'Not saved'
-            : state.saving || session.hasUnsavedText()
-              ? 'Saving…'
-              : state.persisted
-                ? 'Saved'
-                : ''}
+          {saveStatus}
         </span>
-        <button
-          {...stylex.props(styles.commentActionButton)}
-          type="button"
-          aria-label="Delete comment"
-          disabled={state.busy}
-          onClick={() => void session.delete().catch(() => {})}
-        >
-          <Trash2 size={12} />
-          Delete
-        </button>
-        <button
-          {...stylex.props(styles.commentActionButton)}
-          type="button"
-          aria-label={state.resolved ? 'Reopen comment' : 'Resolve comment'}
-          disabled={state.busy || (!state.persisted && !state.body.trim())}
-          onClick={() => void session.resolve().catch(() => {})}
-        >
-          {state.resolved ? <RotateCcw size={12} /> : <Check size={12} />}
-          {state.resolved ? 'Reopen' : 'Resolve'}
-        </button>
-      </div>
+        {meta.map((item, index) => (
+          <span key={index} {...stylex.props(styles.metaItem)}>
+            {(saveStatus || index > 0) && (
+              <span aria-hidden {...stylex.props(styles.metaSeparator)}>
+                ·
+              </span>
+            )}
+            {item}
+          </span>
+        ))}
+      </footer>
       {state.error && (
         <p className={`review-component-error ${stylex.props(styles.componentError).className}`} role="alert">
           {state.error}
         </p>
-      )}
-      {isRemote && (
-        <div
-          className={`comment-publication-row ${stylex.props(styles['comment-publication-row']).className}`}
-        >
-          <PublicationStatus
-            publication={publication}
-            comment={{ body: state.body, resolved: state.resolved }}
-          />
-          {outdated &&
-            !publication?.remoteId &&
-            publication?.state !== 'unknown' &&
-            publication?.state !== 'sending' && (
-              <button
-                type="button"
-                {...stylex.props(styles.publicationButton)}
-                disabled={state.busy}
-                onClick={() => onBeginReanchor?.(session.id)}
-              >
-                Choose current lines…
-              </button>
-            )}
-        </div>
       )}
     </article>
   );
@@ -170,13 +234,15 @@ const styles = stylex.create({
     marginLeft: '12px',
     minWidth: 0,
     maxWidth: 860,
-    paddingTop: '7px',
-    paddingRight: '9px',
+    paddingTop: '5px',
+    paddingRight: '8px',
     paddingBottom: '5px',
-    paddingLeft: '9px',
+    paddingLeft: '11px',
     borderWidth: '1px',
+    borderLeftWidth: '2px',
     borderStyle: 'solid',
-    borderColor: colors.hover,
+    borderColor: colors.interactive,
+    borderLeftColor: colors.textFaint,
     borderRadius: 5,
     backgroundColor: colors.surface,
     color: colors.textPrimary,
@@ -185,18 +251,30 @@ const styles = stylex.create({
     lineHeight: 1.65,
     textAlign: 'left',
     letterSpacing: 'normal',
+    transition: 'border-color 120ms, background-color 120ms',
   },
   topComment: {
     marginBlock: '6px',
     marginInline: '0',
   },
+  outdatedComment: {
+    borderLeftColor: colors.warningBorder,
+  },
   editingComment: {
-    borderColor: colors.textFaint,
+    borderColor: colors.hover,
+    borderLeftColor: colors.textMuted,
     backgroundColor: colors.raised,
   },
-  resolvedComment: {
-    borderColor: colors.interactive,
-    backgroundColor: colors.panel,
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: spacing.md,
+    minHeight: 22,
+  },
+  location: {
+    color: colors.textQuiet,
+    fontSize: typeScale.caption,
+    whiteSpace: 'nowrap',
   },
   commentBody: {
     display: 'block',
@@ -218,7 +296,6 @@ const styles = stylex.create({
     outline: { default: 'none', ':focus-visible': `2px solid ${colors.focus}` },
     outlineOffset: { default: 0, ':focus-visible': 2 },
   },
-  resolvedCommentBody: { color: colors.textMuted },
   commentInput: {
     boxSizing: 'border-box',
     display: 'block',
@@ -226,7 +303,9 @@ const styles = stylex.create({
     minWidth: 0,
     minHeight: 32,
     maxHeight: 220,
-    margin: 0,
+    marginTop: 2,
+    marginInline: 0,
+    marginBottom: 0,
     paddingBlock: '5px',
     paddingInline: '7px',
     borderWidth: '1px',
@@ -243,34 +322,18 @@ const styles = stylex.create({
     outline: 'none',
     '::placeholder': { color: colors.textQuiet },
   },
-  commentActions: {
+  meta: {
     display: 'flex',
+    flexWrap: 'wrap',
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 7,
-    minHeight: 23,
-    paddingTop: 3,
-  },
-  commentActionButton: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingBlock: '2px',
-    paddingInline: '3px',
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: { default: 'transparent', ':hover:not(:disabled)': colors.hover },
-    color: { default: colors.textSubtle, ':hover:not(:disabled)': colors.textDefault },
-    fontFamily: fonts.body,
+    marginTop: 2,
+    color: colors.textFaint,
     fontSize: typeScale.caption,
-    lineHeight: '14px',
-    cursor: { default: 'pointer', ':disabled': 'default' },
-    opacity: { default: 1, ':disabled': 0.4 },
-    outline: { default: 'none', ':focus-visible': `2px solid ${colors.focus}` },
-    outlineOffset: { default: 0, ':focus-visible': 2 },
+    lineHeight: '16px',
   },
+  metaItem: { display: 'inline-flex', alignItems: 'center' },
+  metaSeparator: { paddingInline: 6, color: colors.textFaint },
   saveStatus: {
-    marginRight: 'auto',
     color: colors.textFaint,
     fontSize: typeScale.caption,
   },
@@ -290,16 +353,10 @@ const styles = stylex.create({
     backgroundColor: 'transparent',
     borderWidth: 0,
     padding: 0,
-    color: colors.textTertiary,
+    color: { default: colors.textTertiary, ':hover:not(:disabled)': colors.textDefault },
+    fontFamily: fonts.body,
     fontSize: typeScale.caption,
-  },
-  'comment-publication-row': {
-    display: 'flex',
-    gap: 10,
-    alignItems: 'center',
-    marginTop: 3,
-    marginRight: 0,
-    marginBottom: 5,
-    marginLeft: 0,
+    textDecorationLine: { default: 'none', ':hover': 'underline' },
+    cursor: 'pointer',
   },
 });
