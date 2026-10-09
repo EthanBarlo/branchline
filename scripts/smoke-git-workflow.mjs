@@ -261,11 +261,14 @@ try {
   await remoteReview.getByRole('button', { name: 'Cancel', exact: true }).click();
   await tree.getByRole('treeitem', { name: 'origin/main', exact: true }).click({ button: 'right' });
   assert.equal(await page.getByRole('menu').getByRole('menuitem', { name: 'Rename…', exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole('menu').getByRole('menuitem', { name: 'Push project', exact: true }).isDisabled(), true);
   await page.keyboard.press('Escape');
   await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).click({ button: 'right' });
   let menu = page.getByRole('menu', { name: 'Branch actions for codex/submodule-only', exact: true });
   assert.equal(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).getAttribute('aria-selected'), 'true');
-  for (const name of ['Review branch…', 'Pull project', 'Push project']) assert.equal(await menu.getByRole('menuitem', { name, exact: true }).isDisabled(), true);
+  for (const name of ['Review branch…', 'Pull project']) assert.equal(await menu.getByRole('menuitem', { name, exact: true }).isDisabled(), true);
+  // Any local branch can be pushed, even one that is not checked out everywhere.
+  assert.equal(await menu.getByRole('menuitem', { name: 'Push project', exact: true }).isDisabled(), false);
   await page.keyboard.press('Escape');
   assert.equal(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).evaluate(element => element === document.activeElement), true);
   assert.match(await tree.getByRole('treeitem', { name: 'codex/submodule-only', exact: true }).innerText(), /\[packages\/core\]/);
@@ -313,6 +316,9 @@ try {
   assert.equal(await menu.getByRole('menuitem', { name: 'Delete branch…', exact: true }).evaluate(element => element === document.activeElement), true);
   await page.keyboard.press('ArrowUp');
   assert.equal(await menu.getByRole('menuitem', { name: 'Rename…', exact: true }).evaluate(element => element === document.activeElement), true);
+  await page.keyboard.press('ArrowUp');
+  assert.equal(await menu.getByRole('menuitem', { name: 'Push project', exact: true }).evaluate(element => element === document.activeElement), true);
+  // Disabled Pull is skipped.
   await page.keyboard.press('ArrowUp');
   assert.equal(await menu.getByRole('menuitem', { name: 'Fetch project', exact: true }).evaluate(element => element === document.activeElement), true);
   await page.keyboard.press('Escape');
@@ -519,11 +525,23 @@ try {
   assert.equal(git(leaf, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   await panel.getByRole('treeitem', { name: 'feature/demo', exact: true }).click({ button: 'right' });
   await page.getByRole('menu', { name: 'Branch actions for feature/demo', exact: true }).getByRole('menuitem', { name: 'Push project', exact: true }).click();
-  // Only the missing publish remote choice interrupts a push; choosing it starts the push.
+  // Creating remote branches asks first; choosing the missing publish remote rechecks in place.
   const pushPreview = page.getByRole('dialog', { name: 'Push preview', exact: true });
-  assert.equal(await pushPreview.getByRole('button', { name: 'Confirm push', exact: true }).isDisabled(), true);
+  const confirmPush = pushPreview.getByRole('button', { name: 'Confirm push', exact: true });
+  assert.equal(await confirmPush.isDisabled(), true);
   await pushPreview.getByRole('combobox', { name: 'Publish remote for .', exact: true }).click();
   await page.getByRole('option', { name: 'origin', exact: true }).click();
+  await pushPreview.getByText('New remote branch', { exact: true }).nth(2).waitFor();
+  // Each repository has its own checkbox; leaving one out rechecks without starting the push.
+  assert.equal(await pushPreview.getByRole('checkbox').count(), 3);
+  const nestedChoice = pushPreview.getByRole('checkbox', { name: 'Push packages/core/nested', exact: true });
+  await nestedChoice.uncheck();
+  await pushPreview.getByText('Skipped', { exact: true }).waitFor();
+  if (process.env.BRANCHLINE_PUSH_PREVIEW_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_PUSH_PREVIEW_SCREENSHOT });
+  assert.equal(await page.getByRole('dialog').count(), 1);
+  await nestedChoice.check();
+  await pushPreview.getByText('Skipped', { exact: true }).waitFor({ state: 'detached' });
+  await confirmPush.click();
   await toast('Push completed').waitFor();
   assert.equal(await toastSeen('loading:Pushing feature/demo…'), true);
   // The loading toast carries a progress bar that fills before the result replaces it.
@@ -531,6 +549,21 @@ try {
   assert.equal(await toastSeen('progress:Pushing feature/demo…:100'), true);
   assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(git(remote, 'rev-parse', 'feature/demo'), git(local, 'rev-parse', 'HEAD'));
+  // A branch that is not checked out and has no new commits can still be pushed.
+  await waitForGitIdle();
+  await branchAction('codex/root-only', 'Push project');
+  const rootOnlyPush = page.getByRole('dialog', { name: 'Push preview', exact: true });
+  // The publish remote chosen earlier is remembered, so the preview arrives ready.
+  await rootOnlyPush.getByText('New remote branch', { exact: true }).waitFor();
+  assert.match(await rootOnlyPush.getByRole('combobox', { name: 'Publish remote for .', exact: true }).innerText(), /origin/);
+  // Only the root has this branch, so there is nothing to leave out.
+  assert.equal(await rootOnlyPush.getByRole('checkbox').count(), 0);
+  await rootOnlyPush.getByRole('button', { name: 'Confirm push', exact: true }).click();
+  await page.waitForFunction(() => window.gitToastSmoke.includes('progress:Pushing codex/root-only…:100'));
+  await waitForGitIdle();
+  assert.equal(git(remote, 'rev-parse', 'codex/root-only'), git(local, 'rev-parse', 'codex/root-only'));
+  assert.equal(git(local, 'config', 'branch.codex/root-only.merge'), 'refs/heads/codex/root-only');
+  assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'feature/demo');
   // Renaming a current branch also updates nested checkouts and keeps remote tracking destinations.
   for (const [source, target] of [['feature/demo', 'feature/context-current'], ['feature/context-current', 'feature/demo']]) {
     await panel.getByRole('treeitem', { name: source, exact: true }).click({ button: 'right' });

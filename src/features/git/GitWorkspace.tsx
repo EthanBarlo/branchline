@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import type { GitAction, GitActionInput, GitActionPreview } from '../../../shared/git-workflow';
+import type { GitAction, GitActionInput, GitActionPreview, GitActionRow } from '../../../shared/git-workflow';
 import type { Project } from '../../../shared/types';
 import { errorMessage } from '../../lib/errorMessage';
 import { colors, spacing, typeScale } from '../../theme/tokens.stylex';
@@ -10,7 +10,7 @@ import { FormError } from '../../ui/Field';
 import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import type { GitBranchMenuAction } from './GitBranchMenu';
 import { GitBranchNameDialog } from './GitBranchNameDialog';
-import { GitActionConfirmation, type GitPreviewMode } from './GitActionConfirmation';
+import { GitActionConfirmation, createsRemoteBranch, type GitPreviewMode } from './GitActionConfirmation';
 import { GitBranchSidebar } from './GitBranchSidebar';
 import { branchKey, sidebarBranches, type GitSidebarBranch } from './branchTree';
 import { useGitBranchFavourites } from './useGitBranchFavourites';
@@ -61,6 +61,7 @@ export function GitWorkspace({
     deleteRemote: boolean;
     remotes: Record<string, string>;
   }>();
+  const [pushSelection, setPushSelection] = useState<{ branch: GitSidebarBranch; skip: string[] }>();
   const [checking, setChecking] = useState(false);
   const [preview, setPreview] = useState<GitActionPreview>();
   const [previewMode, setPreviewMode] = useState<GitPreviewMode>('confirm');
@@ -87,9 +88,6 @@ export function GitWorkspace({
     ...repositories.map((repo) => repo.path),
     ...(snapshot?.pendingRepositories ?? []),
   ]).size;
-  const publicationRepositories = repositories.filter(
-    (repo) => !repo.upstream && !repo.pushTarget && repo.branch && !repo.error,
-  );
   const publicationChoices = Object.fromEntries(
     repositories.map((repo) => [
       repo.path,
@@ -126,24 +124,24 @@ export function GitWorkspace({
   function nextToastId() {
     return `git-${project.id}-${++toastCount.current}`;
   }
-  function needsRemoteChoice(path: string, remoteChoices: Record<string, string>) {
-    const repository = publicationRepositories.find((repo) => repo.path === path);
-    return !!repository && repository.remotes.length > 1 && !remoteChoices[path];
+  function needsRemoteChoice(row: GitActionRow, remoteChoices: Record<string, string>) {
+    return (row.remoteChoices?.length ?? 0) > 1 && !remoteChoices[row.path];
   }
   async function start(
     action: GitAction,
     branch = selectedBranch,
     remoteChoices = publicationChoices,
-    deletionOptions: Pick<GitActionInput, 'force' | 'deleteRemote' | 'deleteRemotes'> = {},
+    options: Pick<GitActionInput, 'force' | 'deleteRemote' | 'deleteRemotes' | 'skipRepositories'> = {},
+    inDialog = false,
   ) {
     const version = selectionVersion.current;
     const request = ++preparationVersion.current;
     const cancel = () => {
       if (request === preparationVersion.current) cancelPreview();
     };
-    // Delete keeps its confirmation dialog, which shows its own checking state.
+    // Delete and rechecks from an open dialog keep that dialog, which shows its own checking state.
     const target: GitActionToast | undefined =
-      action === 'delete'
+      action === 'delete' || inDialog
         ? undefined
         : {
             id: nextToastId(),
@@ -169,7 +167,7 @@ export function GitWorkspace({
             }
           : undefined,
         publishRemotes: remoteChoices,
-        ...(action === 'delete' ? deletionOptions : {}),
+        ...options,
       });
       if (request !== preparationVersion.current) return;
       if (!target) {
@@ -177,16 +175,16 @@ export function GitWorkspace({
         return;
       }
       activeToast.current = undefined;
+      const openDialog = (mode: GitPreviewMode) => {
+        dismissGitToast(target.id);
+        setPreviewMode(mode);
+        setPreview(prepared);
+      };
       if (!prepared.ready) {
-        const openDialog = (mode: GitPreviewMode) => {
-          dismissGitToast(target.id);
-          setPreviewMode(mode);
-          setPreview(prepared);
-        };
         if (action === 'push' && prepared.rows.some((row) => row.incoming)) openDialog('incoming');
         else if (
           action === 'push' &&
-          prepared.rows.some((row) => row.blockers.length && needsRemoteChoice(row.path, remoteChoices))
+          prepared.rows.some((row) => row.blockers.length && needsRemoteChoice(row, remoteChoices))
         )
           openDialog('confirm');
         else {
@@ -196,6 +194,11 @@ export function GitWorkspace({
             setPreview(prepared);
           });
         }
+        return;
+      }
+      // Creating a branch on a remote always asks first.
+      if (action === 'push' && prepared.rows.some(createsRemoteBranch)) {
+        openDialog('confirm');
         return;
       }
       setPreview(undefined);
@@ -229,6 +232,13 @@ export function GitWorkspace({
     setPending(false);
     setPreview(undefined);
     setDeletion(undefined);
+    setPushSelection(undefined);
+  }
+  function recheckPush(skip = pushSelection?.skip ?? [], remoteChoices = publicationChoices) {
+    if (!pushSelection || !preview) return;
+    setPushSelection({ ...pushSelection, skip });
+    setPreview({ ...preview, ready: false });
+    void start('push', pushSelection.branch, remoteChoices, { skipRepositories: skip }, true);
   }
   function recheckDeletion(changes: Partial<NonNullable<typeof deletion>>) {
     if (!deletion || !preview) return;
@@ -271,11 +281,16 @@ export function GitWorkspace({
       fetchProject();
     } else {
       if (
-        (action === 'pull' || action === 'push') &&
+        action === 'pull' &&
         (branch.repositories.length !== repositories.length ||
           !branch.repositories.every((repo) => repo.current))
       )
         return;
+      // Any local branch can be pushed, checked out or not.
+      if (action === 'push') {
+        if (branch.remote) return;
+        setPushSelection({ branch, skip: [] });
+      }
       if (action === 'delete') {
         setDeletion({ branch, force: false, deleteRemote: false, remotes: {} });
         setPreviewMode('confirm');
@@ -302,6 +317,7 @@ export function GitWorkspace({
     setActionError(undefined);
     setPreview(undefined);
     setDeletion(undefined);
+    setPushSelection(undefined);
     try {
       await flushPendingComments();
       const operation = await window.reviewAPI.runGitAction(project.id, prepared.id);
@@ -441,12 +457,16 @@ export function GitWorkspace({
           onDeletionRemote={(path, remote) =>
             recheckDeletion({ remotes: { ...deletion?.remotes, [path]: remote } })
           }
-          publicationRepositories={publicationRepositories}
           publicationChoices={publicationChoices}
           onPublicationRemote={(path, remote) => {
             const choices = { ...publicationChoices, [path]: remote };
             setPublishRemotes(choices);
-            void start('push', selectedBranch, choices);
+            recheckPush(undefined, choices);
+          }}
+          pushSkips={pushSelection?.skip ?? []}
+          onPushSkip={(path, skip) => {
+            const current = pushSelection?.skip ?? [];
+            recheckPush(skip ? [...current, path] : current.filter((item) => item !== path));
           }}
           forceDelete={deletion?.force ?? false}
           onForceDelete={(force) => recheckDeletion({ force })}

@@ -78,7 +78,10 @@ function summary(lines: string[], limit: number) {
 export function previewBranch(preview: GitActionPreview): string {
   const row = preview.rows[0];
   if (!row) return '';
-  if (preview.action === 'push' || preview.action === 'pull') return row.branch ?? '';
+  // A pushed branch need not be checked out.
+  if (preview.action === 'push')
+    return preview.rows.find((item) => item.source)?.source?.branch ?? row.branch ?? '';
+  if (preview.action === 'pull') return row.branch ?? '';
   const target = preview.action === 'delete' ? row.source : row.destination;
   if (!target) return '';
   return target.remote && preview.action === 'delete' ? `${target.remote}/${target.branch}` : target.branch;
