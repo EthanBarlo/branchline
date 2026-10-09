@@ -98,8 +98,11 @@ try {
     const seen = window.gitToastSmoke = [];
     const start = () => new MutationObserver(() => {
       for (const node of document.querySelectorAll('[data-sonner-toast]')) {
-        const entry = `${node.dataset.type}:${node.querySelector('[data-title]')?.textContent ?? ''}`;
-        if (!seen.includes(entry)) seen.push(entry);
+        const title = node.querySelector('[data-title]')?.textContent ?? '';
+        const entries = [`${node.dataset.type}:${title}`];
+        const bar = node.querySelector('[role="progressbar"]');
+        if (bar) entries.push(`progress:${title}`, `progress:${title}:${bar.getAttribute('aria-valuenow')}`);
+        for (const entry of entries) if (!seen.includes(entry)) seen.push(entry);
       }
     }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
     if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);
@@ -473,6 +476,7 @@ try {
   await menu.waitFor({ state: 'hidden' });
   await toast('Fetch completed').waitFor();
   assert.equal(await toastSeen('loading:Fetching Git fixture…'), true);
+  assert.equal(await toastSeen('progress:Fetching Git fixture…:100'), true);
   await waitForGitIdle();
   if (process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT) await page.screenshot({ path: process.env.BRANCHLINE_GIT_WORKSPACE_SCREENSHOT });
   await mainRow.click({ button: 'right' });
@@ -522,6 +526,9 @@ try {
   await page.getByRole('option', { name: 'origin', exact: true }).click();
   await toast('Push completed').waitFor();
   assert.equal(await toastSeen('loading:Pushing feature/demo…'), true);
+  // The loading toast carries a progress bar that fills before the result replaces it.
+  assert.equal(await toastSeen('progress:Pushing feature/demo…'), true);
+  assert.equal(await toastSeen('progress:Pushing feature/demo…:100'), true);
   assert.equal(await page.getByRole('dialog').count(), 0);
   assert.equal(git(remote, 'rev-parse', 'feature/demo'), git(local, 'rev-parse', 'HEAD'));
   // Renaming a current branch also updates nested checkouts and keeps remote tracking destinations.
