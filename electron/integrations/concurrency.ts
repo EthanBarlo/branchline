@@ -27,3 +27,22 @@ export async function mapConcurrent<T, R>(
   if (failed) throw failure;
   return results;
 }
+
+/** Share `limit` slots between actions that start at different times, in arrival order. */
+export function concurrencyLimit(limit: number): <R>(action: () => Promise<R>) => Promise<R> {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Concurrency must be a positive integer.');
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async (action) => {
+    if (active < limit) active++;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await action();
+    } finally {
+      // Hand the slot straight to the next waiter so a newcomer cannot overtake it.
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}

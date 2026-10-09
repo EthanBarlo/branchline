@@ -6,7 +6,7 @@ import { GitWorkflowCache } from './workflow-cache';
 import { GitOperationQueue } from './operation-queue';
 import { historyFormat, parseHistory } from './history';
 import { projectGraphHistory } from './project-history';
-import { mapConcurrent } from '../integrations/concurrency';
+import { concurrencyLimit, mapConcurrent } from '../integrations/concurrency';
 import type { Project } from '../../shared/types';
 import type {
   GitActionInput,
@@ -71,6 +71,9 @@ const within = (root: string, directory: string): boolean => {
 };
 const remoteCacheRef = (url: string, branch: string): string =>
   `refs/branchline/workflow/${createHash('sha256').update(`${url}\0${branch}`).digest('hex')}`;
+// Remote round-trips per repository are mostly waiting, so a typical monorepo's
+// repositories all fetch, check and push at once.
+const networkConcurrency = 8;
 
 /** Owns local Git writes. Reads coexist; writes drain readers and protect overlapping projects. */
 export class GitWorkflowService {
@@ -730,7 +733,8 @@ export class GitWorkflowService {
             if (!fetch) pending.delete(repository.path);
             await publish();
             if (fetch && !repository.error) {
-              await this.fetchRepositories([repository]);
+              await this.fetchRepository(repository);
+              await this.save();
               const updated = await this.inspect(repository.directory, repository.path);
               chunks.set(repository.path, await this.snapshot(projectId, [updated]));
             }
@@ -919,45 +923,36 @@ export class GitWorkflowService {
     }, this.project(projectId).repoPath);
   }
 
-  private async fetchRepositories(
-    repositories: Repository[],
-    onProgress?: (done: number, total: number) => void,
-  ): Promise<void> {
-    let done = 0;
-    onProgress?.(done, repositories.length);
-    await mapConcurrent(repositories, 4, async (repository) => {
-      if (repository.error || !repository.remotes.length) {
-        onProgress?.(++done, repositories.length);
-        return;
+  /** Fetch one repository's remotes and journal the outcome. The caller saves the journal. */
+  private async fetchRepository(repository: Repository, refreshPushTarget = true): Promise<void> {
+    if (repository.error || !repository.remotes.length) return;
+    const previous = this.journal.fetched[repository.directory];
+    try {
+      for (const remote of repository.remotes) {
+        if (remote.startsWith('-')) throw new Error('Invalid remote name. Configure it manually.');
+        await this.command(repository.directory, [
+          '-c',
+          'fetch.pruneTags=false',
+          '-c',
+          `remote.${remote}.pruneTags=false`,
+          'fetch',
+          '--prune',
+          '--no-tags',
+          '--no-recurse-submodules',
+          '--no-write-fetch-head',
+          remote,
+          `+refs/heads/*:refs/remotes/${remote}/*`,
+        ]);
       }
-      const previous = this.journal.fetched[repository.directory];
-      try {
-        for (const remote of repository.remotes) {
-          if (remote.startsWith('-')) throw new Error('Invalid remote name. Configure it manually.');
-          await this.command(repository.directory, [
-            '-c',
-            'fetch.pruneTags=false',
-            '-c',
-            `remote.${remote}.pruneTags=false`,
-            'fetch',
-            '--prune',
-            '--no-tags',
-            '--no-recurse-submodules',
-            '--no-write-fetch-head',
-            remote,
-            `+refs/heads/*:refs/remotes/${remote}/*`,
-          ]);
-        }
+      if (refreshPushTarget) {
         const updated = await this.inspect(repository.directory, repository.path);
         if (updated.pushTarget)
           await this.remoteCommit(updated, updated.pushTarget.remote, updated.pushTarget.branch);
-        this.journal.fetched[repository.directory] = { at: new Date().toISOString() };
-      } catch (error) {
-        this.journal.fetched[repository.directory] = { at: previous?.at, error: message(error) };
       }
-      onProgress?.(++done, repositories.length);
-    });
-    await this.save();
+      this.journal.fetched[repository.directory] = { at: new Date().toISOString() };
+    } catch (error) {
+      this.journal.fetched[repository.directory] = { at: previous?.at, error: message(error) };
+    }
   }
 
   fetch(projectId: string): Promise<GitWorkflowSnapshot> {
@@ -1130,211 +1125,220 @@ export class GitWorkflowService {
     checkChildren = true,
   ): Promise<GitActionRow[]> {
     const commonBranch = repositories[0]?.branch;
-    const rows = await mapConcurrent(repositories, 4, async (repository): Promise<GitActionRow> => {
-      const row: GitActionRow = {
-        path: repository.path,
-        branch: repository.branch,
-        head: repository.head,
-        noop: false,
-        blockers: [],
-        warnings: repository.pointerChanges.map(
-          (file) => `Pointer difference: ${file}. Pointer commits remain manual.`,
-        ),
-      };
-      try {
-        if (repository.error) throw new Error(repository.error);
-        if (repository.inProgress)
-          throw new Error('Finish the current merge, rebase, cherry-pick, or bisect manually.');
-        if ((input.action === 'checkout' || input.action === 'pull') && repository.changes)
-          throw new Error('Commit or stash local file and index changes manually first.');
-        if (
-          (input.action === 'pull' || input.action === 'push') &&
-          (!commonBranch || repository.branch !== commonBranch)
-        )
-          throw new Error('Check out the same branch in every repository first.');
-        if (input.action === 'checkout') {
-          if (!input.branch) throw new Error('Choose a branch.');
-          row.destination = await this.checkoutTarget(repository, input.branch);
-          row.createTracking = !!row.destination.remote;
-          row.noop = repository.branch === row.destination.branch;
-          await this.availableWorktree(repository, row.destination.branch);
-        } else if (input.action === 'create' || input.action === 'rename') {
-          if (!input.branch || !input.newBranch) throw new Error('Choose a source branch and a new name.');
-          await this.newBranchAvailable(repository, input.newBranch);
-          row.source = await this.checkoutTarget(
-            repository,
-            input.branch,
-            input.action !== 'create' || input.branch.kind !== 'remote',
+    const rows = await mapConcurrent(repositories, networkConcurrency, (repository) =>
+      this.checkRow(repository, input, fresh, commonBranch),
+    );
+    if (input.action === 'push' && checkChildren) await this.childBlockers(repositories, rows);
+    return rows;
+  }
+
+  /** Check one repository. Push and pull require every repository on `commonBranch`. */
+  private async checkRow(
+    repository: Repository,
+    input: GitActionInput,
+    fresh: boolean,
+    commonBranch: string | null | undefined,
+  ): Promise<GitActionRow> {
+    const row: GitActionRow = {
+      path: repository.path,
+      branch: repository.branch,
+      head: repository.head,
+      noop: false,
+      blockers: [],
+      warnings: repository.pointerChanges.map(
+        (file) => `Pointer difference: ${file}. Pointer commits remain manual.`,
+      ),
+    };
+    try {
+      if (repository.error) throw new Error(repository.error);
+      if (repository.inProgress)
+        throw new Error('Finish the current merge, rebase, cherry-pick, or bisect manually.');
+      if ((input.action === 'checkout' || input.action === 'pull') && repository.changes)
+        throw new Error('Commit or stash local file and index changes manually first.');
+      if (
+        (input.action === 'pull' || input.action === 'push') &&
+        (!commonBranch || repository.branch !== commonBranch)
+      )
+        throw new Error('Check out the same branch in every repository first.');
+      if (input.action === 'checkout') {
+        if (!input.branch) throw new Error('Choose a branch.');
+        row.destination = await this.checkoutTarget(repository, input.branch);
+        row.createTracking = !!row.destination.remote;
+        row.noop = repository.branch === row.destination.branch;
+        await this.availableWorktree(repository, row.destination.branch);
+      } else if (input.action === 'create' || input.action === 'rename') {
+        if (!input.branch || !input.newBranch) throw new Error('Choose a source branch and a new name.');
+        await this.newBranchAvailable(repository, input.newBranch);
+        row.source = await this.checkoutTarget(
+          repository,
+          input.branch,
+          input.action !== 'create' || input.branch.kind !== 'remote',
+        );
+        if (input.action === 'rename' && input.branch.kind === 'remote')
+          throw new Error('Rename requires a local branch.');
+        if (input.action === 'rename') {
+          if (row.source.remote)
+            throw new Error(
+              'Rename requires a local branch. Check it out first to create a tracking branch.',
+            );
+          await this.availableWorktree(repository, row.source.branch);
+          row.sourceConfigSignature = await this.branchConfigSignature(
+            repository.directory,
+            row.source.branch,
           );
-          if (input.action === 'rename' && input.branch.kind === 'remote')
-            throw new Error('Rename requires a local branch.');
-          if (input.action === 'rename') {
-            if (row.source.remote)
-              throw new Error(
-                'Rename requires a local branch. Check it out first to create a tracking branch.',
-              );
-            await this.availableWorktree(repository, row.source.branch);
+          row.warnings.push('Remote branch names stay unchanged. Existing upstream tracking is retained.');
+          row.warnings.push('Saved reviews keep their recorded branch names.');
+        }
+        row.destination = { remote: '', branch: input.newBranch, commit: row.source.commit };
+      } else if (input.action === 'delete') {
+        if (!input.branch) throw new Error('Choose a branch.');
+        await this.validBranch(repository.directory, input.branch.name);
+        const remote = input.branch.kind === 'remote' ? input.branch.remote : '';
+        if (input.branch.kind === 'remote' && !remote) throw new Error('Choose a remote-qualified branch.');
+        if (input.branch.kind !== 'remote' && input.branch.remote)
+          throw new Error('Choose either a local branch or a remote-qualified branch.');
+        row.source = { remote: remote || '', branch: input.branch.name, commit: null };
+        if (remote) {
+          if (!repository.remotes.includes(remote)) {
+            row.noop = true;
+            return row;
+          }
+          row.source = await this.remoteDeletionTarget(repository, remote, input.branch.name);
+        } else {
+          row.source.commit = repository.refs.get(`refs/heads/${input.branch.name}`) ?? null;
+          if (row.source.commit) {
+            if (repository.branch === input.branch.name)
+              throw new Error('Check out another branch before deleting this local branch.');
+            await this.availableWorktree(repository, input.branch.name);
             row.sourceConfigSignature = await this.branchConfigSignature(
               repository.directory,
-              row.source.branch,
+              input.branch.name,
             );
-            row.warnings.push('Remote branch names stay unchanged. Existing upstream tracking is retained.');
-            row.warnings.push('Saved reviews keep their recorded branch names.');
-          }
-          row.destination = { remote: '', branch: input.newBranch, commit: row.source.commit };
-        } else if (input.action === 'delete') {
-          if (!input.branch) throw new Error('Choose a branch.');
-          await this.validBranch(repository.directory, input.branch.name);
-          const remote = input.branch.kind === 'remote' ? input.branch.remote : '';
-          if (input.branch.kind === 'remote' && !remote) throw new Error('Choose a remote-qualified branch.');
-          if (input.branch.kind !== 'remote' && input.branch.remote)
-            throw new Error('Choose either a local branch or a remote-qualified branch.');
-          row.source = { remote: remote || '', branch: input.branch.name, commit: null };
-          if (remote) {
-            if (!repository.remotes.includes(remote)) {
-              row.noop = true;
-              return row;
-            }
-            row.source = await this.remoteDeletionTarget(repository, remote, input.branch.name);
-          } else {
-            row.source.commit = repository.refs.get(`refs/heads/${input.branch.name}`) ?? null;
-            if (row.source.commit) {
-              if (repository.branch === input.branch.name)
-                throw new Error('Check out another branch before deleting this local branch.');
-              await this.availableWorktree(repository, input.branch.name);
-              row.sourceConfigSignature = await this.branchConfigSignature(
-                repository.directory,
-                input.branch.name,
-              );
-              const upstream = await this.command(repository.directory, [
-                'for-each-ref',
-                '--format=%(upstream)',
-                `refs/heads/${input.branch.name}`,
-              ]);
-              const base = repository.refs.get(upstream) ?? repository.head;
-              row.unmergedCommits = Number(
-                await this.command(repository.directory, [
-                  'rev-list',
-                  '--count',
-                  `${base}..${row.source.commit}`,
-                ]),
-              );
-              if (row.unmergedCommits && !input.force)
-                row.blockers.push(
-                  `${row.unmergedCommits} unmerged commits. Select "Delete even if unmerged" to delete this branch.`,
-                );
-              if (row.unmergedCommits)
-                row.warnings.push(
-                  `${row.unmergedCommits} unmerged commits will lose this local branch reference.`,
-                );
-            }
-            if (input.deleteRemote) {
-              row.remoteDeletion = await this.localRemoteDeletion(repository, input);
-              if (!row.remoteDeletion)
-                row.warnings.push('No remote configured; only the local branch will be deleted.');
-            }
-          }
-          const target = row.source.remote ? row.source : row.remoteDeletion;
-          if (target) {
-            const fetchUrl = message(
-              await this.command(repository.directory, ['remote', 'get-url', target.remote]),
+            const upstream = await this.command(repository.directory, [
+              'for-each-ref',
+              '--format=%(upstream)',
+              `refs/heads/${input.branch.name}`,
+            ]);
+            const base = repository.refs.get(upstream) ?? repository.head;
+            row.unmergedCommits = Number(
+              await this.command(repository.directory, [
+                'rev-list',
+                '--count',
+                `${base}..${row.source.commit}`,
+              ]),
             );
-            if (fetchUrl !== target.url)
+            if (row.unmergedCommits && !input.force)
+              row.blockers.push(
+                `${row.unmergedCommits} unmerged commits. Select "Delete even if unmerged" to delete this branch.`,
+              );
+            if (row.unmergedCommits)
               row.warnings.push(
-                'This remote fetches from a different URL. Its tracking branches stay unchanged.',
+                `${row.unmergedCommits} unmerged commits will lose this local branch reference.`,
               );
           }
-          row.noop = !row.source.commit && !row.remoteDeletion?.commit;
-        } else if (input.action === 'pull') {
-          if (repository.fetchError) throw new Error(`Fetch failed: ${repository.fetchError}`);
-          if (!repository.upstream || repository.upstream.remote === '.')
-            throw new Error('Configure a remote tracking branch manually before pulling.');
-          row.destination = repository.upstream;
-          if (!row.destination.commit) throw new Error('The tracking branch is missing on the remote.');
-          const [ahead, behind] = await this.counts(
-            repository.directory,
-            repository.head,
-            row.destination.commit,
+          if (input.deleteRemote) {
+            row.remoteDeletion = await this.localRemoteDeletion(repository, input);
+            if (!row.remoteDeletion)
+              row.warnings.push('No remote configured; only the local branch will be deleted.');
+          }
+        }
+        const target = row.source.remote ? row.source : row.remoteDeletion;
+        if (target) {
+          const fetchUrl = message(
+            await this.command(repository.directory, ['remote', 'get-url', target.remote]),
           );
-          if (ahead && behind)
-            throw new Error('Branches have diverged. Merge or rebase manually, then refresh.');
-          row.noop = behind === 0;
-          if (
-            !row.noop &&
-            !(await this.ancestor(repository.directory, repository.head, row.destination.commit))
-          )
-            throw new Error('Only fast-forward pulls are allowed. Handle the history manually.');
-        } else {
-          const target = repository.pushTarget;
-          const remote = target?.remote || input.publishRemotes?.[repository.path];
-          if (!remote) throw new Error('Choose a remote to publish this branch.');
-          const branch = target?.branch || repository.branch!;
-          if ((await this.config(repository.directory, `remote.${remote}.mirror`)) === 'true')
-            throw new Error('Mirror remotes must be managed manually.');
-          if (await this.config(repository.directory, `remote.${remote}.push`))
-            throw new Error('Custom push refspecs must be managed manually.');
-          const commit = fresh
-            ? await this.remoteCommit(repository, remote, branch)
-            : (target?.commit ?? null);
-          row.destination = {
-            remote,
-            branch,
-            commit,
-            url: message(await this.command(repository.directory, ['remote', 'get-url', '--push', remote])),
-          };
-          row.createTracking = !repository.upstream;
-          row.noop = commit === repository.head;
-          if (commit && !(await this.ancestor(repository.directory, commit, repository.head))) {
-            [row.outgoing, row.incoming] = await this.counts(repository.directory, repository.head, commit);
-            throw new Error(
-              row.outgoing
-                ? `Branches have diverged (${row.outgoing} local, ${row.incoming} remote). Merge or rebase manually first.`
-                : `${row.incoming} incoming ${row.incoming === 1 ? 'commit' : 'commits'}. Pull first.`,
+          if (fetchUrl !== target.url)
+            row.warnings.push(
+              'This remote fetches from a different URL. Its tracking branches stay unchanged.',
             );
-          }
         }
+        row.noop = !row.source.commit && !row.remoteDeletion?.commit;
+      } else if (input.action === 'pull') {
+        if (repository.fetchError) throw new Error(`Fetch failed: ${repository.fetchError}`);
+        if (!repository.upstream || repository.upstream.remote === '.')
+          throw new Error('Configure a remote tracking branch manually before pulling.');
+        row.destination = repository.upstream;
+        if (!row.destination.commit) throw new Error('The tracking branch is missing on the remote.');
+        const [ahead, behind] = await this.counts(
+          repository.directory,
+          repository.head,
+          row.destination.commit,
+        );
+        if (ahead && behind)
+          throw new Error('Branches have diverged. Merge or rebase manually, then refresh.');
+        row.noop = behind === 0;
         if (
-          (input.action === 'checkout' || input.action === 'pull') &&
-          row.destination?.commit &&
-          JSON.stringify(await this.modules(repository.directory, row.destination.commit)) !==
-            JSON.stringify(repository.modules)
+          !row.noop &&
+          !(await this.ancestor(repository.directory, repository.head, row.destination.commit))
         )
-          throw new Error('Submodule paths change in this operation. Handle it manually.');
-      } catch (error) {
-        row.blockers.push(message(error));
-      }
-      return row;
-    });
-    // Before a parent push, each gitlink must already be published or included in a child push.
-    if (input.action === 'push' && checkChildren) {
-      for (let i = 0; i < repositories.length; i++) {
-        const repository = repositories[i];
-        if (rows[i].blockers.length || rows[i].noop) continue;
-        const tree = await this.command(repository.directory, ['ls-tree', '-rz', repository.head]);
-        for (const entry of tree.split('\0').filter((line) => line.startsWith('160000 '))) {
-          const file = entry.slice(entry.indexOf('\t') + 1);
-          const oid = entry.split(' ')[2].split('\t')[0];
-          const childPath = repository.path === '.' ? file : `${repository.path}/${file}`;
-          const child = repositories.find((item) => item.path === childPath);
-          if (!child || child.error) {
-            rows[i].blockers.push(`Submodule ${file} is unavailable.`);
-            continue;
-          }
-          const childRow = rows.find((item) => item.path === childPath)!;
-          const published = await this.command(child.directory, [
-            'for-each-ref',
-            `--contains=${oid}`,
-            '--format=%(refname)',
-            'refs/remotes',
-          ]).catch(() => '');
-          const planned =
-            !childRow.blockers.length && (await this.ancestor(child.directory, oid, child.head));
-          if (!published && !planned)
-            rows[i].blockers.push(`Publish the referenced commit in ${file} manually first.`);
+          throw new Error('Only fast-forward pulls are allowed. Handle the history manually.');
+      } else {
+        const target = repository.pushTarget;
+        const remote = target?.remote || input.publishRemotes?.[repository.path];
+        if (!remote) throw new Error('Choose a remote to publish this branch.');
+        const branch = target?.branch || repository.branch!;
+        if ((await this.config(repository.directory, `remote.${remote}.mirror`)) === 'true')
+          throw new Error('Mirror remotes must be managed manually.');
+        if (await this.config(repository.directory, `remote.${remote}.push`))
+          throw new Error('Custom push refspecs must be managed manually.');
+        const commit = fresh ? await this.remoteCommit(repository, remote, branch) : (target?.commit ?? null);
+        row.destination = {
+          remote,
+          branch,
+          commit,
+          url: message(await this.command(repository.directory, ['remote', 'get-url', '--push', remote])),
+        };
+        row.createTracking = !repository.upstream;
+        row.noop = commit === repository.head;
+        if (commit && !(await this.ancestor(repository.directory, commit, repository.head))) {
+          [row.outgoing, row.incoming] = await this.counts(repository.directory, repository.head, commit);
+          throw new Error(
+            row.outgoing
+              ? `Branches have diverged (${row.outgoing} local, ${row.incoming} remote). Merge or rebase manually first.`
+              : `${row.incoming} incoming ${row.incoming === 1 ? 'commit' : 'commits'}. Pull first.`,
+          );
         }
+      }
+      if (
+        (input.action === 'checkout' || input.action === 'pull') &&
+        row.destination?.commit &&
+        JSON.stringify(await this.modules(repository.directory, row.destination.commit)) !==
+          JSON.stringify(repository.modules)
+      )
+        throw new Error('Submodule paths change in this operation. Handle it manually.');
+    } catch (error) {
+      row.blockers.push(message(error));
+    }
+    return row;
+  }
+
+  /** Before a parent push, each gitlink must already be published or included in a child push. */
+  private async childBlockers(repositories: Repository[], rows: GitActionRow[]): Promise<void> {
+    for (let i = 0; i < repositories.length; i++) {
+      const repository = repositories[i];
+      if (rows[i].blockers.length || rows[i].noop) continue;
+      const tree = await this.command(repository.directory, ['ls-tree', '-rz', repository.head]);
+      for (const entry of tree.split('\0').filter((line) => line.startsWith('160000 '))) {
+        const file = entry.slice(entry.indexOf('\t') + 1);
+        const oid = entry.split(' ')[2].split('\t')[0];
+        const childPath = repository.path === '.' ? file : `${repository.path}/${file}`;
+        const child = repositories.find((item) => item.path === childPath);
+        if (!child || child.error) {
+          rows[i].blockers.push(`Submodule ${file} is unavailable.`);
+          continue;
+        }
+        const childRow = rows.find((item) => item.path === childPath)!;
+        const published = await this.command(child.directory, [
+          'for-each-ref',
+          `--contains=${oid}`,
+          '--format=%(refname)',
+          'refs/remotes',
+        ]).catch(() => '');
+        const planned = !childRow.blockers.length && (await this.ancestor(child.directory, oid, child.head));
+        if (!published && !planned)
+          rows[i].blockers.push(`Publish the referenced commit in ${file} manually first.`);
       }
     }
-    return rows;
   }
 
   preview(projectId: string, input: GitActionInput): Promise<GitActionPreview> {
@@ -1349,14 +1353,36 @@ export class GitWorkflowService {
       projectId,
       async () => {
         this.project(projectId);
-        if (input.action === 'pull' || input.action === 'push')
-          await this.fetchRepositories(await this.discover(projectId), (done, total) =>
-            this.emitProgress(projectId, { stage: 'fetching', done, total }),
-          );
-        const repositories = await this.discover(projectId);
+        const discovered = await this.discover(projectId);
+        const repositories = [...discovered];
+        const network = input.action === 'pull' || input.action === 'push';
+        const total = discovered.length;
+        let fetched = network ? 0 : total;
+        let checked = 0;
+        const progress = (stage: GitWorkflowProgress['stage'], done: number) =>
+          this.emitProgress(projectId, { stage, done, total });
+        progress(network ? 'fetching' : 'checking', 0);
+        // Each repository is checked as soon as its own fetch lands, instead of
+        // every check waiting for the slowest remote in the project.
+        const rows = await mapConcurrent(discovered, networkConcurrency, async (repository, index) => {
+          if (network) {
+            // A push check reads its destination live, so the fetch need not refresh it first.
+            await this.fetchRepository(repository, input.action !== 'push');
+            if (!repository.error)
+              repositories[index] = await this.inspect(repository.directory, repository.path).catch(
+                (error: unknown): Repository => ({ ...repository, error: message(error) }),
+              );
+            progress('fetching', ++fetched);
+            if (fetched === total) progress('checking', checked);
+          }
+          const row = await this.checkRow(repositories[index], input, true, discovered[0]?.branch);
+          checked++;
+          if (fetched === total) progress('checking', checked);
+          return row;
+        });
+        if (network) await this.save();
         await this.reconcile(projectId, repositories);
-        this.emitProgress(projectId, { stage: 'checking', done: 0, total: repositories.length });
-        const rows = await this.rows(repositories, input, true);
+        if (input.action === 'push') await this.childBlockers(repositories, rows);
         if (this.uncertainOperation(repositories))
           rows[0].blockers.push(
             'Check the previous uncertain result, then acknowledge it before starting another action.',
@@ -1583,18 +1609,36 @@ export class GitWorkflowService {
                 destination.commit!,
               ]);
             } else {
-              const liveRemote = await this.remoteCommit(repository, destination.remote, destination.branch);
-              if (liveRemote !== destination.commit)
-                throw new Error('The remote changed during the operation. Prepare a new preview.');
+              // The lease makes the server reject the push if the destination moved
+              // since the recheck above, without another round-trip to read it first.
               await this.command(repository.directory, [
                 'push',
                 '--porcelain',
                 '--no-follow-tags',
                 '--recurse-submodules=check',
+                `--force-with-lease=refs/heads/${destination.branch}:${destination.commit ?? ''}`,
                 destination.remote,
                 `${row.head}:refs/heads/${destination.branch}`,
+              ]).catch(async (error: unknown) => {
+                // Git reports a broken lease generically. Name it, at the cost of a
+                // read only once the push has already failed.
+                const live = await this.remoteCommit(
+                  repository,
+                  destination.remote,
+                  destination.branch,
+                ).catch(() => destination.commit);
+                if (live !== destination.commit && live !== row.head)
+                  throw new Error('The remote changed during the operation. Prepare a new preview.');
+                throw error;
+              });
+              // Pushing by remote name updates its tracking ref. Only a separate
+              // push URL keeps the destination in a cache ref that needs a refresh.
+              const [fetchUrl, pushUrl] = await Promise.all([
+                this.command(repository.directory, ['remote', 'get-url', destination.remote]),
+                this.command(repository.directory, ['remote', 'get-url', '--push', destination.remote]),
               ]);
-              await this.remoteCommit(repository, destination.remote, destination.branch);
+              if (pushUrl !== fetchUrl)
+                await this.remoteCommit(repository, destination.remote, destination.branch);
               if (row.createTracking) await this.setTracking(repository, row);
             }
           } else if (operation.action === 'push' && row.createTracking) {
@@ -1631,19 +1675,33 @@ export class GitWorkflowService {
         }
       };
       if (operation.action === 'push') {
-        // Finish descendants before publishing a parent gitlink. Independent
-        // siblings share the network, with at most four active pushes.
+        // A parent's gitlinks may reference commits its submodules are about to
+        // publish, so it waits for those pushes only. Everything else starts at once.
         const depth = (repository: Repository) =>
           repository.path === '.' ? 0 : repository.path.split('/').length;
-        const levels = [...new Set(order.map(({ repository }) => depth(repository)))].sort((a, b) => b - a);
-        for (const level of levels) {
-          await mapConcurrent(
-            order.filter(({ repository }) => depth(repository) === level),
-            4,
-            executeRow,
+        const below = (child: string, parent: string) =>
+          child !== parent && (parent === '.' || child.startsWith(`${parent}/`));
+        const slot = concurrencyLimit(networkConcurrency);
+        const finished = new Map<number, Promise<void>>();
+        const deepestFirst = [...order].sort((a, b) => depth(b.repository) - depth(a.repository));
+        for (const item of deepestFirst) {
+          const publishing = deepestFirst.filter(
+            (other) =>
+              below(other.repository.path, item.repository.path) && !operation.rows[other.index].noop,
           );
-          if (operation.state !== 'running') break;
+          finished.set(
+            item.index,
+            Promise.all(publishing.map((other) => finished.get(other.index))).then(() =>
+              slot(() => executeRow(item)),
+            ),
+          );
         }
+        // Drain every started push before surfacing a failure.
+        const settled = await Promise.allSettled(finished.values());
+        const failure = settled.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected',
+        );
+        if (failure) throw failure.reason;
       } else {
         for (const item of order) {
           await executeRow(item);
