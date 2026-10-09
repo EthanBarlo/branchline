@@ -321,6 +321,29 @@ test('legacy createReview calls reuse projects and validate project binding atom
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('reordering projects persists an exact permutation and rejects stale lists', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'branchline-store-'));
+  try {
+    const filePath = join(dir, 'reviews.json');
+    const store = new ReviewStore(filePath);
+    const alpha = await store.createProject({ repoPath: '/offline/alpha' });
+    const beta = await store.createProject({ repoPath: '/offline/beta' });
+    const gamma = await store.createProject({ repoPath: '/offline/gamma' });
+    const reordered = await store.reorderProjects([gamma.id, alpha.id, beta.id]);
+    assert.deepEqual(reordered.map((project) => project.id), [gamma.id, alpha.id, beta.id]);
+    const before = store.getState();
+    await assert.rejects(() => store.reorderProjects([gamma.id, alpha.id]), /project list changed/);
+    await assert.rejects(() => store.reorderProjects([gamma.id, alpha.id, alpha.id]), /project list changed/);
+    await assert.rejects(() => store.reorderProjects([gamma.id, alpha.id, 'missing']), /project list changed/);
+    await assert.rejects(() => store.reorderProjects('nope' as unknown as string[]), /project list changed/);
+    assert.deepEqual(store.getState(), before);
+    const reopened = new ReviewStore(filePath);
+    await reopened.load();
+    assert.deepEqual(reopened.getState().projects.map((project) => project.id), [gamma.id, alpha.id, beta.id]);
+    assert.equal(reopened.getState().reviews.length, before.reviews.length, 'reordering leaves reviews untouched');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('deleting the last review preserves its project; deleting a project cascades only its reviews', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'branchline-store-'));
   try {

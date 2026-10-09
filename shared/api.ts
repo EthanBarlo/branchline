@@ -24,6 +24,7 @@ export interface ReviewAPI extends UpdateAPI, IntegrationAPI, GitWorkflowAPI {
   inspectRepo(path: string): Promise<RepoInspection>;
   createProject(input: NewProject): Promise<Project>;
   updateProject(id: string, changes: { name?: string; defaultBaseBranch?: string }): Promise<Project>;
+  reorderProjects(ids: string[]): Promise<Project[]>;
   deleteProject(id: string): Promise<AppState>;
   createReview(input: NewReview): Promise<Review>;
   deleteReview(id: string): Promise<AppState>;

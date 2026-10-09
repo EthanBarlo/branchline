@@ -1,5 +1,6 @@
 import * as stylex from '@stylexjs/stylex';
 import { useRef } from 'react';
+import type { Project } from '../../../shared/types';
 import { Navigate, Outlet, useBlocker } from '@tanstack/react-router';
 import { flushPendingComments } from '../reviews/diff/commentAutosave';
 import { ErrorBanner } from '../reviews/ErrorBanner';
@@ -22,6 +23,8 @@ export function AppShell() {
 function Shell() {
   const {
     projects,
+    setProjects,
+    setDeleteProject,
     initializing,
     error,
     setError,
@@ -59,6 +62,36 @@ function Shell() {
     },
   });
 
+  async function renameProject(id: string, name: string) {
+    const previous = projects.find((project) => project.id === id)?.name;
+    const rename = (value: Project | string) =>
+      setProjects((list) =>
+        list.map((project) =>
+          project.id !== id ? project : typeof value === 'string' ? { ...project, name: value } : value,
+        ),
+      );
+    rename(name);
+    try {
+      rename(await window.reviewAPI.updateProject(id, { name }));
+    } catch (reason) {
+      if (previous !== undefined) rename(previous);
+      setError(errorMessage(reason));
+    }
+  }
+
+  async function reorderProjects(ids: string[]) {
+    const previous = projects.map((project) => project.id);
+    const sortBy = (order: string[]) =>
+      setProjects((list) => [...list].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)));
+    sortBy(ids);
+    try {
+      await window.reviewAPI.reorderProjects(ids);
+    } catch (reason) {
+      sortBy(previous);
+      setError(errorMessage(reason));
+    }
+  }
+
   return (
     <>
       <div
@@ -73,6 +106,9 @@ function Shell() {
           updateState={updateState}
           onSelectProject={(id) => void navigation.selectProject(id)}
           onAddProject={() => setShowAddProject(true)}
+          onRenameProject={(id, name) => void renameProject(id, name)}
+          onReorderProjects={(ids) => void reorderProjects(ids)}
+          onRemoveProject={setDeleteProject}
           onShowUpdates={() => setShowUpdates(true)}
           onOpenSettings={() => void navigation.openSettings()}
         />

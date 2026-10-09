@@ -38,6 +38,7 @@ export function registerWorkspaceHandlers(
   });
   handle('project-create', (input) => projects.createProject(input));
   handle('project-update', (id, changes) => store.updateProject(id, changes));
+  handle('project-reorder', (ids) => store.reorderProjects(ids));
   handle('project-delete', (id) => integrations.deleteProject(id));
   handle('create', (input) => projects.createReview(input));
   handle('delete', (id) => integrations.deleteReview(id));
