@@ -95,6 +95,7 @@ export function GitWorkspace({
     ]),
   );
   const pendingRepositories = snapshot?.pendingRepositories?.length ?? 0;
+  const uncertainRows = snapshot?.operation?.rows.filter((row) => row.state === 'unknown') ?? [];
   useEffect(() => {
     const target = activeToast.current;
     const operation = snapshot?.operation;
@@ -374,35 +375,35 @@ export function GitWorkspace({
                 {repo.path === '.' ? project.name : repo.path}: {repo.error || 'No branch available'}
               </p>
             ))}
-          {snapshot?.operation && snapshot.operation.state !== 'completed' && (
+          {/* Progress and results are shown in the action toast. Uncertain rows stay here because they
+              block further actions until acknowledged, including after a restart. */}
+          {snapshot?.operation && uncertainRows.length > 0 && (
             <section aria-label="Git operation results" aria-live="polite" {...stylex.props(styles.results)}>
               <strong {...stylex.props(styles.repoName)}>
-                Last {snapshot.operation.action === 'create' ? 'create branch' : snapshot.operation.action} ·{' '}
-                {snapshot.operation.state}
+                Last {snapshot.operation.action === 'create' ? 'create branch' : snapshot.operation.action} ·
+                result uncertain
               </strong>
-              {snapshot.operation.rows.map((row) => (
+              {uncertainRows.map((row) => (
                 <p key={row.path} {...stylex.props(styles.note)}>
-                  {row.path === '.' ? project.name : row.path}: {row.state}
-                  {row.message ? ` · ${row.message}` : ''}
+                  {row.path === '.' ? project.name : row.path}
+                  {row.message ? `: ${row.message}` : ''}
                 </p>
               ))}
-              {snapshot.operation.rows.some((row) => row.state === 'unknown') && (
-                <Button
-                  disabled={disabled}
-                  onClick={() => {
-                    setPending(true);
-                    void window.reviewAPI
-                      .acknowledgeGitOperation(project.id)
-                      .then(setSnapshot)
-                      .catch((reason) =>
-                        toast.error('Acknowledgement failed', { description: errorMessage(reason) }),
-                      )
-                      .finally(() => setPending(false));
-                  }}
-                >
-                  I checked the uncertain results manually
-                </Button>
-              )}
+              <Button
+                disabled={disabled}
+                onClick={() => {
+                  setPending(true);
+                  void window.reviewAPI
+                    .acknowledgeGitOperation(project.id)
+                    .then(setSnapshot)
+                    .catch((reason) =>
+                      toast.error('Acknowledgement failed', { description: errorMessage(reason) }),
+                    )
+                    .finally(() => setPending(false));
+                }}
+              >
+                I checked the uncertain results manually
+              </Button>
             </section>
           )}
         </div>
