@@ -143,6 +143,7 @@ const api: ReviewAPI = {
   inspectRepo: (path) => invoke('inspect', path),
   createProject: (input) => invoke('project-create', input),
   updateProject: (...args) => invoke('project-update', ...args),
+  reorderProjects: (ids) => invoke('project-reorder', ids),
   deleteProject: (id) => invoke('project-delete', id),
   createReview: (input) => invoke('create', input),
   deleteReview: (id) => invoke('delete', id),

@@ -1132,13 +1132,31 @@ export class GitWorkflowService {
     return rows;
   }
 
-  /** Check one repository. Push and pull require every repository on `commonBranch`. */
+  /** Check one repository. Pull, and a push of the checked-out branch, require `commonBranch` everywhere. */
   private async checkRow(
     repository: Repository,
     input: GitActionInput,
     fresh: boolean,
     commonBranch: string | null | undefined,
   ): Promise<GitActionRow> {
+    // A left-out repository is not inspected, so its state cannot block the others.
+    if (input.action === 'push' && input.skipRepositories?.includes(repository.path)) {
+      const name = input.branch?.name ?? repository.branch;
+      return {
+        path: repository.path,
+        branch: repository.branch,
+        head: repository.head,
+        ...(name
+          ? {
+              source: { remote: '', branch: name, commit: repository.refs.get(`refs/heads/${name}`) ?? null },
+            }
+          : {}),
+        skipped: true,
+        noop: true,
+        blockers: [],
+        warnings: [],
+      };
+    }
     const row: GitActionRow = {
       path: repository.path,
       branch: repository.branch,
@@ -1155,8 +1173,9 @@ export class GitWorkflowService {
         throw new Error('Finish the current merge, rebase, cherry-pick, or bisect manually.');
       if ((input.action === 'checkout' || input.action === 'pull') && repository.changes)
         throw new Error('Commit or stash local file and index changes manually first.');
+      // Pushing a named branch works whether or not it is checked out.
       if (
-        (input.action === 'pull' || input.action === 'push') &&
+        (input.action === 'pull' || (input.action === 'push' && !input.branch)) &&
         (!commonBranch || repository.branch !== commonBranch)
       )
         throw new Error('Check out the same branch in every repository first.');
@@ -1273,10 +1292,25 @@ export class GitWorkflowService {
         )
           throw new Error('Only fast-forward pulls are allowed. Handle the history manually.');
       } else {
-        const target = repository.pushTarget;
+        if (input.branch?.kind === 'remote') throw new Error('Choose a local branch to push.');
+        const name = input.branch?.name ?? repository.branch!;
+        if (input.branch) await this.validBranch(repository.directory, name);
+        const local = repository.refs.get(`refs/heads/${name}`) ?? null;
+        row.source = { remote: '', branch: name, commit: local };
+        // Repositories without this branch have nothing to push.
+        if (!local) {
+          row.noop = true;
+          return row;
+        }
+        const destinations =
+          name === repository.branch
+            ? repository
+            : await this.branchDestinations(repository.directory, repository.refs, name, local);
+        const target = destinations.pushTarget;
+        if (!target) row.remoteChoices = repository.remotes;
         const remote = target?.remote || input.publishRemotes?.[repository.path];
         if (!remote) throw new Error('Choose a remote to publish this branch.');
-        const branch = target?.branch || repository.branch!;
+        const branch = target?.branch || name;
         if ((await this.config(repository.directory, `remote.${remote}.mirror`)) === 'true')
           throw new Error('Mirror remotes must be managed manually.');
         if (await this.config(repository.directory, `remote.${remote}.push`))
@@ -1288,10 +1322,10 @@ export class GitWorkflowService {
           commit,
           url: message(await this.command(repository.directory, ['remote', 'get-url', '--push', remote])),
         };
-        row.createTracking = !repository.upstream;
-        row.noop = commit === repository.head;
-        if (commit && !(await this.ancestor(repository.directory, commit, repository.head))) {
-          [row.outgoing, row.incoming] = await this.counts(repository.directory, repository.head, commit);
+        row.createTracking = !destinations.upstream;
+        row.noop = commit === local;
+        if (commit && !(await this.ancestor(repository.directory, commit, local))) {
+          [row.outgoing, row.incoming] = await this.counts(repository.directory, local, commit);
           throw new Error(
             row.outgoing
               ? `Branches have diverged (${row.outgoing} local, ${row.incoming} remote). Merge or rebase manually first.`
@@ -1316,8 +1350,9 @@ export class GitWorkflowService {
   private async childBlockers(repositories: Repository[], rows: GitActionRow[]): Promise<void> {
     for (let i = 0; i < repositories.length; i++) {
       const repository = repositories[i];
-      if (rows[i].blockers.length || rows[i].noop) continue;
-      const tree = await this.command(repository.directory, ['ls-tree', '-rz', repository.head]);
+      const pushed = rows[i].source?.commit;
+      if (rows[i].blockers.length || rows[i].noop || !pushed) continue;
+      const tree = await this.command(repository.directory, ['ls-tree', '-rz', pushed]);
       for (const entry of tree.split('\0').filter((line) => line.startsWith('160000 '))) {
         const file = entry.slice(entry.indexOf('\t') + 1);
         const oid = entry.split(' ')[2].split('\t')[0];
@@ -1328,13 +1363,17 @@ export class GitWorkflowService {
           continue;
         }
         const childRow = rows.find((item) => item.path === childPath)!;
+        const childCommit = childRow.skipped ? null : childRow.source?.commit;
         const published = await this.command(child.directory, [
           'for-each-ref',
           `--contains=${oid}`,
           '--format=%(refname)',
           'refs/remotes',
         ]).catch(() => '');
-        const planned = !childRow.blockers.length && (await this.ancestor(child.directory, oid, child.head));
+        const planned =
+          !childRow.blockers.length &&
+          !!childCommit &&
+          (await this.ancestor(child.directory, oid, childCommit));
         if (!published && !planned)
           rows[i].blockers.push(`Publish the referenced commit in ${file} manually first.`);
       }
@@ -1349,6 +1388,12 @@ export class GitWorkflowService {
       (input.deleteRemote !== undefined && typeof input.deleteRemote !== 'boolean')
     )
       return Promise.reject(new Error('Choose a valid deletion option.'));
+    if (
+      input.skipRepositories !== undefined &&
+      (!Array.isArray(input.skipRepositories) ||
+        input.skipRepositories.some((path) => typeof path !== 'string'))
+    )
+      return Promise.reject(new Error('Choose valid repositories to push.'));
     return this.exclusive(
       projectId,
       async () => {
@@ -1496,6 +1541,13 @@ export class GitWorkflowService {
       const executeRow = async ({ repository, index }: (typeof order)[number]) => {
         if (operation.state !== 'running') return;
         const row = operation.rows[index];
+        if (row.skipped) {
+          row.state = 'done';
+          row.message = 'Skipped.';
+          await this.save();
+          this.emit(projectId, true);
+          return;
+        }
         let attempted = false;
         try {
           if ((await realpath(this.project(projectId).repoPath)) !== current[0].directory)
@@ -1618,7 +1670,7 @@ export class GitWorkflowService {
                 '--recurse-submodules=check',
                 `--force-with-lease=refs/heads/${destination.branch}:${destination.commit ?? ''}`,
                 destination.remote,
-                `${row.head}:refs/heads/${destination.branch}`,
+                `${row.source!.commit}:refs/heads/${destination.branch}`,
               ]).catch(async (error: unknown) => {
                 // Git reports a broken lease generically. Name it, at the cost of a
                 // read only once the push has already failed.
@@ -1627,7 +1679,7 @@ export class GitWorkflowService {
                   destination.remote,
                   destination.branch,
                 ).catch(() => destination.commit);
-                if (live !== destination.commit && live !== row.head)
+                if (live !== destination.commit && live !== row.source!.commit)
                   throw new Error('The remote changed during the operation. Prepare a new preview.');
                 throw error;
               });
@@ -1662,7 +1714,9 @@ export class GitWorkflowService {
                   ? 'Local and remote branches deleted.'
                   : 'Branch deleted.'
               : row.noop
-                ? 'Already up to date.'
+                ? operation.action === 'push' && !row.source?.commit
+                  ? 'Branch not present; skipped.'
+                  : 'Already up to date.'
                 : 'Completed.';
           await this.save();
           this.emit(projectId, true);
@@ -1717,16 +1771,14 @@ export class GitWorkflowService {
   }
 
   private async setTracking(repository: Repository, row: GitActionRow): Promise<void> {
-    if (await this.config(repository.directory, `branch.${row.branch}.remote`))
+    // The pushed branch, which need not be checked out.
+    const branch = row.source!.branch;
+    if (await this.config(repository.directory, `branch.${branch}.remote`))
       throw new Error('Push finished, but tracking settings changed. Configure tracking manually.');
+    await this.command(repository.directory, ['config', `branch.${branch}.remote`, row.destination!.remote]);
     await this.command(repository.directory, [
       'config',
-      `branch.${row.branch}.remote`,
-      row.destination!.remote,
-    ]);
-    await this.command(repository.directory, [
-      'config',
-      `branch.${row.branch}.merge`,
+      `branch.${branch}.merge`,
       `refs/heads/${row.destination!.branch}`,
     ]);
   }
@@ -1837,7 +1889,8 @@ export class GitWorkflowService {
         const done = refOnly
           ? await this.branchEditConfirmed(repository, row, operation.action as 'create' | 'rename')
           : operation.action === 'push'
-            ? remoteHead === row.head
+            ? // Pushes journaled before named-branch pushes recorded only HEAD.
+              remoteHead === (row.source?.commit ?? row.head)
             : repository.branch === (operation.action === 'checkout' ? destination.branch : row.branch) &&
               repository.head === destination.commit;
         if (done) {

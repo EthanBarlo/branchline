@@ -64,6 +64,8 @@ export interface GitActionInput {
   newBranch?: string;
   /** Explicit first-publication remote for each repository-relative path. */
   publishRemotes?: Record<string, string>;
+  /** Push only: repository-relative paths to leave out. */
+  skipRepositories?: string[];
   /** Explicit permission to delete unmerged local branches. */
   force?: boolean;
   /** Also delete the local branch's remote counterpart. */
@@ -87,6 +89,10 @@ export interface GitActionRow {
   incoming?: number;
   /** Push only: local commits missing from a destination with incoming history. */
   outgoing?: number;
+  /** Push only: remotes to choose from when the branch has no push destination yet. */
+  remoteChoices?: string[];
+  /** Push only: left out at the user's request. */
+  skipped?: boolean;
   noop: boolean;
   blockers: string[];
   warnings: string[];

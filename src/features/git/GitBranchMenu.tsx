@@ -182,8 +182,14 @@ export function GitBranchMenu({
         role="menuitem"
         type="button"
         {...stylex.props(styles.item)}
-        disabled={busy || !checkedOut}
-        title={reason || 'Fetch, check, then push every repository.'}
+        disabled={busy || !!branch.remote}
+        title={
+          busy
+            ? 'Wait for the current Git operation to finish.'
+            : branch.remote
+              ? 'Push requires a local branch.'
+              : 'Fetch, check, then push this branch from every repository that has it.'
+        }
         onClick={() => perform('push')}
       >
         <ArrowUp size={14} /> Push project
@@ -228,9 +234,7 @@ export function GitBranchMenu({
         {favourite ? 'Remove from favourites' : 'Add to favourites'}
       </button>
       {!checkedOut && (
-        <p {...stylex.props(styles.hint)}>
-          Pull and push require this branch checked out across the project.
-        </p>
+        <p {...stylex.props(styles.hint)}>Pull requires this branch checked out across the project.</p>
       )}
     </div>,
     document.body,

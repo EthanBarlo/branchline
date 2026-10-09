@@ -408,6 +408,26 @@ export class ReviewStore {
     });
   }
 
+  reorderProjects(ids: string[]): Promise<Project[]> {
+    let changed = false;
+    return this.mutate(
+      () => {
+        const byId = new Map(this.state.projects.map((project) => [project.id, project]));
+        if (
+          !Array.isArray(ids) ||
+          ids.length !== byId.size ||
+          new Set(ids).size !== ids.length ||
+          !ids.every((id) => typeof id === 'string' && byId.has(id))
+        )
+          throw new Error('The project list changed. Try reordering again.');
+        changed = ids.some((id, index) => this.state.projects[index].id !== id);
+        if (changed) this.state.projects = ids.map((id) => byId.get(id)!);
+        return this.state.projects;
+      },
+      () => changed,
+    );
+  }
+
   deleteProject(id: string): Promise<AppState> {
     return this.mutate(() => {
       if (!this.state.projects.some((project) => project.id === id))

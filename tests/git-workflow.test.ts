@@ -355,6 +355,92 @@ test('project push publishes child commits before referenced parent commits', as
   assert.equal(git(remote, 'rev-parse', 'main'), parentHead);
 });
 
+test('a named branch pushes without being checked out or having new commits', async () => {
+  const { local, child, remote, service } = await withChild();
+  const childRemote = git(child, 'remote', 'get-url', 'origin');
+  const branch = { name: 'feature', kind: 'local' as const };
+  const publishRemotes = { '.': 'origin', child: 'origin' };
+  const preview = await service.preview('project', { action: 'push', branch, publishRemotes });
+  assert.equal(preview.ready, true, JSON.stringify(preview.rows));
+  assert.deepEqual(
+    preview.rows.map((row) => [row.source?.branch, row.destination?.commit, row.noop, row.remoteChoices]),
+    [
+      ['feature', null, false, ['origin']],
+      ['feature', null, false, ['origin']],
+    ],
+  );
+  const operation = await service.run('project', preview.id);
+  assert.equal(operation.state, 'completed', JSON.stringify(operation));
+  assert.equal(git(local, 'symbolic-ref', '--short', 'HEAD'), 'main');
+  assert.equal(git(remote, 'rev-parse', 'feature'), git(local, 'rev-parse', 'feature'));
+  assert.equal(git(childRemote, 'rev-parse', 'feature'), git(child, 'rev-parse', 'feature'));
+  // Tracking is set on the pushed branch, not the checked-out one.
+  for (const repo of [local, child]) assert.equal(git(repo, 'config', 'branch.feature.merge'), 'refs/heads/feature');
+  // A repository without the branch has nothing to push.
+  git(local, 'branch', 'root-only');
+  const partial = await service.preview('project', { action: 'push', branch: { name: 'root-only' }, publishRemotes });
+  assert.equal(partial.ready, true, JSON.stringify(partial.rows));
+  assert.deepEqual(
+    partial.rows.map((row) => [row.noop, row.source?.commit ?? null]),
+    [
+      [false, git(local, 'rev-parse', 'root-only')],
+      [true, null],
+    ],
+  );
+  const remoteBranch = await service.preview('project', {
+    action: 'push',
+    branch: { name: 'main', kind: 'remote', remote: 'origin' },
+  });
+  assert.match(remoteBranch.rows[0].blockers.join(' '), /local branch/);
+  await assert.rejects(
+    service.preview('project', { action: 'push', skipRepositories: 'child' as unknown as string[] }),
+    /valid repositories/,
+  );
+});
+
+test('push leaves out chosen repositories but still protects referenced child commits', async () => {
+  const { local, child, remote, service } = await withChild();
+  const childRemote = git(child, 'remote', 'get-url', 'origin');
+  const branch = { name: 'feature', kind: 'local' as const };
+  const publishRemotes = { '.': 'origin', child: 'origin' };
+  const preview = await service.preview('project', {
+    action: 'push',
+    branch,
+    publishRemotes,
+    skipRepositories: ['child'],
+  });
+  assert.equal(preview.ready, true, JSON.stringify(preview.rows));
+  assert.deepEqual(
+    preview.rows.map((row) => [row.skipped ?? false, row.noop]),
+    [
+      [false, false],
+      [true, true],
+    ],
+  );
+  const operation = await service.run('project', preview.id);
+  assert.equal(operation.state, 'completed', JSON.stringify(operation));
+  assert.equal(operation.rows[1].message, 'Skipped.');
+  assert.equal(git(remote, 'rev-parse', 'feature'), git(local, 'rev-parse', 'feature'));
+  assert.throws(() => git(childRemote, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature'));
+  // A parent pointing at an unpublished child commit needs that child pushed too.
+  git(child, 'switch', '-q', 'feature');
+  await commit(child, 'child.txt', 'child feature\n');
+  git(local, 'switch', '-q', 'feature');
+  git(local, 'add', 'child');
+  git(local, 'commit', '-qm', 'Point at child feature');
+  const blocked = await service.preview('project', {
+    action: 'push',
+    branch,
+    publishRemotes,
+    skipRepositories: ['child'],
+  });
+  assert.equal(blocked.ready, false);
+  assert.match(blocked.rows[0].blockers.join(' '), /Publish the referenced commit in child/);
+  assert.equal((await run(service, { action: 'push', branch, publishRemotes })).state, 'completed');
+  assert.equal(git(childRemote, 'rev-parse', 'feature'), git(child, 'rev-parse', 'HEAD'));
+  assert.equal(git(remote, 'rev-parse', 'feature'), git(local, 'rev-parse', 'HEAD'));
+});
+
 test('project pull fast-forwards parents and children without detached submodule checkouts', async () => {
   const { local, child, peer, service } = await withChild();
   const childSource = git(child, 'remote', 'get-url', 'origin');

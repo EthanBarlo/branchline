@@ -13,7 +13,16 @@ type ReviewDialogsOptions = {
   selectReview: (id: string | null) => Promise<void>;
 };
 export function useReviewDialogs({ workspace, data, selectReview }: ReviewDialogsOptions) {
-  const { setProjects, setReviews, reviews, setShowAddProject, setError, navigation } = workspace;
+  const {
+    setProjects,
+    setReviews,
+    reviews,
+    setShowAddProject,
+    setError,
+    navigation,
+    deleteProject,
+    setDeleteProject,
+  } = workspace;
   const { selectedProjectId, selectedReviewId, selectProject } = navigation;
   const { registerReview, registerReviews, markReviewsDeleted, getSelection } = data;
   const [showNewReview, setShowNewReview] = useState(false);
@@ -22,7 +31,6 @@ export function useReviewDialogs({ workspace, data, selectReview }: ReviewDialog
   const [showPullRequests, setShowPullRequests] = useState(false);
   const [cleanupProject, setCleanupProject] = useState<Project | null>(null);
   const [settingsProject, setSettingsProject] = useState<Project | null>(null);
-  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [deleteReview, setDeleteReview] = useState<Review | null>(null);
   const [removing, setRemoving] = useState(false);

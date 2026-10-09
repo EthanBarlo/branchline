@@ -56,6 +56,7 @@ export const reviewRequestMethods = {
   inspect: 'inspectRepo',
   'project-create': 'createProject',
   'project-update': 'updateProject',
+  'project-reorder': 'reorderProjects',
   'project-delete': 'deleteProject',
   create: 'createReview',
   delete: 'deleteReview',

@@ -16,6 +16,7 @@ function useWorkspaceState() {
   const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddProject, setShowAddProject] = useState(false);
+  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
   const [closingReviewId, setClosingReview] = useState<string | null>(null);
   const closingReviewRef = useRef<string | null>(null);
   const setClosingReviewId = useCallback((id: string | null) => {
@@ -84,6 +85,8 @@ function useWorkspaceState() {
     setError,
     showAddProject,
     setShowAddProject,
+    deleteProject,
+    setDeleteProject,
     closingReviewId,
     closingReviewRef,
     setClosingReviewId,
