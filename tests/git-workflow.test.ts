@@ -108,6 +108,7 @@ test('push previews count incoming and diverged commits and report progress', as
     { stage: 'fetching', done: 0, total: 1 },
     { stage: 'fetching', done: 1, total: 1 },
     { stage: 'checking', done: 0, total: 1 },
+    { stage: 'checking', done: 1, total: 1 },
   ]);
   await commit(local, 'local.txt', 'local\n');
   const diverged = await service.preview('project', { action: 'push' });
@@ -1534,4 +1535,76 @@ test('combined deletion preserves a local branch when the server rejects its rem
   assert.equal(result.rows[0].state, 'failed');
   assert.ok(git(local, 'rev-parse', 'feature'));
   assert.ok(git(remote, 'rev-parse', 'feature'));
+});
+
+test('push previews check each repository as soon as its own fetch lands', async () => {
+  const { local, child, service } = await withChild();
+  const [canonicalLocal, canonicalChild] = await Promise.all([realpath(local), realpath(child)]);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let checked!: () => void;
+  const childChecked = new Promise<void>(resolve => { checked = resolve; });
+  const driver = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = driver.command.bind(service);
+  driver.command = async (directory, args) => {
+    if (directory === canonicalLocal && args.includes('fetch')) await held;
+    // Only the push check reads the destination's mirror setting.
+    if (directory === canonicalChild && args.includes('remote.origin.mirror')) checked();
+    return command(directory, args);
+  };
+  const preview = service.preview('project', { action: 'push' });
+  try { await bounded(childChecked); }
+  finally { release(); }
+  assert.equal((await preview).ready, true);
+});
+
+test('a parent push does not wait for submodules with nothing to publish', async () => {
+  const { local, child, remote, service } = await withChild();
+  const head = await commit(local, 'parent.txt', 'parent outgoing\n');
+  const canonicalChild = await realpath(child);
+  const preview = await service.preview('project', { action: 'push' });
+  assert.equal(preview.ready, true, JSON.stringify(preview.rows));
+  assert.equal(preview.rows.find(row => row.path === 'child')?.noop, true);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let running = false;
+  const driver = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = driver.command.bind(service);
+  driver.command = async (directory, args) => {
+    // Hold the child's own recheck, after the whole-project check has passed.
+    if (running && directory === canonicalChild && args.includes('ls-remote')) await held;
+    return command(directory, args);
+  };
+  let pushed!: () => void;
+  const parentPushed = new Promise<void>(resolve => { pushed = resolve; });
+  service.subscribe(change => {
+    if (change.operation?.state === 'running') running = true;
+    if (change.operation?.rows.find(row => row.path === '.')?.state === 'done') pushed();
+  });
+  const operation = service.run('project', preview.id);
+  try { await bounded(parentPushed); }
+  finally { release(); }
+  assert.equal((await operation).state, 'completed');
+  assert.equal(git(remote, 'rev-parse', 'main'), head);
+});
+
+test('a push leases its checked destination, so a remote that moves before the push is kept', async () => {
+  const { local, remote, service } = await fixture();
+  const intermediate = await commit(local, 'first.txt', 'first\n');
+  await commit(local, 'second.txt', 'second\n');
+  const preview = await service.preview('project', { action: 'push' });
+  assert.equal(preview.ready, true);
+  const canonicalLocal = await realpath(local);
+  const driver = service as unknown as { command(directory: string, args: string[]): Promise<string> };
+  const command = driver.command.bind(service);
+  driver.command = async (directory, args) => {
+    // Another client fast-forwards the remote between the final check and the push.
+    if (directory === canonicalLocal && args.includes('push'))
+      git(local, 'push', '-q', remote, `${intermediate}:refs/heads/main`);
+    return command(directory, args);
+  };
+  const operation = await service.run('project', preview.id);
+  assert.equal(operation.state, 'failed');
+  assert.match(operation.rows[0].message ?? '', /remote changed during the operation/);
+  assert.equal(git(remote, 'rev-parse', 'main'), intermediate);
 });
