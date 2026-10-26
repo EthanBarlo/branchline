@@ -1,6 +1,7 @@
 import { clipboard, dialog, nativeTheme } from 'electron';
 import { inspectRepo } from '../git/repository';
 import type { ReviewStore } from '../reviews/review-store';
+import type { ReviewService } from '../reviews/review-service';
 import type { ProjectService } from '../projects/project-service';
 import type { IntegrationService } from '../integrations/integration-service';
 import type { ReviewWindow } from '../application/review-window';
@@ -10,12 +11,13 @@ interface WorkspaceHandlers {
   store: ReviewStore;
   projects: ProjectService;
   integrations: IntegrationService;
+  reviews: ReviewService;
   window: ReviewWindow;
 }
 
 export function registerWorkspaceHandlers(
   handle: ReviewHandlerRegistrar,
-  { store, projects, integrations, window }: WorkspaceHandlers,
+  { store, projects, integrations, reviews, window }: WorkspaceHandlers,
 ): void {
   handle('state', () => store.getState());
   handle('settings-update', async (changes) => {
@@ -43,6 +45,7 @@ export function registerWorkspaceHandlers(
   handle('create', (input) => projects.createReview(input));
   handle('delete', (id) => integrations.deleteReview(id));
   handle('refresh', (id) => integrations.refreshReview(id));
+  handle('cached', (id) => reviews.cachedReview(id));
   handle('current-target', (projectId, target) => integrations.setCurrentTarget(projectId, target));
   handle('approve', (id, fileId, fingerprint, approved, contextKey) =>
     integrations.setApprovals(id, [{ fileId, fingerprint }], approved, contextKey),

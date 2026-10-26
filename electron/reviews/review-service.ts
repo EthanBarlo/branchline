@@ -21,6 +21,9 @@ export class ReviewService {
   private scans = new Map<string, Set<Promise<ReviewRefresh>>>();
   private scanSequences = new Map<string, number>();
   private completed = new Map<string, { generation: number; sequence: number; result: ReviewRefresh }>();
+  // Unlike `snapshots`, invalidation keeps these, so a revisit can show the last
+  // comparison while a fresh one runs. Mutations still validate against `snapshots`.
+  private lastShown = new Map<string, ReviewRefresh>();
 
   constructor(
     private store: ReviewStore,
@@ -165,6 +168,7 @@ export class ReviewService {
         this.snapshots.set(id, snapshot);
         const result = { review, snapshot, ...(inspection ? { inspection, requiresTarget: false } : {}) };
         this.completed.set(id, { generation, sequence, result });
+        this.lastShown.set(id, result);
         return result;
       });
       if (result) return result;
@@ -192,6 +196,14 @@ export class ReviewService {
     if (completed?.generation === generation && completed.sequence === (this.scanSequences.get(id) ?? 0)) {
       return { ...completed.result, review: this.store.getReview(id) };
     }
+  }
+
+  /** The last local comparison for the review's current context, without reading Git. */
+  cachedReview(id: string): ReviewRefresh | null {
+    const last = this.lastShown.get(id);
+    if (!last || this.deleting.has(id)) return null;
+    const review = this.store.getReview(id);
+    return reviewContextKey(review) === reviewContextKey(last.review) ? { ...last, review } : null;
   }
 
   async refreshReview(id: string): Promise<ReviewRefresh> {
@@ -325,6 +337,7 @@ export class ReviewService {
       const state = await this.store.deleteReview(id);
       this.snapshots.delete(id);
       this.completed.delete(id);
+      this.lastShown.delete(id);
       this.generations.delete(id);
       this.scanSequences.delete(id);
       return state;
@@ -348,6 +361,7 @@ export class ReviewService {
       ids.forEach((id) => {
         this.snapshots.delete(id);
         this.completed.delete(id);
+        this.lastShown.delete(id);
         this.generations.delete(id);
         this.scanSequences.delete(id);
       });

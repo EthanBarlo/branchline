@@ -5,6 +5,7 @@ import type { NewComment, Review, ReviewSnapshot, ReviewRefresh } from '../../sh
 import { currentReviewId, reviewContextKey } from '../../shared/types';
 import type {
   BranchReviewRepository,
+  CachedPullRequests,
   ClosedReviewCheck,
   ClosedReviewCleanupResult,
   ConnectionInput,
@@ -12,6 +13,7 @@ import type {
   IntegrationState,
   ProjectIntegration,
   PublishFeedbackOptions,
+  PullRequest,
   PullRequestFilter,
   PullRequestRef,
   ReanchorInput,
@@ -44,6 +46,16 @@ export interface IntegrationDependencies {
   inspect?: typeof inspectRepo;
 }
 
+const inbox = (pullRequests: PullRequest[], filter: PullRequestFilter, accountId: string) =>
+  pullRequests.filter(
+    (pr) =>
+      filter === 'all' ||
+      (filter === 'author'
+        ? pr.author.id === accountId
+        : pr.reviewers.some((r) => r.id === accountId) &&
+          !pr.participants.some((p) => p.id === accountId && p.approved)),
+  );
+
 export class IntegrationService {
   private pending = new Map<string, Promise<unknown>>();
   private publishing = new Set<string>();
@@ -51,6 +63,16 @@ export class IntegrationService {
   private connectionChange: Promise<unknown> | null = null;
   private snapshots = new Map<string, ReviewSnapshot>();
   private clients = new Map<string, BitbucketClient>();
+  private pullRequestLists = new Map<
+    string,
+    {
+      connectionId: string;
+      accountId: string;
+      repositories: string;
+      pullRequests: PullRequest[];
+      checkedAt: string;
+    }
+  >();
   private remoteRefreshes = new Map<string, Promise<ReviewRefresh>>();
   // Keep project ownership when the review write succeeds but metadata cleanup fails.
   private closedReviewRemovals = new Map<string, { projectId: string; check: ClosedReviewCheck }>();
@@ -194,6 +216,7 @@ export class IntegrationService {
       return Promise.reject(
         new Error('Wait for the current integration operation before changing accounts.'),
       );
+    this.pullRequestLists.clear();
     const operation = Promise.resolve().then(fn);
     this.connectionChange = operation;
     const cleanup = () => {
@@ -279,20 +302,38 @@ export class IntegrationService {
       const settings = this.state.project(projectId);
       if (!settings.bitbucketConnectionId)
         throw new Error('Connect Bitbucket in project integrations first.');
-      const client = this.client(settings.bitbucketConnectionId);
-      const accountId = this.connections.credentials(settings.bitbucketConnectionId).info.accountId;
-      const result = (
+      const connectionId = settings.bitbucketConnectionId;
+      const client = this.client(connectionId);
+      const accountId = this.connections.credentials(connectionId).info.accountId;
+      const pullRequests = (
         await mapConcurrent(settings.repositories, 4, (repository) => client.listPullRequests(repository))
       ).flat();
-      return result.filter(
-        (pr) =>
-          filter === 'all' ||
-          (filter === 'author'
-            ? pr.author.id === accountId
-            : pr.reviewers.some((r) => r.id === accountId) &&
-              !pr.participants.some((p) => p.id === accountId && p.approved)),
-      );
+      this.pullRequestLists.set(projectId, {
+        connectionId,
+        accountId,
+        repositories: JSON.stringify(settings.repositories),
+        pullRequests,
+        checkedAt: new Date().toISOString(),
+      });
+      return inbox(pullRequests, filter, accountId);
     });
+  }
+  /** The last list read with the project's current settings, shown while a refresh runs. */
+  getCachedPullRequests(projectId: string, filter: PullRequestFilter): CachedPullRequests | null {
+    this.reviews.getProject(projectId);
+    if (!['all', 'reviewer', 'author'].includes(filter)) throw new Error('Choose a PR filter.');
+    const settings = this.state.project(projectId);
+    const cached = this.pullRequestLists.get(projectId);
+    if (
+      !cached ||
+      cached.connectionId !== settings.bitbucketConnectionId ||
+      cached.repositories !== JSON.stringify(settings.repositories)
+    )
+      return null;
+    return {
+      pullRequests: inbox(cached.pullRequests, filter, cached.accountId),
+      checkedAt: cached.checkedAt,
+    };
   }
   openPullRequestReview(projectId: string, refs: PullRequestRef[]): Promise<Review> {
     return this.serial(`project:${projectId}`, async () => {
@@ -315,7 +356,7 @@ export class IntegrationService {
         return { ref, repo };
       });
       const prs = await mapConcurrent(selected, 4, async ({ ref, repo }) => {
-        const pr = await client.getPullRequest(repo, ref.prId);
+        const pr = await client.getPullRequest(repo, ref.prId, { mergeDetails: false });
         if (
           pr.id !== ref.prId ||
           pr.repository.relativePath !== repo.relativePath ||
@@ -1004,6 +1045,7 @@ export class IntegrationService {
       throw new Error('Complete the project’s pending PR operations before removing it.');
     const result = await this.reviewService.deleteProject(id);
     await this.state.removeProject(id, reviewIds);
+    this.pullRequestLists.delete(id);
     reviewIds.forEach((id) => this.forgetReview(id));
     return result;
   }

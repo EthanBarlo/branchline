@@ -106,6 +106,7 @@ function fixtureBridge() {
     getUpdateState: async () => ({ revision: 0, currentVersion: '0.10.0', phase: 'disabled', disabledReason: 'Updates disabled in fixture.' }),
     getState: async () => clone(state),
     updateSettings: async changes => { state.settings = { ...state.settings, ...changes }; return clone(state.settings); },
+    cachedReview: async () => null,
     refreshReview: async id => { calls.refreshes.push(id);
       const automatic = automaticScenarios.get(id);
       if (automatic) {
@@ -138,6 +139,7 @@ function fixtureBridge() {
     disconnectConnection: async id => { integrations.connections = integrations.connections.map(item => item.id === id ? { ...item, connected: false } : item); return clone(integrations); },
     configureProjectIntegration: async (id, value) => { integrations.projects[id] = clone(value); return clone(value); },
     discoverRepositories: async () => clone(mappings),
+    getCachedPullRequests: async () => null,
     listPullRequests: async (_, filter) => { calls.filters.push(filter); return clone(filter === 'author' ? [prs[2]] : filter === 'reviewer' ? prs.slice(0, 2) : prs); },
     openPullRequestReview: async (_, refs) => { calls.opens.push(refs); state.reviews = [local, review, ...cleanupReviews]; return clone(review); },
     getRemoteReview: async id => {
@@ -480,6 +482,7 @@ try {
   const centralLoading = page.getByRole('region', { name: 'Repository loading progress', exact: true });
   await centralLoading.getByRole('listitem', { name: 'platform loading progress', exact: true }).waitFor();
   assert.equal(await centralLoading.locator('.spin').count(), 5, 'Repository loading is visible in the empty review area.');
+  assert.ok(await centralLoading.locator('.spin').first().evaluate(icon => getComputedStyle(icon).animationName !== 'none'), 'Repository loading spinners animate.');
   assert.equal(await page.getByRole('button', { name: 'Publish feedback', exact: true }).isDisabled(), true);
   assert.equal(await page.getByRole('button', { name: 'Approve and merge', exact: true }).isDisabled(), true);
   await page.screenshot({ path: 'artifacts/integration-loading-repositories.png', animations: 'disabled' });
@@ -524,6 +527,7 @@ try {
   panel = await dialog(page, 'Approve and merge');
   await panel.getByText('Checking repositories…', { exact: true }).waitFor();
   assert.equal(await panel.locator('.merge-repository-icon .spin').count(), 5, 'Every repository has its own preflight spinner.');
+  assert.ok(await panel.locator('.merge-repository-icon').locator('.spin').first().evaluate(icon => getComputedStyle(icon).animationName !== 'none'), 'Merge preflight spinners animate.');
   assert.equal(await panel.locator('.integration-loading').count(), 0, 'Merge checks do not add a separate generic spinner above the repositories.');
   await page.screenshot({ path: 'artifacts/integration-merge-parallel-checks.png', animations: 'disabled' });
   for (const checkState of ['ready', 'queued', 'checking']) {

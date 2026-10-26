@@ -68,7 +68,7 @@ const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
 test('normal close ignores unfinished history, fetches, scans, previews and remote reads', async () => {
   const names = ['git-history', 'git-project-history', 'git-status', 'git-fetch', 'git-preview',
-    'refresh', 'inspect', 'connection-test', 'integrations-discover', 'pullrequests-list', 'jira-issue',
+    'refresh', 'inspect', 'connection-test', 'integrations-discover', 'pullrequests-list', 'pullrequests-cached', 'jira-issue',
     'jira-ticket-suggestions', 'feedback-preview', 'merge-preview', 'closed-review-check'] as const;
   for (const name of names) {
     const f = fixture();

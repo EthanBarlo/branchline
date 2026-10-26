@@ -33,7 +33,7 @@ export interface MergePollingOptions {
 }
 export interface BranchMergePreparation {
   preflight(id: string, options?: { repositoryPaths?: string[] }): Promise<string[]>;
-  ensurePullRequests(id: string, repositoryPaths: string[]): Promise<void>;
+  ensurePullRequests(id: string, repositoryPaths: string[], options?: { checked?: boolean }): Promise<void>;
 }
 class MergePollDeadline extends Error {}
 
@@ -614,10 +614,15 @@ export class MergeService {
       // Reconciliation is read-only. Preserve uncertainty on disk while it is
       // in flight, so a second crash cannot turn it into a new deletion attempt.
       await save(uncertain ? 'unknown' : 'checking');
-      // A private repository can return 404 when access is revoked. Verify the
-      // repository first so that response cannot masquerade as a deleted branch.
-      const repository = await client.getRepository(row.repository);
-      const source = await client.getBranch(row.repository, row.sourceBranch);
+      // A private repository can return 404 when access is revoked. A rejected
+      // repository read fails the whole batch, so that response cannot masquerade
+      // as a deleted branch.
+      const [repository, source, open, target] = await Promise.all([
+        client.getRepository(row.repository),
+        client.getBranch(row.repository, row.sourceBranch),
+        client.findPullRequests(row.repository, row.sourceBranch, ['OPEN']),
+        client.getBranch(row.repository, row.targetBranch),
+      ]);
       if (!source) {
         await save(row.sourceHash ? 'deleted' : 'skipped');
         return null;
@@ -644,9 +649,7 @@ export class MergeService {
           'The source is the target or default branch, or the default branch could not be verified.',
         );
       }
-      const open = await client.findPullRequests(row.repository, row.sourceBranch, ['OPEN']);
       if (open.length) return await retain('The source branch still has an open pull request.');
-      const target = await client.getBranch(row.repository, row.targetBranch);
       if (!target) return await retain(`The target branch ${row.targetBranch} is missing.`);
       if ((await client.mergeBase(row.repository, source.hash, target.hash)) !== source.hash) {
         return await retain('The source branch has commits that are not merged into its target.');
@@ -697,9 +700,7 @@ export class MergeService {
         await save(rejected ? 'retained' : 'unknown', reason);
         return reason;
       }
-      const latest = await client.getBranch(row.repository, row.sourceBranch);
-      if (latest)
-        return await retain('The branch exists again after deletion. Check Bitbucket before continuing.');
+      // deleteBranch resolves only after its own post-push ls-remote saw the ref absent.
       await save('deleted');
     } catch (error) {
       const current = this.binding(id).repositories?.find(
@@ -732,7 +733,9 @@ export class MergeService {
           .repositories?.filter((row) => row.status === 'changes' && !row.prId)
           .map((row) => row.repository.relativePath) ?? [];
       if (missing.length) {
-        await this.branches.ensurePullRequests(id, missing);
+        // The preview above ran the group preflight with no write since, and creation
+        // re-reads each repository immediately before its own write.
+        await this.branches.ensurePullRequests(id, missing, { checked: true });
         if (this.binding(id).repositories?.some((row) => row.status === 'changes' && !row.prId))
           throw new Error(
             'Some reviewed repositories still need a pull request. Resume creation before approving or merging.',

@@ -43,5 +43,5 @@ export async function createServices(dataDirectory: string, secureStorage: Secur
     new PointerService(join(dataDirectory, 'pointer-workspaces')),
   );
   await integrations.removeCompletedReviews();
-  return { store, projects, integrations, integrationStore, gitWorkflow };
+  return { store, projects, integrations, integrationStore, gitWorkflow, reviews };
 }

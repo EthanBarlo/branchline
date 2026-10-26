@@ -118,7 +118,7 @@ export function MergeProgressView({
                 aria-hidden="true"
               >
                 <Icon
-                  className={`${status.tone === 'active' ? 'spin ' : ''}${stylex.props(status.tone === 'active' && spinStyle, status.tone === 'active' && styles.reducedMotionSpinner).className}`}
+                  className={`${status.tone === 'active' ? 'spin ' : ''}${stylex.props(status.tone === 'active' && spinStyle).className}`}
                   size={16}
                 />
               </span>
@@ -241,9 +241,6 @@ const styles = stylex.create({
     color: colors.warningText,
     borderColor: colors.warningBorder,
     backgroundColor: colors.warningSurface,
-  },
-  reducedMotionSpinner: {
-    animationName: { default: null, '@media (prefers-reduced-motion: reduce)': 'none' },
   },
   mergeDetails: { display: 'flex', flexDirection: 'column', gap: '5px', minWidth: '0' },
   mergeName: { display: 'flex', alignItems: 'center', gap: spacing.md, minWidth: '0' },

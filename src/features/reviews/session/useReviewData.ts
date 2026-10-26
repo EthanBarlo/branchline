@@ -192,6 +192,13 @@ export function useReviewData({
       const targetVersion = targetVersions.current[id] || 0;
       if (selectedIdRef.current === id) setRefreshing(true);
       try {
+        // Show the last local comparison at once instead of an empty view while Git is read again.
+        const known = latestReviews.current.find((item) => item.id === id);
+        if (known && !known.remote && !latestFiles.current[reviewViewKey(known)]) {
+          const cached = await window.reviewAPI.cachedReview(id);
+          if (cached && targetVersion === (targetVersions.current[id] || 0))
+            applyRefresh(id, cached, version);
+        }
         const result = await window.reviewAPI.refreshReview(id);
         if (targetVersion !== (targetVersions.current[id] || 0)) return;
         applyRefresh(id, result, version);

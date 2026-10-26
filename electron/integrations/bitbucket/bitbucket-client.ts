@@ -1,6 +1,7 @@
 import type { ConnectionCredentials, FetchImplementation } from '../connection-manager';
 import { ProviderError, ProviderHttp, readBoundedBody } from '../connection-manager';
 import { validRelativePath, validateRepositoryMappings } from '../repository-mapping';
+import { concurrencyLimit, mapConcurrent } from '../concurrency';
 import {
   recordIntegrationDiagnostic,
   type PullRequestField,
@@ -31,7 +32,8 @@ const validBranchName = (value: unknown): value is string =>
   !value.endsWith('.') &&
   !value.split('/').some((part) => !part || part.startsWith('.') || part.endsWith('.lock'));
 type PullRequestOperation = 'list' | 'detail' | 'merge' | 'normalization';
-type CommitResolutions = Map<string, Promise<unknown>>;
+/** Abbreviated commit lookups shared by the reads of one operation, never across operations. */
+export type CommitResolutions = Map<string, Promise<unknown>>;
 const object = (value: unknown): value is Record<string, any> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 const forkPullRequest = (value: any): boolean => {
@@ -92,6 +94,8 @@ export class BitbucketClient {
   private rawCache = new Map<string, RawFile>();
   private metadataCache = new Map<string, any>();
   private cacheBytes = 0;
+  // Every operation on this connection shares these slots, so overlapping repository loads stay bounded.
+  private slots = concurrencyLimit(20);
   constructor(credentials: ConnectionCredentials, fetchImpl: FetchImplementation = fetch) {
     if (credentials.info.kind !== 'bitbucket') throw new Error('Choose a Bitbucket connection.');
     this.accountId = credentials.info.accountId;
@@ -102,10 +106,10 @@ export class BitbucketClient {
     );
   }
   json<T = any>(path: string, init?: RequestInit): Promise<T> {
-    return this.http.json<T>(path, init);
+    return this.slots(() => this.http.json<T>(path, init));
   }
   request(path: string, init?: RequestInit): Promise<Response> {
-    return this.http.request(path, init);
+    return this.slots(() => this.http.request(path, init));
   }
   repositoryPath(mapping: RepositoryMapping): string {
     const [valid] = validateRepositoryMappings([mapping]);
@@ -349,11 +353,11 @@ export class BitbucketClient {
       });
       return result.hash;
     };
-    const sourceHash = await resolve('source.commit.hash', value.source.commit.hash);
-    const targetHash = await resolve('destination.commit.hash', value.destination.commit.hash);
-    const mergeHash = value.merge_commit
-      ? await resolve('merge_commit.hash', value.merge_commit.hash)
-      : undefined;
+    const [sourceHash, targetHash, mergeHash] = await Promise.all([
+      resolve('source.commit.hash', value.source.commit.hash),
+      resolve('destination.commit.hash', value.destination.commit.hash),
+      value.merge_commit ? resolve('merge_commit.hash', value.merge_commit.hash) : undefined,
+    ]);
     return this.normalizedPullRequest(
       mapping,
       {
@@ -370,10 +374,9 @@ export class BitbucketClient {
   async listPullRequests(mapping: RepositoryMapping): Promise<PullRequest[]> {
     const values = await this.pages(`${this.repositoryPath(mapping)}/pullrequests?state=OPEN&pagelen=50`);
     const resolutions: CommitResolutions = new Map();
-    const result: PullRequest[] = [];
-    for (const value of values)
-      result.push(await this.responsePullRequest(mapping, value, 'list', true, resolutions));
-    return result;
+    return mapConcurrent(values, 4, (value) =>
+      this.responsePullRequest(mapping, value, 'list', true, resolutions),
+    );
   }
   private async capturedCommit(mapping: RepositoryMapping, value: unknown): Promise<string> {
     if (validCommitHash(value)) return value;
@@ -456,6 +459,7 @@ export class BitbucketClient {
     mapping: RepositoryMapping,
     sourceBranch: string,
     states: string[] = ['OPEN'],
+    resolutions: CommitResolutions = new Map(),
   ): Promise<PullRequest[]> {
     if (
       !validBranchName(sourceBranch) ||
@@ -469,7 +473,6 @@ export class BitbucketClient {
     });
     for (const state of new Set(states)) query.append('state', state);
     const values = await this.pages(`${this.repositoryPath(mapping)}/pullrequests?${query}`);
-    const resolutions: CommitResolutions = new Map();
     const result: PullRequest[] = [];
     for (const value of values) {
       let pr = await this.responsePullRequest(mapping, value, 'list', true, resolutions);
@@ -480,7 +483,7 @@ export class BitbucketClient {
       if (pr.sourceBranch !== sourceBranch) throw mismatch(pr);
       if (!states.includes(pr.state)) {
         // A filtered list can lag a merge. Confirm the exact PR before ignoring it.
-        const latest = await this.getPullRequest(mapping, pr.id);
+        const latest = await this.getPullRequest(mapping, pr.id, { resolutions });
         if (
           latest.id !== pr.id ||
           latest.sourceBranch !== sourceBranch ||
@@ -543,13 +546,21 @@ export class BitbucketClient {
       throw error;
     }
   }
-  async getPullRequest(mapping: RepositoryMapping, id: number): Promise<PullRequest> {
+  /** Without `mergeDetails`, skips the merge strategy and build status reads that only merging uses. */
+  async getPullRequest(
+    mapping: RepositoryMapping,
+    id: number,
+    { resolutions, mergeDetails = true }: { resolutions?: CommitResolutions; mergeDetails?: boolean } = {},
+  ): Promise<PullRequest> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error('The pull request ID is invalid.');
     const pr = await this.responsePullRequest(
       mapping,
       await this.json(`${this.repositoryPath(mapping)}/pullrequests/${id}`),
       'detail',
+      false,
+      resolutions,
     );
+    if (!mergeDetails) return pr;
     if (!pr.mergeStrategies.length) {
       try {
         const branch = await this.json(

@@ -528,42 +528,44 @@ test('branch metadata survives restart; interrupted writes become unknown and in
   await assert.rejects(new IntegrationStore(f.file).load(), /invalid/);
 });
 
-test('discovery streams independent repositories while a slow pipeline waits, with bounded workers and stable membership', { timeout: 10000 }, async t => {
+test('discovery inspects four repositories at a time and never holds one behind another repository download', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   const extras = Array.from({ length: 3 }, (_, index): RepositoryMapping => ({ relativePath: `extra${index}`, workspace: 'team', repoSlug: `extra${index}` }));
   const mappings = [root, child, empty, absent, ...extras];
   await f.state.setProject(f.project.id, { ...f.state.project(f.project.id), repositories: mappings });
   for (const repository of extras) f.refs.set(`${repository.relativePath}:target`, hash('b'));
   const service = new BranchReviewService(f.reviews, f.state, () => f.client, () => undefined);
-  const rootStarted = deferred(), rootRelease = deferred(), fourPipelines = deferred(), pipelineRelease = deferred();
+  const siblingsRelease = deferred(), rootRelease = deferred(), pipelineRelease = deferred();
   const getRepository = f.client.getRepository.bind(f.client);
+  let inspecting = 0;
   f.client.getRepository = async repository => {
-    if (repository.relativePath === '.') { rootStarted.resolve(); await rootRelease.promise; }
+    inspecting++;
+    await (repository.relativePath === '.' ? rootRelease : siblingsRelease).promise;
     return getRepository(repository);
   };
   const checked: string[] = [], ready: string[] = [];
   let started = false;
+  const until = async (done: () => boolean) => { while (!done()) await new Promise(resolve => setImmediate(resolve)); };
   const task = service.discover(f.review.id, {
     onStart: async repositories => { assert.deepEqual(repositories, mappings); started = true; },
     onChecking: async repository => { assert.ok(started); checked.push(repository.relativePath); },
-    onRepository: async row => {
-      ready.push(row.repository.relativePath);
-      if (ready.length === 4) fourPipelines.resolve();
-      await pipelineRelease.promise;
-    },
+    onRepository: async row => { ready.push(row.repository.relativePath); await pipelineRelease.promise; },
   });
   try {
-    await rootStarted.promise;
-    // A repository held at discovery must not hold up content callbacks for its siblings.
-    while (ready.length < 3) await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(new Set(ready), new Set(['child', 'empty', 'absent']));
-    assert.equal(checked.length, 4, 'completed callbacks remain part of the bounded pipeline');
-    rootRelease.resolve(); await fourPipelines.promise;
-    assert.equal(checked.length, 4, 'a fifth repository waits for a content pipeline to finish');
-  } finally { rootRelease.resolve(); pipelineRelease.resolve(); }
+    await until(() => inspecting === 4);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(checked, mappings.slice(0, 4).map(row => row.relativePath), 'four inspections run at a time');
+    siblingsRelease.resolve();
+    // Held downloads and a held inspection must not keep the remaining repositories waiting.
+    await until(() => ready.length === 6);
+    assert.equal(checked.length, 7);
+    assert.ok(!ready.includes('.'));
+    rootRelease.resolve();
+    await until(() => ready.length === 7);
+  } finally { siblingsRelease.resolve(); rootRelease.resolve(); pipelineRelease.resolve(); }
   const result = await task;
   assert.deepEqual(result.repositories.map(row => row.repository.relativePath), mappings.map(row => row.relativePath));
-  assert.equal(ready.length, 7); assert.equal(result.pullRequests.length, 1);
+  assert.equal(result.pullRequests.length, 1);
 });
 
 test('parallel preflight publishes per-repository progress, reports failures and only rechecks a selected subset', { timeout: 10000 }, async t => {

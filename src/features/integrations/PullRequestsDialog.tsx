@@ -58,6 +58,17 @@ export function PullRequestsDialog({
     inFlight.current = false;
     setItems([]);
     void load();
+    const generation = request.current;
+    void window.reviewAPI.getCachedPullRequests(project.id, filter).then(
+      (cached) => {
+        // The last list fills in only until the refresh above returns.
+        if (cached && inFlight.current && generation === request.current) {
+          setItems(cached.pullRequests);
+          setCheckedAt(new Date(cached.checkedAt).toLocaleTimeString());
+        }
+      },
+      () => undefined,
+    );
     const visibleRefresh = () => {
       if (!document.hidden) void load();
     };
@@ -70,7 +81,7 @@ export function PullRequestsDialog({
       window.removeEventListener('focus', visibleRefresh);
       document.removeEventListener('visibilitychange', visibleRefresh);
     };
-  }, [load]);
+  }, [load, project.id, filter]);
   const groups = useMemo(() => {
     const result = new Map<string, PullRequest[]>();
     for (const item of items) {

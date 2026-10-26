@@ -45,6 +45,7 @@ const disposableCloseRequests = new Set<ReviewRequestName>([
   'connection-test',
   'integrations-discover',
   'pullrequests-list',
+  'pullrequests-cached',
   'pullrequests-state',
   'jira-issue',
   'jira-ticket-suggestions',
@@ -59,6 +60,7 @@ const disposableCloseRequests = new Set<ReviewRequestName>([
   'choose-repo',
   'inspect',
   'refresh',
+  'cached',
   'copy',
 ]);
 
