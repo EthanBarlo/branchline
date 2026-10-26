@@ -103,6 +103,10 @@ export interface BranchReviewRepository {
 }
 export const branchReviewKey = (repositoryPath: string): string => `${repositoryPath}#branch`;
 export type PullRequestFilter = 'all' | 'reviewer' | 'author';
+export interface CachedPullRequests {
+  pullRequests: PullRequest[];
+  checkedAt: string;
+}
 export interface JiraBrowserBounds {
   x: number;
   y: number;
@@ -348,6 +352,7 @@ export interface IntegrationAPI {
   configureProjectIntegration(projectId: string, input: ProjectIntegration): Promise<ProjectIntegration>;
   discoverRepositories(projectId: string): Promise<RepositoryMapping[]>;
   listPullRequests(projectId: string, filter: PullRequestFilter): Promise<PullRequest[]>;
+  getCachedPullRequests(projectId: string, filter: PullRequestFilter): Promise<CachedPullRequests | null>;
   openPullRequestReview(projectId: string, refs: PullRequestRef[]): Promise<Review>;
   getRemoteReview(reviewId: string): Promise<RemoteReviewState | null>;
   onRemoteReviewChanged(callback: (event: RemoteReviewChanged) => void): () => void;

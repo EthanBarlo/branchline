@@ -14,6 +14,9 @@ import type {
 
 const TEXT_LIMIT = 1024 * 1024;
 const CACHE_LIMIT = 24 * TEXT_LIMIT;
+// A whole untracked folder this large is dependencies or build output, such as
+// node_modules left behind by another branch. Reading it would stall the review.
+const UNTRACKED_FOLDER_LIMIT = 1000;
 const blobCache = new Map<string, Buffer>();
 let cacheSize = 0;
 
@@ -324,6 +327,33 @@ async function readWorkingFile(
   }
 }
 
+// `folders` is Git's untracked listing with whole untracked folders collapsed
+// to one `name/` entry. Files inside an oversized folder are left out.
+function reviewableUntracked(files: Buffer, folders: Buffer, label: string, warnings: string[]): Set<string> {
+  const byFolder = new Map<string, string[]>();
+  for (const entry of folders.toString('utf8').split('\0')) if (entry.endsWith('/')) byFolder.set(entry, []);
+  const untracked = new Set<string>();
+  let folder: string | undefined;
+  for (const file of files.toString('utf8').split('\0')) {
+    if (!file) continue;
+    if (!folder || !file.startsWith(folder)) {
+      folder = undefined;
+      for (let slash = file.indexOf('/'); slash !== -1 && !folder; slash = file.indexOf('/', slash + 1))
+        if (byFolder.has(file.slice(0, slash + 1))) folder = file.slice(0, slash + 1);
+    }
+    if (folder) byFolder.get(folder)!.push(file);
+    else untracked.add(file);
+  }
+  for (const [name, contents] of byFolder) {
+    if (contents.length <= UNTRACKED_FOLDER_LIMIT) for (const file of contents) untracked.add(file);
+    else
+      warnings.push(
+        `${label}: untracked folder “${name}” has ${contents.length.toLocaleString('en-GB')} files, so it was left out. Add it to .gitignore, or stage the files you want to review.`,
+      );
+  }
+  return untracked;
+}
+
 function asText(content: Buffer | null | undefined): string | null {
   if (!content || content.subarray(0, 8000).includes(0)) return null;
   try {
@@ -414,13 +444,16 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
         ...(includeWorking ? [] : [feature.oid]),
         '--',
       ];
-      const [raw, statsOutput, untrackedOutput, baseTreeOutput, indexOutput] = await Promise.all([
-        git(repo, ['diff', '--raw', ...diffArgs]),
-        git(repo, ['diff', '--numstat', ...diffArgs]),
-        includeWorking ? git(repo, ['ls-files', '--others', '--exclude-standard', '-z']) : Buffer.alloc(0),
-        git(repo, ['ls-tree', '-rz', '--full-tree', mergeBase]),
-        includeWorking ? git(repo, ['ls-files', '--stage', '-z']) : Buffer.alloc(0),
-      ]);
+      const untrackedArgs = ['ls-files', '--others', '--exclude-standard', '-z'];
+      const [raw, statsOutput, untrackedOutput, untrackedFolders, baseTreeOutput, indexOutput] =
+        await Promise.all([
+          git(repo, ['diff', '--raw', ...diffArgs]),
+          git(repo, ['diff', '--numstat', ...diffArgs]),
+          includeWorking ? git(repo, untrackedArgs) : Buffer.alloc(0),
+          includeWorking ? git(repo, [...untrackedArgs, '--directory']) : Buffer.alloc(0),
+          git(repo, ['ls-tree', '-rz', '--full-tree', mergeBase]),
+          includeWorking ? git(repo, ['ls-files', '--stage', '-z']) : Buffer.alloc(0),
+        ]);
       if (
         indexOutput
           .toString()
@@ -441,12 +474,13 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
             `${label}: submodule “${file}” was removed from the feature branch; its gitlink is not a line-reviewable file.`,
           );
       const changes = new Map(parseRaw(raw).map((change) => [change.path, change]));
-      const untracked = new Set(untrackedOutput.toString('utf8').split('\0').filter(Boolean));
+      const untracked = reviewableUntracked(untrackedOutput, untrackedFolders, label, warnings);
+      const modules = [...modulePaths];
       for (const file of untracked) {
         const before = baseTree.get(file) ?? absent;
         if (
           before.mode === '160000' ||
-          [...modulePaths].some((module) => file === module || file.startsWith(`${module}/`))
+          modules.some((module) => file === module || file.startsWith(`${module}/`))
         )
           continue;
         const prior = changes.get(file);
@@ -540,7 +574,8 @@ export async function buildSnapshot(config: ReviewConfig): Promise<ReviewSnapsho
           );
         }
       }
-      files.push(...reviewed.filter((file): file is NonNullable<typeof file> => file !== null));
+      // Spreading a very large array into push() overflows the call stack.
+      for (const file of reviewed) if (file) files.push(file);
     } catch (error) {
       status.error = (error as Error).message;
       warnings.push(`${label}: ${status.error}`);

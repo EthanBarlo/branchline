@@ -93,6 +93,7 @@ export function registerIntegrationHandlers(
   handle('integrations-project', (id, input) => integrations.configureProjectIntegration(id, input));
   handle('integrations-discover', (id) => integrations.discoverRepositories(id));
   handle('pullrequests-list', (id, filter) => integrations.listPullRequests(id, filter));
+  handle('pullrequests-cached', (id, filter) => integrations.getCachedPullRequests(id, filter));
   handle('pullrequests-open', (id, refs) => integrations.openPullRequestReview(id, refs));
   handle('pullrequests-state', (id) => integrations.getRemoteReview(id));
   handle('jira-issue', (id, key) => integrations.getJiraIssue(id, key));

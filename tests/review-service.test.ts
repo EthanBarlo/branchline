@@ -368,3 +368,23 @@ for (const removal of ['review', 'project'] as const) {
     await assert.rejects(() => f.service.refreshReview(saved.id), /no longer exists/);
   });
 }
+
+test('a revisit can show the last comparison for its context after invalidation without reading Git', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  assert.equal(f.service.cachedReview(f.id), null);
+  await f.service.setCurrentTarget(f.project.id, 'main');
+  f.service.invalidateLocalSnapshots();
+  const builds = f.live.builds.length;
+  const cached = f.service.cachedReview(f.id)!;
+  assert.equal(f.live.builds.length, builds, 'reading the cache must not build a snapshot');
+  assert.deepEqual(cached.snapshot.files.map(item => item.fingerprint), [file.fingerprint]);
+  assert.equal(reviewContextKey(cached.review), reviewContextKey(f.store.getReview(f.id)));
+  await assert.rejects(() => f.service.setApproval(f.id, file.id, file.fingerprint, true, reviewContextKey(cached.review)), /Open or refresh/, 'markers still need a validated snapshot');
+  await f.store.switchCurrentContext(f.project.id, 'feature/two', 'main');
+  assert.equal(f.service.cachedReview(f.id), null, 'another branch never shows this comparison');
+  f.live.branch = 'feature/two';
+  await f.service.refreshReview(f.id);
+  assert.equal(f.service.cachedReview(f.id)?.review.featureBranch, 'feature/two');
+  await f.service.deleteProject(f.project.id);
+  assert.equal(f.service.cachedReview(f.id), null);
+});

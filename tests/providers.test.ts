@@ -143,6 +143,24 @@ test('authenticated redirects and cross-origin pagination do not forward credent
   await assert.rejects(() => client.pages('/2.0/repositories'), /unsafe/);
 });
 
+test('one Bitbucket connection keeps at most twenty requests in flight across concurrent operations', async () => {
+  let active = 0, peak = 0;
+  const waiting: (() => void)[] = [];
+  const client = new BitbucketClient(credentials, async () => {
+    active++; peak = Math.max(peak, active);
+    await new Promise<void>(resolve => waiting.push(resolve));
+    active--;
+    return json({ full_name: 'team/repo', mainbranch: { name: 'main' } });
+  });
+  let done = 0;
+  const reads = Array.from({ length: 25 }, () => client.getRepository(mapping).then(() => { done++; }));
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  await settle();
+  assert.equal(active, 20);
+  while (done < reads.length) { waiting.splice(0).forEach(resolve => resolve()); await settle(); }
+  assert.equal(peak, 20);
+});
+
 test('Bitbucket merges retain source branches for group cleanup and handle asynchronous progress', async () => {
   const sent: any[] = [];
   const client = new BitbucketClient(credentials, async (input, init) => {
@@ -527,7 +545,7 @@ test('large files stay metadata-only and gitlinks avoid combined-tree file/direc
   assert.deepEqual(snapshot.repos[0].pointers, [{ path: 'new name.txt', oldHash: D, newHash: CHILD }]);
 });
 
-function branchSnapshotClient(options: { move?: string; missing?: string; missingTarget?: string; failed?: string; empty?: boolean; historical?: boolean; terminal?: string; changedClosedSource?: boolean } = {}) {
+function branchSnapshotClient(options: { empty?: boolean; terminal?: string } = {}) {
   const child: RepositoryMapping = { relativePath: 'packages/core', workspace: 'team', repoSlug: 'core' };
   const empty: RepositoryMapping = { relativePath: 'packages/empty', workspace: 'team', repoSlug: 'empty' };
   const missing: RepositoryMapping = { relativePath: 'packages/missing', workspace: 'team', repoSlug: 'missing' };
@@ -537,32 +555,18 @@ function branchSnapshotClient(options: { move?: string; missing?: string; missin
     assert.ok(!init?.method || init.method === 'GET', 'opening a review cannot create PRs, comments or branches');
     const url = new URL(String(input)); requests.push(url.href);
     const slug = url.pathname.split('/')[4];
-    if (url.pathname === `/2.0/repositories/team/${slug}`) return json({ full_name: `team/${slug}`, mainbranch: { name: 'main' } }, slug === options.failed ? 403 : 200);
-    if (url.pathname.endsWith('/pullrequests/3')) {
-      const pr = rawPR();
-      if (options.historical || options.terminal) { pr.state = options.terminal ?? 'MERGED'; pr.destination.commit.hash = 'f'.repeat(40); }
-      if (options.changedClosedSource) pr.source.commit.hash = CHILD;
-      return json(pr);
-    }
-    if (url.pathname.includes('/statuses')) return json({ values: [] });
-    if (url.pathname.includes('/refs/branches/')) {
-      const name = decodeURIComponent(url.pathname.split('/').at(-1)!);
-      if (slug === options.failed) return json({}, 403);
-      if (name === 'main' && slug === options.missingTarget) return json({}, 404);
-      if (name === branch && (slug === 'missing' && options.move !== 'missing' || slug === options.missing || slug === 'repo' && options.historical)) return json({}, 404);
-      return json({ name, target: { hash: name === 'main' ? D : slug === options.move ? CHILD : slug === 'empty' ? D : S } });
-    }
     if (url.pathname.includes('/merge-base/')) return json({ hash: slug === 'empty' ? D : M });
     if (url.pathname.includes('/diffstat/')) {
       if (slug === 'empty' || options.empty) return json({ values: [] });
       return json({ values: [{ status: 'renamed', lines_added: 1, lines_removed: 1, old: { path: 'old.txt' }, new: { path: 'new.txt' } }] });
     }
+    if (!url.pathname.includes('/src/')) return json({}, 404);
     const path = decodeURIComponent(url.pathname.split('/').at(-1)!);
     if (url.searchParams.get('format') === 'meta') return json({ type: 'commit_file', path, size: url.pathname.includes(M) ? 9 : 8, attributes: [] });
     return new Response(url.pathname.includes(M) ? 'original\n' : 'changed\n');
   });
   const pr = client.normalizePullRequest(mapping, rawPR());
-  if (options.historical || options.terminal) pr.state = options.terminal ?? 'MERGED';
+  if (options.terminal) pr.state = options.terminal;
   const rows: BranchReviewRepository[] = [
     { repository: mapping, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, prId: 3, status: 'pull-request' },
     { repository: child, sourceBranch: branch, targetBranch: 'main', sourceHash: S, targetHash: D, mergeBaseHash: M, status: 'changes' },
@@ -584,8 +588,7 @@ test('branch snapshots include repositories without PRs with exact rename paths 
   assert.ok(snapshot.repos.every(repo => !repo.error), 'a branch that never existed is not an incomplete download');
   assert.match(snapshot.warnings[0], /Source branch feature\/APP-123 does not exist/);
   assert.ok(requests.some(url => url.includes('/core/src/')));
-  assert.ok(requests.some(url => url.includes('/empty/refs/branches/feature%2FAPP-123')), 'empty branches are rechecked too');
-  assert.ok(!requests.some(url => /\/core\/pullrequests\//.test(url)));
+  assert.ok(!requests.some(url => /\/refs\/|\/pullrequests|\/merge-base\/|\/repositories\/team\/[^/]+$/.test(new URL(url).pathname)), 'rows captured by discovery in this load are not read again');
 });
 
 test('a single captured repository without a PR becomes reviewable independently of its starter PR', async () => {
@@ -600,24 +603,19 @@ test('a single captured repository without a PR becomes reviewable independently
   assert.equal(result.snapshot.files[0].newContent, 'changed\n');
 });
 
-test('missing branch snapshots allow both refs absent only after repository access and captured target checks', async () => {
-  const allowed = branchSnapshotClient({ missingTarget: 'missing' });
-  allowed.rows[3].targetHash = undefined;
-  const result = await buildRemoteRepositorySnapshot(allowed.client, 'branch-review', allowed.rows[3]);
+test('captured missing-branch rows report the absent source without contributing files', async () => {
+  const f = branchSnapshotClient();
+  const result = await buildRemoteRepositorySnapshot(f.client, 'branch-review', f.rows[3]);
   assert.equal(result.repositories![0].status, 'missing-branch');
   assert.equal(result.snapshot.repos[0].error, undefined);
-  assert.ok(allowed.requests.some(url => url.endsWith('/repositories/team/missing')));
-  for (const options of [{ failed: 'missing' }, { move: 'missing', missingTarget: 'missing' }, {}]) {
-    const f = branchSnapshotClient(options); f.rows[3].targetHash = undefined;
-    const blocked = await buildRemoteRepositorySnapshot(f.client, 'branch-review', f.rows[3]);
-    assert.equal(blocked.repositories![0].status, 'unavailable');
-    assert.ok(blocked.snapshot.repos[0].error);
-  }
+  assert.deepEqual(result.snapshot.files, []);
+  assert.match(result.snapshot.warnings[0], /Source branch feature\/APP-123 does not exist/);
+  assert.deepEqual(f.requests, [], 'discovery already checked repository access and both refs in this load');
 });
 
-test('terminal snapshots retain exact historical revisions after refs disappear and reject changed closed sources', async () => {
+test('terminal snapshots keep their captured revisions and reject a PR that disagrees with its captured row', async () => {
   for (const terminal of ['MERGED', 'DECLINED', 'SUPERSEDED']) {
-    const f = branchSnapshotClient({ terminal, missing: 'repo', missingTarget: 'repo' });
+    const f = branchSnapshotClient({ terminal });
     const result = await buildRemoteRepositorySnapshot(f.client, 'branch-review', f.rows[0], f.pr);
     assert.equal(result.snapshot.files.length, 1);
     assert.equal(result.snapshot.repos[0].error, undefined);
@@ -625,8 +623,8 @@ test('terminal snapshots retain exact historical revisions after refs disappear 
     assert.equal(result.snapshot.files[0].baseCommit, M);
     assert.ok(!f.requests.some(url => url.includes('/refs/branches/')));
   }
-  const changed = branchSnapshotClient({ historical: true, changedClosedSource: true });
-  const result = await buildRemoteRepositorySnapshot(changed.client, 'branch-review', changed.rows[0], changed.pr);
+  const changed = branchSnapshotClient({ terminal: 'MERGED' });
+  const result = await buildRemoteRepositorySnapshot(changed.client, 'branch-review', changed.rows[0], { ...changed.pr, sourceHash: CHILD });
   assert.equal(result.snapshot.files.length, 0);
   assert.match(result.snapshot.repos[0].error!, /pull request changed/);
 });
@@ -655,21 +653,8 @@ test('whole-group snapshot downloads run concurrently with four repository pipel
   assert.deepEqual(result.repositories!.map(row => row.repository.relativePath), input.map(row => row.repository.relativePath));
 });
 
-test('new pushes, newly appearing branches, disappeared branches and denied branch reads remain explicit blockers', async () => {
-  for (const options of [{ move: 'core' }, { move: 'empty' }, { move: 'missing' }, { missing: 'core' }, { failed: 'core' }]) {
-    const { client, pr, rows } = branchSnapshotClient(options);
-    const { snapshot, repositories } = await buildRemoteSnapshot(client, 'branch-review', [pr], rows);
-    const slug = options.move ?? options.missing ?? options.failed;
-    const row = repositories!.find(item => item.repository.repoSlug === slug)!;
-    assert.equal(row.status, 'unavailable');
-    assert.ok(row.error);
-    assert.ok(snapshot.repos.find(repo => repo.relativePath === row.repository.relativePath)?.error);
-    assert.ok(!snapshot.files.some(file => file.repoRelativePath === row.repository.relativePath), 'a stale repository never contributes reviewable file pairs');
-  }
-});
-
 test('merged PR snapshots retain captured history after deletion while no-file unique commits still require merging', async () => {
-  const historical = branchSnapshotClient({ historical: true });
+  const historical = branchSnapshotClient({ terminal: 'MERGED' });
   const result = await buildRemoteSnapshot(historical.client, 'branch-review', [historical.pr], historical.rows);
   assert.equal(result.snapshot.repos[0].error, undefined);
   assert.equal(result.pullRequests[0].targetHash, D, 'the merged destination tip must not replace the reviewed comparison');

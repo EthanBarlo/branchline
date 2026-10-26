@@ -179,6 +179,9 @@ async function buildRemoteSnapshotPart(
         status: 'pull-request',
       }));
   // Called for one repository; outer discovery or snapshot workers bound group concurrency.
+  // Captured rows come from discovery in the same load, so its repository, branch and PR reads
+  // are not repeated. Files are read by commit ID, and preflight rechecks every captured
+  // revision before anything is published, approved or merged.
   for (const row of comparisons) {
     const initial = input.find(
       (pr) => pr.repository.relativePath === row.repository.relativePath && pr.id === row.prId,
@@ -196,23 +199,12 @@ async function buildRemoteSnapshotPart(
       if (row.status === 'unavailable')
         throw new Error(row.error || 'This repository could not be compared. Refresh to retry.');
       if (row.status === 'missing-branch') {
-        await client.getRepository(row.repository);
-        const [source, target] = await Promise.all([
-          client.getBranch(row.repository, row.sourceBranch),
-          client.getBranch(row.repository, row.targetBranch),
-        ]);
-        if (source)
-          throw new Error('The source branch appeared while loading. Refresh to review its changes.');
-        if (target?.hash !== row.targetHash)
-          throw new Error('The target branch is unavailable or changed while loading. Refresh to retry.');
         warnings.push(
           `${relativePath}: Source branch ${row.sourceBranch} does not exist in this repository.`,
         );
         continue;
       }
       if (initial) {
-        // Discovery just captured this PR. Reuse those immutable identities and check live
-        // revisions once after downloading instead of fetching the same detail twice.
         const latest = repositories ? initial : await client.getPullRequest(initial.repository, initial.id);
         if (
           repositories &&
@@ -335,16 +327,14 @@ async function buildRemoteSnapshotPart(
           return { ...initialFile, unavailable: message(error) };
         }
       });
-      if (pr) {
+      if (pr && !repositories) {
         const after = await client.getPullRequest(pr.repository, pr.id);
-        const historical =
-          repositories && ['MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state) && after.state === pr.state;
         if (
           after.id !== pr.id ||
           after.sourceHash !== sourceHash ||
           after.sourceBranch !== pr.sourceBranch ||
           after.targetBranch !== pr.targetBranch ||
-          (!historical && after.targetHash !== targetHash)
+          after.targetHash !== targetHash
         )
           throw new Error('The pull request changed while loading. Refresh to review its latest revision.');
         pr = {
@@ -354,18 +344,6 @@ async function buildRemoteSnapshotPart(
           participants: after.participants,
           mergeCommit: after.mergeCommit,
         };
-      }
-      // Even repositories without changes participate in the final revision check.
-      // Closed PRs remain readable after their source and target branches are deleted.
-      if (repositories && (!pr || !['MERGED', 'DECLINED', 'SUPERSEDED'].includes(pr.state))) {
-        const [source, target] = await Promise.all([
-          client.getBranch(row.repository, row.sourceBranch),
-          client.getBranch(row.repository, row.targetBranch),
-        ]);
-        if (!source || !target || source.hash !== sourceHash || target.hash !== targetHash)
-          throw new Error(
-            'The branch changed or disappeared while loading. Refresh to review its latest revision.',
-          );
       }
       const completeFiles = reviewed.filter((file): file is ReviewFile => file !== null);
       if (completeFiles.some((file) => file.unavailable)) {

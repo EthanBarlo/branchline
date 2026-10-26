@@ -29,6 +29,7 @@ export interface ReviewAPI extends UpdateAPI, IntegrationAPI, GitWorkflowAPI {
   createReview(input: NewReview): Promise<Review>;
   deleteReview(id: string): Promise<AppState>;
   refreshReview(id: string): Promise<ReviewRefresh>;
+  cachedReview(id: string): Promise<ReviewRefresh | null>;
   setCurrentTarget(projectId: string, target: string): Promise<ReviewRefresh>;
   setApproval(
     reviewId: string,

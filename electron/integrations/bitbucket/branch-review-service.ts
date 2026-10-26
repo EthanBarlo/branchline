@@ -7,10 +7,10 @@ import type {
 } from '../../../shared/integrations';
 import { branchReviewKey } from '../../../shared/integrations';
 import type { ReviewSnapshot } from '../../../shared/types';
-import type { BitbucketClient } from './bitbucket-client';
+import type { BitbucketClient, CommitResolutions } from './bitbucket-client';
 import { IntegrationStore } from '../integration-store';
 import { ReviewStore } from '../../reviews/review-store';
-import { mapConcurrent } from '../concurrency';
+import { concurrencyLimit, mapConcurrent } from '../concurrency';
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const sameRepository = (a: RepositoryMapping, b: RepositoryMapping) =>
@@ -23,6 +23,14 @@ const rejected = (error: unknown) => {
   return !!status && status >= 400 && status < 500 && status !== 408;
 };
 const closedStates = ['MERGED', 'DECLINED', 'SUPERSEDED'];
+/** Settles a read without rejecting, so its failure surfaces only where its result is used. */
+const settled = <T>(read: Promise<T>): Promise<() => T> =>
+  read.then(
+    (value) => () => value,
+    (error: unknown) => () => {
+      throw error;
+    },
+  );
 
 export interface BranchDiscoveryOptions {
   onStart?: (repositories: RepositoryMapping[]) => Promise<void>;
@@ -101,8 +109,30 @@ export class BranchReviewService {
     const row: BranchReviewRepository = { ...initial, error: undefined };
     const { repository, sourceBranch, targetBranch } = row;
     if (sourceBranch === targetBranch) throw new Error('The source and target branches must be different.');
-    await client.getRepository(repository); // A repository/permission 404 must never look like an absent branch.
-    const pr = linked ? await client.getPullRequest(repository, linked.id) : undefined;
+    const resolutions: CommitResolutions = new Map();
+    const branches = Promise.all([
+      client.getBranch(repository, sourceBranch),
+      client.getBranch(repository, targetBranch),
+    ]);
+    const comparison = settled(
+      branches.then(([source, target]) =>
+        source && target ? client.mergeBase(repository, source.hash, target.hash) : undefined,
+      ),
+    );
+    // Independent reads start together but are used in order: a repository/permission 404
+    // must never look like an absent branch, and the merge base counts only for heads the PR agrees with.
+    const [checkRepository, readPullRequest, readCandidates, readBranches] = await Promise.all([
+      settled(client.getRepository(repository)),
+      settled(
+        linked
+          ? client.getPullRequest(repository, linked.id, { resolutions, mergeDetails: false })
+          : Promise.resolve(undefined),
+      ),
+      settled(client.findPullRequests(repository, sourceBranch, ['OPEN'], resolutions)),
+      settled(branches),
+    ]);
+    checkRepository();
+    const pr = readPullRequest();
     if (
       pr &&
       (!sameRepository(repository, pr.repository) ||
@@ -117,7 +147,7 @@ export class BranchReviewService {
       throw new Error(
         `PR #${pr.id} is ${pr.state.toLowerCase()}. Resolve it in Bitbucket before continuing.`,
       );
-    const candidates = await client.findPullRequests(repository, sourceBranch);
+    const candidates = readCandidates();
     if (candidates.some((value) => value.unsupportedReason || value.targetBranch !== targetBranch))
       throw new Error(
         'An open PR for this source branch has a different target or source repository. Resolve that PR in Bitbucket before continuing.',
@@ -127,10 +157,7 @@ export class BranchReviewService {
         'Multiple open PRs use this branch. Resolve the duplicate PRs in Bitbucket before continuing.',
       );
     const found = pr ?? candidates[0];
-    const [source, target] = await Promise.all([
-      client.getBranch(repository, sourceBranch),
-      client.getBranch(repository, targetBranch),
-    ]);
+    const [source, target] = readBranches();
     if (!found) {
       const expectedSource = source?.hash ?? row.sourceHash ?? row.creation?.sourceHash;
       const closed = (
@@ -152,7 +179,7 @@ export class BranchReviewService {
     if (!source) {
       if (found) {
         // Another reviewer may have merged and deleted it during these reads.
-        const latest = await client.getPullRequest(repository, found.id);
+        const latest = await client.getPullRequest(repository, found.id, { mergeDetails: false });
         if (closedStates.includes(latest.state)) return this.closedComparison(client, row, latest);
         throw new Error(
           `Source branch “${sourceBranch}” is missing for PR #${found.id}, which is still ${latest.state.toLowerCase()}. Restore the branch or resolve the PR in Bitbucket, then refresh this review. Branchline will not skip unmerged changes.`,
@@ -172,7 +199,7 @@ export class BranchReviewService {
       throw new Error(
         `Target branch “${targetBranch}” is missing. Configure or restore it before continuing.`,
       );
-    const mergeBaseHash = await client.mergeBase(repository, source.hash, target.hash);
+    const mergeBaseHash = (await comparison)()!;
     if (found && (found.sourceHash !== source.hash || found.targetHash !== target.hash))
       throw new Error('The branch changed while checking its PR. Refresh to load a consistent revision.');
     return {
@@ -200,7 +227,10 @@ export class BranchReviewService {
     const client = this.client(binding.connectionId);
     const mappings = this.mappings(id, binding);
     await options.onStart?.(mappings);
-    const results = await mapConcurrent(mappings, 4, async (repository) => {
+    // A repository's content loads as soon as it is inspected, never waiting for another
+    // repository's download. The client bounds the requests of every running pipeline.
+    const inspecting = concurrencyLimit(4);
+    const results = await mapConcurrent(mappings, Math.max(mappings.length, 1), async (repository) => {
       const previous = binding.repositories?.find(
         (row) => row.repository.relativePath === repository.relativePath,
       );
@@ -218,31 +248,32 @@ export class BranchReviewService {
         targetBranch: review.baseBranch,
         status: 'unavailable',
       };
-      await options.onChecking?.(repository);
-      let result: { row: BranchReviewRepository; pr?: PullRequest };
-      try {
-        if (
-          !settings.repositories.some((repo) => sameRepository(repo, repository)) ||
-          (previous && !sameRepository(previous.repository, repository)) ||
-          (linked && !sameRepository(linked.repository, repository))
-        )
-          throw new Error(
-            'The repository mapping changed. Restore this review’s mapping or start a new review.',
-          );
-        result = await this.inspect(client, initial, linked);
-      } catch (error) {
-        result = {
-          row: {
-            ...initial,
-            repository: previous?.repository ?? linked?.repository ?? repository,
-            status: 'unavailable',
-            error: message(error),
-          },
-          pr: linked,
-        };
-      }
-      // The hook can load and publish this diff while other repositories are still inspected.
-      // Await it so the entire discovery/content pipeline stays bounded to four repositories.
+      const result = await inspecting(
+        async (): Promise<{ row: BranchReviewRepository; pr?: PullRequest }> => {
+          await options.onChecking?.(repository);
+          try {
+            if (
+              !settings.repositories.some((repo) => sameRepository(repo, repository)) ||
+              (previous && !sameRepository(previous.repository, repository)) ||
+              (linked && !sameRepository(linked.repository, repository))
+            )
+              throw new Error(
+                'The repository mapping changed. Restore this review’s mapping or start a new review.',
+              );
+            return await this.inspect(client, initial, linked);
+          } catch (error) {
+            return {
+              row: {
+                ...initial,
+                repository: previous?.repository ?? linked?.repository ?? repository,
+                status: 'unavailable',
+                error: message(error),
+              },
+              pr: linked,
+            };
+          }
+        },
+      );
       await options.onRepository?.(result.row, result.pr);
       return result;
     });

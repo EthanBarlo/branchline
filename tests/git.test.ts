@@ -58,6 +58,20 @@ test('uses merge base to exclude target-only commits and includes final staged/u
   assert.equal(committed.files[0].newContent, 'feature commit\n');
 });
 
+test('leaves out oversized untracked folders while reviewing small untracked folders and loose files', async () => {
+  const dir = await repo();
+  git(dir, 'checkout', '-qb', 'feature');
+  await mkdir(path.join(dir, 'packages/ui/node_modules/dependency'), { recursive: true });
+  await Promise.all(Array.from({ length: 1001 }, (_, index) => writeFile(path.join(dir, 'packages/ui/node_modules/dependency', `${index}.js`), '')));
+  await mkdir(path.join(dir, 'src/new'), { recursive: true });
+  await writeFile(path.join(dir, 'src/new/feature.ts'), 'export {};\n');
+  await writeFile(path.join(dir, 'loose.txt'), 'loose\n');
+  const snapshot = await buildSnapshot(config(dir));
+  assert.deepEqual(snapshot.files.map(file => file.path).sort(), ['loose.txt', 'src/new/feature.ts']);
+  assert.equal(snapshot.warnings.length, 1);
+  assert.match(snapshot.warnings[0], /“packages\/” has 1,001 files/);
+});
+
 test('unrelated checked-out branch and detached HEAD never contribute working changes', async () => {
   const dir = await repo();
   git(dir, 'checkout', '-qb', 'feature');

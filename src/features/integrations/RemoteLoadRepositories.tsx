@@ -35,7 +35,7 @@ export function RemoteLoadRepositories({ repositories }: { repositories: RemoteR
             >
               <Icon
                 size={15}
-                className={`${status.tone === 'active' ? 'spin ' : ''}${stylex.props(status.tone === 'active' && spinStyle, status.tone === 'active' && styles.reducedMotionSpinner).className}`}
+                className={`${status.tone === 'active' ? 'spin ' : ''}${stylex.props(status.tone === 'active' && spinStyle).className}`}
                 aria-hidden="true"
               />
               <div {...stylex.props(styles.remoteLoadDetails)}>
@@ -103,9 +103,6 @@ const styles = stylex.create({
   },
   branchWarning: { color: colors.warningText },
   branchSuccess: { color: colors.successText },
-  reducedMotionSpinner: {
-    animationName: { default: null, '@media (prefers-reduced-motion: reduce)': 'none' },
-  },
   remoteLoadDetails: { minWidth: '0' },
   remoteLoadName: {
     display: 'block',
